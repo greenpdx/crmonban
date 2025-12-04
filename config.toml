@@ -1,0 +1,144 @@
+# crmonban Configuration File
+# nftables-based intrusion prevention system
+
+[general]
+# Path to SQLite database
+db_path = "/var/lib/crmonban/crmonban.db"
+
+# Path to PID file for daemon mode
+pid_file = "/var/run/crmonban.pid"
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+# Automatically gather intelligence when banning an IP
+auto_intel = true
+
+# Default ban duration in seconds (0 = permanent)
+default_ban_duration = 3600
+
+[nftables]
+# nftables table name
+table_name = "crmonban"
+
+# Chain name for input filtering
+chain_name = "input"
+
+# Set name for blocked IPv4 addresses
+set_v4 = "blocked_v4"
+
+# Set name for blocked IPv6 addresses
+set_v6 = "blocked_v6"
+
+# Chain priority (lower = earlier in chain)
+priority = -100
+
+[intel]
+# Enable GeoIP lookups (uses ip-api.com, free)
+geoip_enabled = true
+
+# Enable reverse DNS lookups
+rdns_enabled = true
+
+# Enable WHOIS lookups (uses RDAP)
+whois_enabled = true
+
+# Shodan API key (optional, get from shodan.io)
+# shodan_api_key = "your-api-key-here"
+
+# AbuseIPDB API key (optional, get from abuseipdb.com)
+# abuseipdb_api_key = "your-api-key-here"
+
+# Request timeout in seconds
+timeout_secs = 10
+
+# ============================================================================
+# Service Monitoring Configuration
+# ============================================================================
+# Each service defines:
+#   - enabled: whether to monitor this service
+#   - log_path: path to the log file
+#   - patterns: list of regex patterns (must have 'ip' named capture group)
+#   - max_failures: number of failures before ban
+#   - find_time: time window in seconds to count failures
+#   - ban_time: ban duration in seconds
+
+[services.ssh]
+enabled = true
+log_path = "/var/log/auth.log"
+max_failures = 5
+find_time = 600      # 10 minutes
+ban_time = 3600      # 1 hour
+
+[[services.ssh.patterns]]
+name = "failed_password"
+regex = 'Failed password for .* from (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "failed_auth"
+
+[[services.ssh.patterns]]
+name = "invalid_user"
+regex = 'Invalid user .* from (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "invalid_user"
+
+[[services.ssh.patterns]]
+name = "connection_closed_preauth"
+regex = 'Connection closed by (?P<ip>\d+\.\d+\.\d+\.\d+) port \d+ \[preauth\]'
+event_type = "failed_auth"
+
+[[services.ssh.patterns]]
+name = "too_many_auth_failures"
+regex = 'Disconnecting authenticating user .* (?P<ip>\d+\.\d+\.\d+\.\d+) .* Too many authentication failures'
+event_type = "brute_force"
+
+[services.nginx]
+enabled = false
+log_path = "/var/log/nginx/error.log"
+max_failures = 10
+find_time = 60       # 1 minute
+ban_time = 600       # 10 minutes
+
+[[services.nginx.patterns]]
+name = "limit_req"
+regex = 'limiting requests, excess: .* by zone .*, client: (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "rate_limit"
+
+[[services.nginx.patterns]]
+name = "limit_conn"
+regex = 'limiting connections by zone .*, client: (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "rate_limit"
+
+[services.apache]
+enabled = false
+log_path = "/var/log/apache2/error.log"
+max_failures = 10
+find_time = 60
+ban_time = 600
+
+[[services.apache.patterns]]
+name = "auth_failure"
+regex = 'client (?P<ip>\d+\.\d+\.\d+\.\d+).*authentication failure'
+event_type = "failed_auth"
+
+[services.postfix]
+enabled = false
+log_path = "/var/log/mail.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.postfix.patterns]]
+name = "auth_failed"
+regex = 'SASL .* authentication failed: .* \[(?P<ip>\d+\.\d+\.\d+\.\d+)\]'
+event_type = "failed_auth"
+
+[services.dovecot]
+enabled = false
+log_path = "/var/log/mail.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.dovecot.patterns]]
+name = "auth_failed"
+regex = 'auth failed, \d+ attempts .* rip=(?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "failed_auth"

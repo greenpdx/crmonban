@@ -1,0 +1,89 @@
+[package]
+name = "crmonban"
+version = "0.1.0"
+edition = "2024"
+authors = ["svvs"]
+description = "nftables-based intrusion prevention system with attacker intelligence gathering"
+license = "MIT"
+repository = "https://github.com/greenpdx/crmonban"
+keywords = ["firewall", "nftables", "security", "intrusion-prevention", "fail2ban"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+# nftables JSON API
+nftables = { git = "https://github.com/nftables-rs/nftables-rs" }
+
+# CLI
+clap = { version = "*", features = ["derive", "env"] }
+
+# Async runtime
+tokio = { version = "*", features = ["full"] }
+
+# File watching
+notify = "*"
+notify-debouncer-mini = "*"
+
+# Pattern matching
+regex = "*"
+
+# Database
+rusqlite = { version = "*", features = ["bundled"] }
+
+# Serialization
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+toml = "*"
+
+# HTTP client for intel gathering
+reqwest = { version = "*", features = ["json"] }
+
+# Date/time
+chrono = { version = "*", features = ["serde"] }
+
+# Directory paths
+dirs-next = "*"
+
+# Unix utilities
+libc = "*"
+
+# Logging
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+
+# Error handling
+thiserror = "*"
+anyhow = "*"
+
+# IP address handling
+ipnetwork = "*"
+
+# DNS lookups
+trust-dns-resolver = "*"
+
+# Async utilities
+futures = "*"
+
+# PID file and daemon
+daemonize = "*"
+
+# D-Bus integration
+zbus = "*"
+
+# SIEM export
+uuid = { version = "*", features = ["v4"] }
+hostname = "*"
+
+# Zone config parsing
+serde_yaml = "*"
+
+# Pretty tables for CLI output
+tabled = "*"
+colored = "*"
+
+[[bin]]
+name = "crmonban"
+path = "src/main.rs"
+
+[lib]
+name = "crmonban"
+path = "src/lib.rs"
