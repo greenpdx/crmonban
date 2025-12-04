@@ -1,6 +1,6 @@
 //! Zone support for crmonban
 //!
-//! Integrates with crrouter_web's zone-based security model.
+//! Zone-based security model for network segmentation.
 //! Zones allow categorizing network segments by trust level:
 //! - Trusted (100): Loopback, management
 //! - Internal (80): Corporate LAN
@@ -15,7 +15,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
-/// Zone trust levels (matching crrouter_web)
+/// Zone trust levels
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ZoneType {
     Trusted = 100,
@@ -105,7 +105,7 @@ pub struct ZoneConfig {
     #[serde(default)]
     pub enabled: bool,
 
-    /// Path to zone configuration file (shared with crrouter_web)
+    /// Path to zone configuration file
     #[serde(default)]
     pub config_file: Option<PathBuf>,
 
@@ -168,11 +168,11 @@ impl ZoneManager {
         }
     }
 
-    /// Load zones from crrouter_web config file
+    /// Load zones from external config file
     pub fn load_from_file(&mut self, path: &PathBuf) -> anyhow::Result<()> {
         let content = std::fs::read_to_string(path)?;
 
-        // Try YAML first (crrouter_web format)
+        // Try YAML first
         if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
             #[derive(Deserialize)]
             struct FirewallConfig {

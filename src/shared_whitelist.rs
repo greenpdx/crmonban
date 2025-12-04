@@ -2,9 +2,9 @@
 //!
 //! Allows crmonban to read whitelist entries from multiple sources:
 //! - Local SQLite database (crmonban's own whitelist)
-//! - crrouter_web zone-based implicit whitelists
+//! - Zone-based implicit whitelists
 //! - External whitelist files
-//! - D-Bus queries to other services
+//! - D-Bus queries to other services (requires `crrouter` feature)
 //!
 //! This enables a unified whitelist across the system.
 
@@ -41,8 +41,9 @@ pub enum WhitelistSource {
         networks: Vec<String>,
     },
 
-    /// Query crrouter_web via D-Bus
-    CrrouterWeb,
+    /// Query external firewall daemon via D-Bus (requires `crrouter` feature)
+    #[cfg(feature = "crrouter")]
+    ExternalFirewall,
 }
 
 /// Shared whitelist configuration
@@ -180,8 +181,9 @@ impl SharedWhitelist {
                         }
                     }
                 }
-                WhitelistSource::CrrouterWeb => {
-                    if let Ok(ips) = self.query_crrouter_web().await {
+                #[cfg(feature = "crrouter")]
+                WhitelistSource::ExternalFirewall => {
+                    if let Ok(ips) = self.query_external_firewall().await {
                         for ip in ips {
                             new_cache.insert(ip);
                         }
@@ -238,11 +240,12 @@ impl SharedWhitelist {
         Ok(ips)
     }
 
-    /// Query crrouter_web for trusted IPs via D-Bus
-    async fn query_crrouter_web(&self) -> anyhow::Result<Vec<IpAddr>> {
+    /// Query external firewall daemon for trusted IPs via D-Bus (requires `crrouter` feature)
+    #[cfg(feature = "crrouter")]
+    async fn query_external_firewall(&self) -> anyhow::Result<Vec<IpAddr>> {
         use tokio::process::Command;
 
-        // Query crrouter_web daemon for trusted zones
+        // Query external firewall daemon for trusted zones
         let output = Command::new("busctl")
             .args([
                 "--system",
@@ -257,8 +260,8 @@ impl SharedWhitelist {
             .await?;
 
         if !output.status.success() {
-            // crrouter_web might not be running, that's okay
-            debug!("crrouter_web D-Bus query failed (service may not be running)");
+            // External daemon might not be running, that's okay
+            debug!("External firewall D-Bus query failed (service may not be running)");
             return Ok(vec![]);
         }
 
@@ -267,7 +270,7 @@ impl SharedWhitelist {
 
         let mut ips = Vec::new();
 
-        // Parse the response (format depends on crrouter_web implementation)
+        // Parse the response
         if let Some(data) = json_val.get("data").and_then(|d| d.as_array()) {
             if let Some(networks) = data.first().and_then(|a| a.as_array()) {
                 for net in networks {
@@ -280,7 +283,7 @@ impl SharedWhitelist {
             }
         }
 
-        info!("Loaded {} trusted IPs from crrouter_web", ips.len());
+        info!("Loaded {} trusted IPs from external firewall", ips.len());
         Ok(ips)
     }
 

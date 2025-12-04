@@ -20,11 +20,10 @@ A modern alternative to fail2ban/crowdsec that uses nftables directly and gather
 - **Daemon Mode** - Background monitoring with auto-banning
 - **Whitelist Support** - Protect trusted IPs from being banned
 - **D-Bus Interface** - External control and event notifications for integration with other applications
-- **crrouter_web Integration** - Seamless integration with crrouter_web firewall:
-  - Zone-aware banning (trust levels, implicit whitelists)
-  - eBPF fast-path blocking for sub-microsecond drops
-  - Shared whitelist across systems
-  - SIEM export (CEF, LEEF, Syslog, JSON formats)
+- **Zone Support** - Zone-aware banning with trust levels and implicit whitelists
+- **eBPF Fast-Path** - Optional eBPF integration for sub-microsecond IP blocking
+- **Shared Whitelist** - Multiple whitelist sources (database, zones, files, networks)
+- **SIEM Export** - CEF, LEEF, Syslog (RFC 5424), and JSON formats
 
 ## Installation
 
@@ -223,16 +222,14 @@ dbus-monitor --system "interface='org.crmonban.Daemon'"
 busctl call org.crmonban.Daemon /org/crmonban/Daemon org.crmonban.Daemon Status
 ```
 
-## crrouter_web Integration
-
-crmonban integrates with crrouter_web for enhanced firewall management.
+## Advanced Configuration
 
 ### Zone Configuration
 
 ```toml
 [zones]
 enabled = true
-config_file = "/etc/crrouter/firewall.yaml"  # Shared with crrouter_web
+config_file = "/etc/crmonban/zones.yaml"
 whitelist_threshold = 80                      # Trust level for implicit whitelist
 
 [[zones.zones]]
@@ -273,9 +270,13 @@ headers = [["Authorization", "Bearer token"]]
 ```toml
 [ebpf]
 enabled = true
-method = "dbus"           # dbus, mapfile, disabled
+method = "mapfile"        # mapfile, disabled (dbus requires crrouter feature)
 sync_interval_secs = 60   # Sync with nftables
 max_entries = 10000
+
+# For mapfile method:
+[ebpf.method]
+path = "/sys/fs/bpf/crmonban_blacklist"
 ```
 
 ### Shared Whitelist
@@ -301,15 +302,15 @@ path = "/etc/crmonban/whitelist.txt"
 watch = true
 
 [[whitelist.sources]]
-type = "crrouter_web"     # Query crrouter_web via D-Bus
+type = "daemon"     # Query external daemon via D-Bus (requires crrouter feature)
 ```
 
-### crrouter_web Plugin
+### External Daemon Integration
 
-Enable the crmonban plugin in crrouter_web:
+Enable the crmonban plugin in the external firewall daemon:
 
 ```bash
-# Build crrouter_web with crmonban support
+# Build with crmonban support
 cargo build --features crmonban
 
 # The plugin provides these JSON-RPC methods:

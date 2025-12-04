@@ -1,13 +1,12 @@
 //! eBPF integration for fast-path blocking
 //!
-//! Integrates with crrouter_web's eBPF infrastructure for line-rate IP blocking.
-//! This provides sub-microsecond blocking by updating eBPF maps directly,
-//! bypassing the nftables slow path.
+//! Provides line-rate IP blocking by updating eBPF maps directly,
+//! bypassing the nftables slow path for sub-microsecond blocking.
 //!
 //! Integration methods:
-//! 1. D-Bus: Call crrouter_web's eBPF manager via D-Bus
+//! 1. D-Bus: Call external eBPF manager via D-Bus (requires `crrouter` feature)
 //! 2. BPF maps: Direct map manipulation (requires CAP_BPF)
-//! 3. Netlink: Use libbpf-rs for map updates
+//! 3. Disabled: Track locally only, no kernel integration
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -21,8 +20,8 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum EbpfMethod {
-    /// Call crrouter_web via D-Bus (recommended)
-    #[default]
+    /// Call external eBPF manager via D-Bus (requires `crrouter` feature)
+    #[cfg(feature = "crrouter")]
     Dbus,
 
     /// Direct BPF map file manipulation
@@ -31,7 +30,8 @@ pub enum EbpfMethod {
         path: PathBuf,
     },
 
-    /// Disabled
+    /// Disabled (default)
+    #[default]
     Disabled,
 }
 
@@ -94,6 +94,7 @@ impl EbpfManager {
         }
 
         match &self.config.method {
+            #[cfg(feature = "crrouter")]
             EbpfMethod::Dbus => self.dbus_add(ip).await?,
             EbpfMethod::MapFile { path } => self.map_add(path, ip).await?,
             EbpfMethod::Disabled => {}
@@ -113,6 +114,7 @@ impl EbpfManager {
         }
 
         match &self.config.method {
+            #[cfg(feature = "crrouter")]
             EbpfMethod::Dbus => self.dbus_remove(*ip).await?,
             EbpfMethod::MapFile { path } => self.map_remove(path, *ip).await?,
             EbpfMethod::Disabled => {}
@@ -199,8 +201,9 @@ impl EbpfManager {
         self.blacklist.read().await.len()
     }
 
-    // D-Bus methods
+    // D-Bus methods (requires crrouter feature)
 
+    #[cfg(feature = "crrouter")]
     async fn dbus_add(&self, ip: IpAddr) -> anyhow::Result<()> {
         use tokio::process::Command;
 
@@ -231,6 +234,7 @@ impl EbpfManager {
         Ok(())
     }
 
+    #[cfg(feature = "crrouter")]
     async fn dbus_remove(&self, ip: IpAddr) -> anyhow::Result<()> {
         use tokio::process::Command;
 
@@ -347,6 +351,7 @@ impl EbpfManager {
     /// Get statistics
     pub async fn stats(&self) -> EbpfStats {
         let method = match &self.config.method {
+            #[cfg(feature = "crrouter")]
             EbpfMethod::Dbus => "dbus".to_string(),
             EbpfMethod::MapFile { path } => format!("map:{}", path.display()),
             EbpfMethod::Disabled => "disabled".to_string(),
