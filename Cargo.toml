@@ -104,6 +104,10 @@ nfq = "*"
 
 # Packet parsing
 etherparse = "*"
+pcap = "*"
+
+# Benchmarking
+hdrhistogram = "*"
 
 # TLS/SSL for MITM proxy
 tokio-rustls = "*"
@@ -122,6 +126,10 @@ path = "src/main.rs"
 [[bin]]
 name = "matrix_benchmark"
 path = "benches/matrix_benchmark.rs"
+
+[[bin]]
+name = "pcap_benchmark"
+path = "benches/pcap_benchmark.rs"
 
 [lib]
 name = "crmonban"

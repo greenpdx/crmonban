@@ -62,7 +62,7 @@ impl FlowTable {
         }
     }
 
-    /// Get or create a flow for a packet (optimized with entry API)
+    /// Get or create a flow for a packet (optimized)
     /// Returns the flow and a bool indicating if it was newly created
     #[inline]
     pub fn get_or_create(&mut self, pkt: &Packet) -> (&mut Flow, bool) {
@@ -70,41 +70,39 @@ impl FlowTable {
         self.stats.lookups += 1;
         let now = Instant::now();
 
-        match self.flows.entry(key.clone()) {
-            Entry::Occupied(mut occupied) => {
-                self.stats.hits += 1;
-                let entry = occupied.get_mut();
-                let timeout = self.config.timeout_for(&entry.flow);
-                entry.timeout = now + timeout;
-                // Safety: we just accessed this entry, it exists
-                let entry = self.flows.get_mut(&key).unwrap();
-                (&mut entry.flow, false)
-            }
-            Entry::Vacant(vacant) => {
-                self.stats.misses += 1;
-
-                // Check if table is full
-                if self.flows.len() >= self.max_size {
-                    self.evict_oldest();
-                }
-
-                // Create new flow
-                let flow_id = self.next_id;
-                self.next_id += 1;
-                let flow = Flow::new(flow_id, pkt);
-                let timeout = self.config.timeout_for(&flow);
-
-                // Add to ID index
-                self.id_index.insert(flow_id, key.clone());
-
-                self.stats.inserts += 1;
-                let entry = vacant.insert(FlowEntry {
-                    flow,
-                    timeout: now + timeout,
-                });
-                (&mut entry.flow, true)
-            }
+        // Check if exists first
+        if self.flows.contains_key(&key) {
+            self.stats.hits += 1;
+            let entry = self.flows.get_mut(&key).unwrap();
+            let timeout = self.config.timeout_for(&entry.flow);
+            entry.timeout = now + timeout;
+            return (&mut entry.flow, false);
         }
+
+        // Not found - create new
+        self.stats.misses += 1;
+
+        // Check if table is full
+        if self.flows.len() >= self.max_size {
+            self.evict_oldest();
+        }
+
+        // Create new flow
+        let flow_id = self.next_id;
+        self.next_id += 1;
+        let flow = Flow::new(flow_id, pkt);
+        let timeout = self.config.timeout_for(&flow);
+
+        // Add to ID index
+        self.id_index.insert(flow_id, key.clone());
+
+        self.stats.inserts += 1;
+        self.flows.insert(key.clone(), FlowEntry {
+            flow,
+            timeout: now + timeout,
+        });
+
+        (&mut self.flows.get_mut(&key).unwrap().flow, true)
     }
 
     /// Get a flow by key

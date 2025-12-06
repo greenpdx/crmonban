@@ -421,6 +421,11 @@ impl SignatureEngine {
         self.rules.len()
     }
 
+    /// Get prefilter pattern count
+    pub fn prefilter_pattern_count(&self) -> usize {
+        self.prefilter.as_ref().map(|p| p.pattern_count()).unwrap_or(0)
+    }
+
     /// Match packet against all rules
     #[inline]
     pub fn match_packet(&self, ctx: &PacketContext) -> Vec<MatchResult> {
@@ -770,7 +775,7 @@ impl SignatureEngine {
             buffer.len()
         };
 
-        if search_start >= buffer.len() {
+        if search_start >= buffer.len() || search_end <= search_start {
             return None;
         }
 

@@ -325,60 +325,89 @@ impl FeatureExtractor {
     }
 }
 
-/// Compute packet size statistics from flow
+/// Compute packet size statistics from flow (uses streaming stats)
 fn compute_packet_size_stats(flow: &Flow) -> (u16, u16, f32) {
-    // Combine forward and backward packet sizes
-    let all_sizes: Vec<u16> = flow.fwd_pkt_sizes.iter()
-        .chain(flow.bwd_pkt_sizes.iter())
-        .copied()
-        .collect();
+    let fwd = &flow.fwd_pkt_stats;
+    let bwd = &flow.bwd_pkt_stats;
 
-    if all_sizes.is_empty() {
+    if fwd.count == 0 && bwd.count == 0 {
         return (0, 0, 0.0);
     }
 
-    let min_pkt = *all_sizes.iter().min().unwrap_or(&0);
-    let max_pkt = *all_sizes.iter().max().unwrap_or(&0);
+    // Combine min/max from both directions
+    let min_pkt = if fwd.count > 0 && bwd.count > 0 {
+        fwd.min.min(bwd.min) as u16
+    } else if fwd.count > 0 {
+        fwd.min as u16
+    } else {
+        bwd.min as u16
+    };
 
-    // Compute standard deviation
-    let sum: u64 = all_sizes.iter().map(|&s| s as u64).sum();
-    let mean = sum as f32 / all_sizes.len() as f32;
-    let variance: f32 = all_sizes.iter()
-        .map(|&s| {
-            let diff = s as f32 - mean;
-            diff * diff
-        })
-        .sum::<f32>() / all_sizes.len() as f32;
+    let max_pkt = if fwd.count > 0 && bwd.count > 0 {
+        fwd.max.max(bwd.max) as u16
+    } else if fwd.count > 0 {
+        fwd.max as u16
+    } else {
+        bwd.max as u16
+    };
 
-    (min_pkt, max_pkt, variance.sqrt())
+    // Combined std dev (approximation using pooled variance)
+    let total_count = fwd.count + bwd.count;
+    let combined_std = if total_count > 1 {
+        let fwd_var = fwd.std().powi(2) * fwd.count as f32;
+        let bwd_var = bwd.std().powi(2) * bwd.count as f32;
+        ((fwd_var + bwd_var) / total_count as f32).sqrt()
+    } else {
+        0.0
+    };
+
+    (min_pkt, max_pkt, combined_std)
 }
 
-/// Compute inter-arrival time statistics from flow
+/// Compute inter-arrival time statistics from flow (uses streaming stats)
 fn compute_iat_stats(flow: &Flow) -> (f32, f32, f32, f32) {
-    // Combine forward and backward IATs
-    let all_iats: Vec<u64> = flow.fwd_iats.iter()
-        .chain(flow.bwd_iats.iter())
-        .map(|d| d.as_micros() as u64)
-        .collect();
+    let fwd = &flow.fwd_iat_stats;
+    let bwd = &flow.bwd_iat_stats;
 
-    if all_iats.is_empty() {
+    if fwd.count == 0 && bwd.count == 0 {
         return (0.0, 0.0, 0.0, 0.0);
     }
 
-    let min_iat = *all_iats.iter().min().unwrap_or(&0) as f32;
-    let max_iat = *all_iats.iter().max().unwrap_or(&0) as f32;
+    // Combine min/max from both directions
+    let min_iat = if fwd.count > 0 && bwd.count > 0 {
+        fwd.min.min(bwd.min)
+    } else if fwd.count > 0 {
+        fwd.min
+    } else {
+        bwd.min
+    };
 
-    let sum: u64 = all_iats.iter().sum();
-    let mean = sum as f32 / all_iats.len() as f32;
+    let max_iat = if fwd.count > 0 && bwd.count > 0 {
+        fwd.max.max(bwd.max)
+    } else if fwd.count > 0 {
+        fwd.max
+    } else {
+        bwd.max
+    };
 
-    let variance: f32 = all_iats.iter()
-        .map(|&iat| {
-            let diff = iat as f32 - mean;
-            diff * diff
-        })
-        .sum::<f32>() / all_iats.len() as f32;
+    // Combined mean (weighted average)
+    let total_count = fwd.count + bwd.count;
+    let combined_mean = if total_count > 0 {
+        (fwd.mean * fwd.count as f32 + bwd.mean * bwd.count as f32) / total_count as f32
+    } else {
+        0.0
+    };
 
-    (mean, variance.sqrt(), min_iat, max_iat)
+    // Combined std dev (approximation using pooled variance)
+    let combined_std = if total_count > 1 {
+        let fwd_var = fwd.std().powi(2) * fwd.count as f32;
+        let bwd_var = bwd.std().powi(2) * bwd.count as f32;
+        ((fwd_var + bwd_var) / total_count as f32).sqrt()
+    } else {
+        0.0
+    };
+
+    (combined_mean, combined_std, min_iat, max_iat)
 }
 
 /// Convert IP protocol to numeric value
@@ -503,9 +532,13 @@ mod tests {
         flow.bwd_bytes = 5000;
         flow.fwd_packets = 10;
         flow.bwd_packets = 20;
-        // Add some packet sizes for stats
-        flow.fwd_pkt_sizes = vec![40, 100, 200, 500];
-        flow.bwd_pkt_sizes = vec![60, 150, 300, 1500];
+        // Add some packet sizes using streaming stats
+        for size in [40.0, 100.0, 200.0, 500.0] {
+            flow.fwd_pkt_stats.update(size);
+        }
+        for size in [60.0, 150.0, 300.0, 1500.0] {
+            flow.bwd_pkt_stats.update(size);
+        }
         flow
     }
 

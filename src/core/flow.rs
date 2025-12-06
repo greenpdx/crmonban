@@ -103,7 +103,8 @@ impl Hash for FlowKey {
         state.write_u32(
             (self.port_a as u32) | ((self.port_b as u32) << 16)
         );
-        state.write_u8(self.protocol as u8);
+        let proto_u8: u8 = self.protocol.into();
+        state.write_u8(proto_u8);
     }
 }
 
