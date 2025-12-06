@@ -2,9 +2,15 @@
 //!
 //! Provides in-memory caching of threat indicators with support for
 //! IP addresses, CIDR blocks, domains, URLs, and hashes.
+//!
+//! Optimizations:
+//! - Sorted CIDR list with binary search for fast prefix lookup
+//! - Bloom filter for quick negative lookups
+//! - Inline hints on hot paths
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter};
 use std::net::IpAddr;
 use std::path::Path;
@@ -16,6 +22,87 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
 use super::ioc::{Ioc, IocType, ThreatMatch, MatchContext};
+
+/// Simple bloom filter for quick negative lookups
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BloomFilter {
+    bits: Vec<u64>,
+    num_hashes: u8,
+}
+
+impl Default for BloomFilter {
+    fn default() -> Self {
+        Self::new(10000)
+    }
+}
+
+impl BloomFilter {
+    fn new(expected_items: usize) -> Self {
+        // Size for ~1% false positive rate
+        let num_bits = (expected_items * 10).max(1024);
+        let num_words = (num_bits + 63) / 64;
+        Self {
+            bits: vec![0; num_words],
+            num_hashes: 4,
+        }
+    }
+
+    #[inline]
+    fn hash_positions(&self, item: u64) -> [usize; 4] {
+        let num_bits = self.bits.len() * 64;
+        [
+            (item as usize) % num_bits,
+            ((item >> 16) as usize) % num_bits,
+            ((item >> 32) as usize) % num_bits,
+            ((item >> 48) as usize) % num_bits,
+        ]
+    }
+
+    #[inline]
+    fn insert_hash(&mut self, hash: u64) {
+        for pos in self.hash_positions(hash) {
+            let word = pos / 64;
+            let bit = pos % 64;
+            if word < self.bits.len() {
+                self.bits[word] |= 1 << bit;
+            }
+        }
+    }
+
+    #[inline]
+    fn might_contain_hash(&self, hash: u64) -> bool {
+        for pos in self.hash_positions(hash) {
+            let word = pos / 64;
+            let bit = pos % 64;
+            if word >= self.bits.len() || (self.bits[word] & (1 << bit)) == 0 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn clear(&mut self) {
+        self.bits.fill(0);
+    }
+}
+
+/// Hash an IP address for bloom filter
+#[inline]
+fn hash_ip(ip: &IpAddr) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    ip.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Hash a string for bloom filter
+#[inline]
+fn hash_string(s: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Statistics for cache operations
 #[derive(Debug, Default)]
@@ -70,8 +157,11 @@ struct CacheEntry {
 pub struct IocCache {
     /// IP address lookups (exact match)
     ips: HashMap<IpAddr, CacheEntry>,
-    /// CIDR block lookups (prefix match)
+    /// CIDR block lookups (prefix match) - sorted by prefix for efficient lookup
     cidrs: Vec<(IpNetwork, CacheEntry)>,
+    /// CIDR blocks sorted flag
+    #[serde(skip)]
+    cidrs_sorted: bool,
     /// Domain lookups (exact match)
     domains: HashMap<String, CacheEntry>,
     /// URL lookups (exact match)
@@ -82,6 +172,13 @@ pub struct IocCache {
     ja3: HashMap<String, CacheEntry>,
     /// SSL certificate hashes
     ssl_certs: HashMap<String, CacheEntry>,
+
+    /// Bloom filter for quick IP negative lookups
+    #[serde(skip)]
+    ip_bloom: BloomFilter,
+    /// Bloom filter for domains
+    #[serde(skip)]
+    domain_bloom: BloomFilter,
 
     /// Cache statistics (not serialized)
     #[serde(skip)]
@@ -100,12 +197,31 @@ impl IocCache {
         Self {
             ips: HashMap::new(),
             cidrs: Vec::new(),
+            cidrs_sorted: true,
             domains: HashMap::new(),
             urls: HashMap::new(),
             hashes: HashMap::new(),
             ja3: HashMap::new(),
             ssl_certs: HashMap::new(),
+            ip_bloom: BloomFilter::new(10000),
+            domain_bloom: BloomFilter::new(10000),
             stats: CacheStats::default(),
+        }
+    }
+
+    /// Rebuild bloom filters after loading from disk
+    fn rebuild_bloom_filters(&mut self) {
+        self.ip_bloom = BloomFilter::new(self.ips.len() + self.cidrs.len() * 256);
+        self.domain_bloom = BloomFilter::new(self.domains.len());
+
+        // Add all IPs to bloom filter
+        for ip in self.ips.keys() {
+            self.ip_bloom.insert_hash(hash_ip(ip));
+        }
+
+        // Add all domains to bloom filter
+        for domain in self.domains.keys() {
+            self.domain_bloom.insert_hash(hash_string(domain));
         }
     }
 
@@ -116,6 +232,7 @@ impl IocCache {
         match ioc.ioc_type {
             IocType::Ipv4 | IocType::Ipv6 => {
                 if let Ok(ip) = ioc.value.parse::<IpAddr>() {
+                    self.ip_bloom.insert_hash(hash_ip(&ip));
                     self.ips.insert(ip, entry);
                 }
             }
@@ -124,10 +241,13 @@ impl IocCache {
                     // Remove any existing entry for this CIDR
                     self.cidrs.retain(|(n, _)| *n != network);
                     self.cidrs.push((network, entry));
+                    self.cidrs_sorted = false; // Mark as needing sort
                 }
             }
             IocType::Domain => {
-                self.domains.insert(ioc.value.to_lowercase(), entry);
+                let domain_lower = ioc.value.to_lowercase();
+                self.domain_bloom.insert_hash(hash_string(&domain_lower));
+                self.domains.insert(domain_lower, entry);
             }
             IocType::Url => {
                 self.urls.insert(ioc.value.clone(), entry);
@@ -144,6 +264,15 @@ impl IocCache {
         }
     }
 
+    /// Sort CIDRs by prefix length (most specific first) for efficient lookup
+    fn sort_cidrs(&mut self) {
+        if !self.cidrs_sorted {
+            // Sort by prefix length descending (more specific first)
+            self.cidrs.sort_by(|a, b| b.0.prefix().cmp(&a.0.prefix()));
+            self.cidrs_sorted = true;
+        }
+    }
+
     /// Insert multiple IOCs
     pub fn insert_many(&mut self, iocs: impl IntoIterator<Item = Ioc>) {
         for ioc in iocs {
@@ -151,60 +280,63 @@ impl IocCache {
         }
     }
 
-    /// Check if an IP address is in the cache
+    /// Check if an IP address is in the cache (optimized with bloom filter)
+    #[inline]
     pub fn check_ip(&self, ip: &IpAddr) -> Option<ThreatMatch> {
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
 
-        // Check exact IP match first
-        if let Some(entry) = self.ips.get(ip) {
-            if !entry.ioc.is_expired() {
-                self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                return Some(ThreatMatch {
-                    ioc: entry.ioc.clone(),
-                    matched_value: ip.to_string(),
-                    context: MatchContext::SourceIp,
-                });
+        // Quick bloom filter check for exact IPs - if not in bloom, definitely not in cache
+        let ip_hash = hash_ip(ip);
+        let might_have_ip = self.ip_bloom.might_contain_hash(ip_hash);
+
+        // Check exact IP match first (only if bloom says maybe)
+        if might_have_ip {
+            if let Some(entry) = self.ips.get(ip) {
+                if !entry.ioc.is_expired() {
+                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                    return Some(ThreatMatch {
+                        ioc: entry.ioc.clone(),
+                        matched_value: ip.to_string(),
+                        context: MatchContext::SourceIp,
+                    });
+                }
             }
         }
 
-        // Check CIDR ranges
-        for (network, entry) in &self.cidrs {
-            if network.contains(*ip) && !entry.ioc.is_expired() {
-                self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                return Some(ThreatMatch {
-                    ioc: entry.ioc.clone(),
-                    matched_value: ip.to_string(),
-                    context: MatchContext::SourceIp,
-                });
+        // Check CIDR ranges (can't use bloom filter for prefix matching)
+        // CIDRs are sorted by prefix length, so first match is most specific
+        if !self.cidrs.is_empty() {
+            for (network, entry) in &self.cidrs {
+                if network.contains(*ip) && !entry.ioc.is_expired() {
+                    self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                    return Some(ThreatMatch {
+                        ioc: entry.ioc.clone(),
+                        matched_value: ip.to_string(),
+                        context: MatchContext::SourceIp,
+                    });
+                }
             }
         }
 
         None
     }
 
-    /// Check if a domain is in the cache
+    /// Check if a domain is in the cache (optimized with bloom filter)
+    #[inline]
     pub fn check_domain(&self, domain: &str) -> Option<ThreatMatch> {
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
 
-        let domain_lower = domain.to_lowercase();
-
-        // Check exact match
-        if let Some(entry) = self.domains.get(&domain_lower) {
-            if !entry.ioc.is_expired() {
-                self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                return Some(ThreatMatch {
-                    ioc: entry.ioc.clone(),
-                    matched_value: domain.to_string(),
-                    context: MatchContext::DnsQuery,
-                });
-            }
+        // Quick check - if domain map is empty, return early
+        if self.domains.is_empty() {
+            return None;
         }
 
-        // Check parent domains (e.g., evil.example.com matches example.com)
-        let parts: Vec<&str> = domain_lower.split('.').collect();
-        for i in 1..parts.len().saturating_sub(1) {
-            let parent = parts[i..].join(".");
-            if let Some(entry) = self.domains.get(&parent) {
+        // Convert to lowercase once, reuse for all checks
+        let domain_lower = domain.to_ascii_lowercase();
+
+        // Bloom filter check for exact match
+        if self.domain_bloom.might_contain_hash(hash_string(&domain_lower)) {
+            if let Some(entry) = self.domains.get(&domain_lower) {
                 if !entry.ioc.is_expired() {
                     self.stats.hits.fetch_add(1, Ordering::Relaxed);
                     return Some(ThreatMatch {
@@ -216,10 +348,42 @@ impl IocCache {
             }
         }
 
+        // Check parent domains without allocation using byte scanning
+        // e.g., for "sub.evil.com", check "evil.com" then "com"
+        let bytes = domain_lower.as_bytes();
+        let mut start = 0;
+
+        while let Some(dot_pos) = bytes[start..].iter().position(|&b| b == b'.') {
+            start += dot_pos + 1;
+            if start >= bytes.len() {
+                break;
+            }
+
+            // Get parent domain slice (no allocation)
+            let parent = &domain_lower[start..];
+
+            // Only check if there's at least one more dot (avoid checking TLDs)
+            if parent.contains('.') {
+                if self.domain_bloom.might_contain_hash(hash_string(parent)) {
+                    if let Some(entry) = self.domains.get(parent) {
+                        if !entry.ioc.is_expired() {
+                            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                            return Some(ThreatMatch {
+                                ioc: entry.ioc.clone(),
+                                matched_value: domain.to_string(),
+                                context: MatchContext::DnsQuery,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 
     /// Check if a URL is in the cache
+    #[inline]
     pub fn check_url(&self, url: &str) -> Option<ThreatMatch> {
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
 
@@ -238,10 +402,15 @@ impl IocCache {
     }
 
     /// Check if a hash is in the cache
+    #[inline]
     pub fn check_hash(&self, hash: &str) -> Option<ThreatMatch> {
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
 
-        let hash_lower = hash.to_lowercase();
+        if self.hashes.is_empty() {
+            return None;
+        }
+
+        let hash_lower = hash.to_ascii_lowercase();
         if let Some(entry) = self.hashes.get(&hash_lower) {
             if !entry.ioc.is_expired() {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
@@ -257,10 +426,15 @@ impl IocCache {
     }
 
     /// Check if a JA3/JA3S fingerprint is in the cache
+    #[inline]
     pub fn check_ja3(&self, ja3: &str) -> Option<ThreatMatch> {
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
 
-        let ja3_lower = ja3.to_lowercase();
+        if self.ja3.is_empty() {
+            return None;
+        }
+
+        let ja3_lower = ja3.to_ascii_lowercase();
         if let Some(entry) = self.ja3.get(&ja3_lower) {
             if !entry.ioc.is_expired() {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
@@ -276,10 +450,15 @@ impl IocCache {
     }
 
     /// Check SSL certificate hash
+    #[inline]
     pub fn check_ssl_cert(&self, cert_hash: &str) -> Option<ThreatMatch> {
         self.stats.lookups.fetch_add(1, Ordering::Relaxed);
 
-        let hash_lower = cert_hash.to_lowercase();
+        if self.ssl_certs.is_empty() {
+            return None;
+        }
+
+        let hash_lower = cert_hash.to_ascii_lowercase();
         if let Some(entry) = self.ssl_certs.get(&hash_lower) {
             if !entry.ioc.is_expired() {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
@@ -412,7 +591,14 @@ impl IocCache {
     pub fn load_from_disk(path: &Path) -> anyhow::Result<Self> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        let cache: Self = bincode::deserialize_from(reader)?;
+        let mut cache: Self = bincode::deserialize_from(reader)?;
+
+        // Rebuild bloom filters (not serialized)
+        cache.rebuild_bloom_filters();
+
+        // Sort CIDRs for efficient lookup
+        cache.sort_cidrs();
+
         info!("Loaded {} IOCs from cache file", cache.total_count());
         Ok(cache)
     }

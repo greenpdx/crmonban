@@ -3,6 +3,7 @@
 //! Extracts CICIDS2017-compatible features for ML-based anomaly detection.
 
 use std::collections::VecDeque;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -111,12 +112,12 @@ impl FeatureVector {
     }
 }
 
-/// Record for connection window tracking
-#[derive(Debug, Clone)]
+/// Record for connection window tracking (optimized - no String allocations)
+#[derive(Debug, Clone, Copy)]
 struct ConnectionRecord {
     timestamp: DateTime<Utc>,
-    src_ip: String,
-    dst_ip: String,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
     dst_port: u16,
     protocol: AppProtocol,
 }
@@ -268,7 +269,8 @@ impl FeatureExtractor {
         }
     }
 
-    /// Add a connection to the window
+    /// Add a connection to the window (no allocations)
+    #[inline]
     fn add_to_window(&mut self, flow: &Flow, timestamp: DateTime<Utc>) {
         if self.connection_window.len() >= self.max_window_size {
             self.connection_window.pop_front();
@@ -276,17 +278,18 @@ impl FeatureExtractor {
 
         self.connection_window.push_back(ConnectionRecord {
             timestamp,
-            src_ip: flow.client_ip.to_string(),
-            dst_ip: flow.server_ip.to_string(),
+            src_ip: flow.client_ip,
+            dst_ip: flow.server_ip,
             dst_port: flow.server_port,
             protocol: flow.app_protocol,
         });
     }
 
-    /// Compute window-based connection features
+    /// Compute window-based connection features (optimized - direct IpAddr comparison)
+    #[inline]
     fn compute_window_features(&self, flow: &Flow) -> (u32, u32, u32, u32) {
-        let dst_ip = flow.server_ip.to_string();
-        let src_ip = flow.client_ip.to_string();
+        let dst_ip = flow.server_ip;
+        let src_ip = flow.client_ip;
         let dst_port = flow.server_port;
 
         let mut same_dst = 0u32;

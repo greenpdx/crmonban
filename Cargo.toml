@@ -119,6 +119,10 @@ pem = "*"
 name = "crmonban"
 path = "src/main.rs"
 
+[[bin]]
+name = "matrix_benchmark"
+path = "benches/matrix_benchmark.rs"
+
 [lib]
 name = "crmonban"
 path = "src/lib.rs"

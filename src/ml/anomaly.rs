@@ -76,6 +76,17 @@ impl AnomalyScore {
     }
 }
 
+/// Key features for quick pre-check (indices into feature vector)
+const QUICK_CHECK_FEATURES: &[usize] = &[
+    0,   // duration_ms
+    4,   // total_packets
+    12,  // bytes_per_second
+    13,  // packets_per_second
+    16,  // syn_count
+    19,  // rst_count
+    25,  // iat_mean
+];
+
 /// Anomaly detector using multiple methods
 pub struct AnomalyDetector {
     /// Z-score threshold for individual features
@@ -88,6 +99,8 @@ pub struct AnomalyDetector {
     zscore_weight: f32,
     iqr_weight: f32,
     mahalanobis_weight: f32,
+    /// Quick check threshold (skip full analysis if below)
+    quick_threshold: f32,
 }
 
 impl Default for AnomalyDetector {
@@ -106,6 +119,7 @@ impl AnomalyDetector {
             zscore_weight: 0.4,
             iqr_weight: 0.3,
             mahalanobis_weight: 0.3,
+            quick_threshold: 1.5, // Skip full analysis if quick check below this
         }
     }
 
@@ -118,8 +132,42 @@ impl AnomalyDetector {
         }
     }
 
-    /// Score a feature vector against baseline
+    /// Quick pre-check on key features only (returns true if full analysis needed)
+    #[inline]
+    fn quick_check(&self, features: &FeatureVector, baseline: &Baseline) -> bool {
+        let mut max_zscore = 0.0f32;
+
+        for &idx in QUICK_CHECK_FEATURES {
+            if idx < features.features.len() && idx < baseline.global_stats.len() {
+                let stats = &baseline.global_stats[idx];
+                if stats.count >= 10 {
+                    let zscore = stats.zscore(features.features[idx]).abs();
+                    if zscore > max_zscore {
+                        max_zscore = zscore;
+                    }
+                    // Early exit if clearly anomalous
+                    if zscore > self.zscore_threshold {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        max_zscore > self.quick_threshold
+    }
+
+    /// Score a feature vector against baseline (with tiered detection)
     pub fn score(&self, features: &FeatureVector, baseline: &Baseline) -> AnomalyScore {
+        // Quick pre-check - skip full analysis for clearly normal traffic
+        if baseline.total_samples > 100 && !self.quick_check(features, baseline) {
+            return AnomalyScore::normal();
+        }
+
+        self.score_full(features, baseline)
+    }
+
+    /// Full scoring (called after quick check passes)
+    fn score_full(&self, features: &FeatureVector, baseline: &Baseline) -> AnomalyScore {
         let zscore_result = self.zscore_scoring(features, baseline);
         let iqr_result = self.iqr_scoring(features, baseline);
 

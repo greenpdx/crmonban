@@ -169,34 +169,44 @@ impl PcreCache {
         }
     }
 
-    fn get_or_compile(&mut self, pattern: &str, flags: &str) -> Option<&Regex> {
+    /// Check if pattern exists in cache
+    #[inline]
+    fn get(&self, key: &str) -> Option<&Regex> {
+        self.patterns.get(key)
+    }
+
+    /// Compile and insert a new pattern
+    fn compile_and_insert(&mut self, pattern: &str, flags: &str) -> Option<&Regex> {
         let key = format!("/{}/{}", pattern, flags);
 
-        if !self.patterns.contains_key(&key) {
-            let mut regex_pattern = String::new();
+        let mut regex_pattern = String::with_capacity(pattern.len() + 12);
 
-            // Build regex flags prefix
-            if flags.contains('i') {
-                regex_pattern.push_str("(?i)");
-            }
-            if flags.contains('s') {
-                regex_pattern.push_str("(?s)");
-            }
-            if flags.contains('m') {
-                regex_pattern.push_str("(?m)");
-            }
-
-            regex_pattern.push_str(pattern);
-
-            match Regex::new(&regex_pattern) {
-                Ok(re) => {
-                    self.patterns.insert(key.clone(), re);
-                }
-                Err(_) => return None,
-            }
+        // Build regex flags prefix
+        if flags.contains('i') {
+            regex_pattern.push_str("(?i)");
+        }
+        if flags.contains('s') {
+            regex_pattern.push_str("(?s)");
+        }
+        if flags.contains('m') {
+            regex_pattern.push_str("(?m)");
         }
 
-        self.patterns.get(&key)
+        regex_pattern.push_str(pattern);
+
+        match Regex::new(&regex_pattern) {
+            Ok(re) => {
+                self.patterns.insert(key.clone(), re);
+                self.patterns.get(&key)
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Generate cache key
+    #[inline]
+    fn make_key(pattern: &str, flags: &str) -> String {
+        format!("/{}/{}", pattern, flags)
     }
 }
 
@@ -285,8 +295,8 @@ impl ThresholdState {
 
 /// Flowbits state tracking
 struct FlowbitsState {
-    /// Bits by flow key
-    bits: HashMap<String, HashSet<String>>,
+    /// Bits by flow key (using u64 hash for speed)
+    bits: HashMap<u64, HashSet<String>>,
 }
 
 impl FlowbitsState {
@@ -296,18 +306,27 @@ impl FlowbitsState {
         }
     }
 
-    fn flow_key(ctx: &PacketContext) -> String {
-        format!(
-            "{:?}:{:?}:{:?}:{:?}",
-            ctx.src_ip, ctx.src_port, ctx.dst_ip, ctx.dst_port
-        )
+    /// Generate flow key as u64 hash (much faster than String formatting)
+    #[inline]
+    fn flow_key(ctx: &PacketContext) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+
+        let mut hasher = DefaultHasher::new();
+        ctx.src_ip.hash(&mut hasher);
+        ctx.src_port.hash(&mut hasher);
+        ctx.dst_ip.hash(&mut hasher);
+        ctx.dst_port.hash(&mut hasher);
+        hasher.finish()
     }
 
+    #[inline]
     fn set(&mut self, ctx: &PacketContext, name: &str) {
         let key = Self::flow_key(ctx);
         self.bits.entry(key).or_default().insert(name.to_string());
     }
 
+    #[inline]
     fn unset(&mut self, ctx: &PacketContext, name: &str) {
         let key = Self::flow_key(ctx);
         if let Some(bits) = self.bits.get_mut(&key) {
@@ -315,11 +334,13 @@ impl FlowbitsState {
         }
     }
 
+    #[inline]
     fn is_set(&self, ctx: &PacketContext, name: &str) -> bool {
         let key = Self::flow_key(ctx);
         self.bits.get(&key).map(|b| b.contains(name)).unwrap_or(false)
     }
 
+    #[inline]
     fn toggle(&mut self, ctx: &PacketContext, name: &str) {
         let key = Self::flow_key(ctx);
         let bits = self.bits.entry(key).or_default();
@@ -401,6 +422,7 @@ impl SignatureEngine {
     }
 
     /// Match packet against all rules
+    #[inline]
     pub fn match_packet(&self, ctx: &PacketContext) -> Vec<MatchResult> {
         let mut results = Vec::new();
 
@@ -449,6 +471,7 @@ impl SignatureEngine {
     }
 
     /// Fully verify a rule against packet context
+    #[inline]
     fn verify_rule(&self, rule: &Rule, ctx: &PacketContext) -> Option<MatchResult> {
         // Check if rule is enabled
         if !rule.enabled {
@@ -509,10 +532,12 @@ impl SignatureEngine {
         })
     }
 
+    #[inline]
     fn check_protocol(&self, rule: &Rule, ctx: &PacketContext) -> bool {
         rule.protocol == Protocol::Any || rule.protocol == ctx.protocol
     }
 
+    #[inline]
     fn check_addresses(&self, rule: &Rule, ctx: &PacketContext) -> bool {
         // Check source IP
         if !self.ip_matches(&rule.src_ip, ctx.src_ip) {
@@ -721,19 +746,9 @@ impl SignatureEngine {
         use_buffer.unwrap_or(&ctx.payload)
     }
 
+    /// Match content pattern (optimized - minimal allocations)
+    #[inline]
     fn match_content(&self, cm: &ContentMatch, buffer: &[u8], start: usize) -> Option<usize> {
-        let pattern = if cm.nocase {
-            cm.pattern.to_ascii_lowercase()
-        } else {
-            cm.pattern.clone()
-        };
-
-        let search_buffer = if cm.nocase {
-            buffer.to_ascii_lowercase()
-        } else {
-            buffer.to_vec()
-        };
-
         // Calculate search range
         let search_start = if let Some(offset) = cm.offset {
             offset as usize
@@ -748,31 +763,104 @@ impl SignatureEngine {
         };
 
         let search_end = if let Some(depth) = cm.depth {
-            (search_start + depth as usize).min(search_buffer.len())
+            (search_start + depth as usize).min(buffer.len())
         } else if let Some(within) = cm.within {
-            (start + within as usize).min(search_buffer.len())
+            (start + within as usize).min(buffer.len())
         } else {
-            search_buffer.len()
+            buffer.len()
         };
 
-        if search_start >= search_buffer.len() {
+        if search_start >= buffer.len() {
             return None;
         }
 
-        let search_range = &search_buffer[search_start..search_end];
+        let search_range = &buffer[search_start..search_end];
+        let pattern = &cm.pattern;
 
         // Check if pattern can fit in search range
         if pattern.len() > search_range.len() {
             return None;
         }
 
-        // Simple search for pattern
-        for i in 0..=search_range.len() - pattern.len() {
-            if &search_range[i..i + pattern.len()] == pattern.as_slice() {
-                return Some(search_start + i);
-            }
+        // Use optimized search based on case sensitivity
+        if cm.nocase {
+            // Case-insensitive search without allocation
+            self.find_nocase(search_range, pattern).map(|i| search_start + i)
+        } else {
+            // Case-sensitive search using optimized byte search
+            self.find_bytes(search_range, pattern).map(|i| search_start + i)
+        }
+    }
+
+    /// Fast case-sensitive byte pattern search
+    #[inline]
+    fn find_bytes(&self, haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() {
+            return Some(0);
+        }
+        if needle.len() > haystack.len() {
+            return None;
         }
 
+        // Use first byte to quickly scan
+        let first = needle[0];
+        let mut pos = 0;
+
+        while pos <= haystack.len() - needle.len() {
+            // Find first byte
+            if let Some(offset) = haystack[pos..].iter().position(|&b| b == first) {
+                let start = pos + offset;
+                if start + needle.len() <= haystack.len() {
+                    if &haystack[start..start + needle.len()] == needle {
+                        return Some(start);
+                    }
+                }
+                pos = start + 1;
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
+    /// Fast case-insensitive search without allocation
+    #[inline]
+    fn find_nocase(&self, haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        if needle.is_empty() {
+            return Some(0);
+        }
+        if needle.len() > haystack.len() {
+            return None;
+        }
+
+        let first_lower = needle[0].to_ascii_lowercase();
+        let first_upper = needle[0].to_ascii_uppercase();
+        let mut pos = 0;
+
+        while pos <= haystack.len() - needle.len() {
+            // Find first byte (case-insensitive)
+            let found = haystack[pos..].iter().position(|&b| {
+                b == first_lower || b == first_upper
+            });
+
+            if let Some(offset) = found {
+                let start = pos + offset;
+                if start + needle.len() <= haystack.len() {
+                    // Check full pattern
+                    let matches = haystack[start..start + needle.len()]
+                        .iter()
+                        .zip(needle.iter())
+                        .all(|(&h, &n)| h.to_ascii_lowercase() == n.to_ascii_lowercase());
+
+                    if matches {
+                        return Some(start);
+                    }
+                }
+                pos = start + 1;
+            } else {
+                break;
+            }
+        }
         None
     }
 
@@ -780,17 +868,40 @@ impl SignatureEngine {
         for opt in &rule.options {
             if let RuleOption::Pcre(pcre) = opt {
                 let buffer = &ctx.payload;
-                let mut cache = self.pcre_cache.write();
+                let key = PcreCache::make_key(&pcre.pattern, &pcre.flags);
 
-                if let Some(re) = cache.get_or_compile(&pcre.pattern, &pcre.flags) {
-                    let matched = re.is_match(buffer);
-                    if pcre.negated {
-                        if matched {
-                            return false;
+                // Try read lock first (fast path for cached patterns)
+                let matched = {
+                    let cache = self.pcre_cache.read();
+                    if let Some(re) = cache.get(&key) {
+                        Some(re.is_match(buffer))
+                    } else {
+                        None
+                    }
+                };
+
+                let matched = match matched {
+                    Some(m) => m,
+                    None => {
+                        // Cache miss - need write lock to compile
+                        let mut cache = self.pcre_cache.write();
+                        // Double-check after acquiring write lock
+                        if let Some(re) = cache.get(&key) {
+                            re.is_match(buffer)
+                        } else if let Some(re) = cache.compile_and_insert(&pcre.pattern, &pcre.flags) {
+                            re.is_match(buffer)
+                        } else {
+                            continue; // Compilation failed, skip this pattern
                         }
-                    } else if !matched {
+                    }
+                };
+
+                if pcre.negated {
+                    if matched {
                         return false;
                     }
+                } else if !matched {
+                    return false;
                 }
             }
         }

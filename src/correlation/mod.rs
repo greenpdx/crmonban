@@ -109,18 +109,24 @@ pub struct CorrelationEngine {
     config: CorrelationConfig,
     /// Active incidents by ID
     incidents: HashMap<Uuid, Incident>,
+    /// Incident index by IP (for O(1) matching)
+    incidents_by_ip: HashMap<IpAddr, Vec<Uuid>>,
     /// Event index by source IP
     events_by_src: HashMap<IpAddr, VecDeque<Uuid>>,
     /// Event index by destination IP
     events_by_dst: HashMap<IpAddr, VecDeque<Uuid>>,
     /// Event storage
     events: HashMap<Uuid, DetectionEvent>,
-    /// Recent event signatures for deduplication
-    recent_signatures: VecDeque<(u64, DateTime<Utc>)>,
+    /// Recent event signatures for deduplication (HashSet for O(1) lookup)
+    recent_signatures: HashSet<u64>,
+    /// Signature expiry queue (for cleanup)
+    signature_queue: VecDeque<(u64, DateTime<Utc>)>,
     /// Alert aggregator
     aggregator: Aggregator,
     /// Attack chain detector
     chain_detector: ChainDetector,
+    /// Cached correlation window as chrono::Duration
+    window_chrono: chrono::Duration,
     /// Statistics
     stats: CorrelationStats,
 }
@@ -144,21 +150,26 @@ impl CorrelationEngine {
             Duration::from_secs(config.window_seconds),
         );
         let chain_detector = ChainDetector::new();
+        let window_chrono = chrono::Duration::seconds(config.window_seconds as i64);
 
         Self {
             config,
             incidents: HashMap::new(),
+            incidents_by_ip: HashMap::new(),
             events_by_src: HashMap::new(),
             events_by_dst: HashMap::new(),
             events: HashMap::new(),
-            recent_signatures: VecDeque::with_capacity(10_000),
+            recent_signatures: HashSet::with_capacity(10_000),
+            signature_queue: VecDeque::with_capacity(10_000),
             aggregator,
             chain_detector,
+            window_chrono,
             stats: CorrelationStats::default(),
         }
     }
 
     /// Process a new detection event
+    #[inline]
     pub fn process(&mut self, event: DetectionEvent) -> CorrelationResult {
         self.stats.events_processed += 1;
 
@@ -199,8 +210,11 @@ impl CorrelationEngine {
         for rule in &self.config.rules {
             if let Some(matched_events) = self.check_rule(rule, &event) {
                 let incident = self.create_incident(rule, matched_events);
+                let incident_id = incident.id;
+                let hosts = incident.affected_hosts.clone();
                 let incident_clone = incident.clone();
-                self.incidents.insert(incident.id, incident);
+                self.incidents.insert(incident_id, incident);
+                self.index_incident(incident_id, &hosts);
                 self.stats.incidents_created += 1;
                 self.stats.active_incidents = self.incidents.len();
                 return CorrelationResult::NewIncident(incident_clone);
@@ -211,36 +225,44 @@ impl CorrelationEngine {
         CorrelationResult::Standalone(event)
     }
 
-    /// Check if event is a duplicate
+    /// Check if event is a duplicate (optimized with HashSet for O(1) lookup)
+    #[inline]
     fn is_duplicate(&mut self, event: &DetectionEvent) -> bool {
         let signature = self.compute_signature(event);
         let now = Utc::now();
         let window = chrono::Duration::seconds(60); // 1 minute dedup window
 
-        // Clean old signatures
-        while let Some((_, ts)) = self.recent_signatures.front() {
+        // Clean old signatures from queue and HashSet
+        while let Some((old_sig, ts)) = self.signature_queue.front() {
             if now - *ts > window {
-                self.recent_signatures.pop_front();
+                self.recent_signatures.remove(old_sig);
+                self.signature_queue.pop_front();
             } else {
                 break;
             }
         }
 
-        // Check if signature exists
-        if self.recent_signatures.iter().any(|(s, _)| *s == signature) {
+        // O(1) lookup in HashSet
+        if self.recent_signatures.contains(&signature) {
             return true;
         }
 
-        // Add signature
-        self.recent_signatures.push_back((signature, now));
-        if self.recent_signatures.len() > 10_000 {
-            self.recent_signatures.pop_front();
+        // Add signature to both structures
+        self.recent_signatures.insert(signature);
+        self.signature_queue.push_back((signature, now));
+
+        // Limit size
+        if self.signature_queue.len() > 10_000 {
+            if let Some((old_sig, _)) = self.signature_queue.pop_front() {
+                self.recent_signatures.remove(&old_sig);
+            }
         }
 
         false
     }
 
     /// Compute a signature for deduplication
+    #[inline]
     fn compute_signature(&self, event: &DetectionEvent) -> u64 {
         use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
@@ -282,60 +304,119 @@ impl CorrelationEngine {
         }
     }
 
-    /// Find matching incident for event
+    /// Find matching incident for event (optimized with IP index)
+    #[inline]
     fn find_matching_incident(&self, event: &DetectionEvent) -> Option<Uuid> {
         let now = Utc::now();
-        let window = chrono::Duration::seconds(self.config.window_seconds as i64);
 
-        for (id, incident) in &self.incidents {
-            // Check time window
-            if now - incident.last_activity > window {
-                continue;
+        // Check source IP index first (O(1) lookup + small iteration)
+        if let Some(incident_ids) = self.incidents_by_ip.get(&event.src_ip) {
+            for id in incident_ids {
+                if let Some(incident) = self.incidents.get(id) {
+                    if now - incident.last_activity <= self.window_chrono {
+                        return Some(*id);
+                    }
+                }
             }
+        }
 
-            // Check if same source or destination
-            if incident.affected_hosts.contains(&event.src_ip) {
-                return Some(*id);
-            }
-            if incident.affected_hosts.contains(&event.dst_ip) {
-                return Some(*id);
+        // Check destination IP index
+        if let Some(incident_ids) = self.incidents_by_ip.get(&event.dst_ip) {
+            for id in incident_ids {
+                if let Some(incident) = self.incidents.get(id) {
+                    if now - incident.last_activity <= self.window_chrono {
+                        return Some(*id);
+                    }
+                }
             }
         }
 
         None
     }
 
-    /// Check a correlation rule
+    /// Add incident to IP index
+    fn index_incident(&mut self, incident_id: Uuid, hosts: &HashSet<IpAddr>) {
+        for ip in hosts {
+            self.incidents_by_ip
+                .entry(*ip)
+                .or_insert_with(Vec::new)
+                .push(incident_id);
+        }
+    }
+
+    /// Check if event type matches any of the type strings
+    #[inline]
+    fn event_type_matches(event_type: &DetectionType, type_strs: &[String]) -> bool {
+        // Use discriminant name matching without format! allocation for common types
+        let type_name: &str = match event_type {
+            DetectionType::SignatureMatch => "SignatureMatch",
+            DetectionType::ProtocolAnomaly => "ProtocolAnomaly",
+            DetectionType::MalformedPacket => "MalformedPacket",
+            DetectionType::PortScan => "PortScan",
+            DetectionType::NetworkScan => "NetworkScan",
+            DetectionType::DDoS => "DDoS",
+            DetectionType::BruteForce => "BruteForce",
+            DetectionType::DataExfiltration => "DataExfiltration",
+            DetectionType::Beaconing => "Beaconing",
+            DetectionType::LateralMovement => "LateralMovement",
+            DetectionType::ThreatIntelMatch => "ThreatIntelMatch",
+            DetectionType::MaliciousIp => "MaliciousIp",
+            DetectionType::MaliciousDomain => "MaliciousDomain",
+            DetectionType::MaliciousUrl => "MaliciousUrl",
+            DetectionType::MaliciousHash => "MaliciousHash",
+            DetectionType::MaliciousJa3 => "MaliciousJa3",
+            DetectionType::AnomalyDetection => "AnomalyDetection",
+            DetectionType::BehaviorAnomaly => "BehaviorAnomaly",
+            DetectionType::TrafficAnomaly => "TrafficAnomaly",
+            DetectionType::PolicyViolation => "PolicyViolation",
+            DetectionType::ExploitAttempt => "ExploitAttempt",
+            DetectionType::Shellcode => "Shellcode",
+            DetectionType::Overflow => "Overflow",
+            DetectionType::MalwareDownload => "MalwareDownload",
+            DetectionType::MalwareCallback => "MalwareCallback",
+            DetectionType::CnC => "CnC",
+            DetectionType::UnauthorizedAccess => "UnauthorizedAccess",
+            DetectionType::Custom(_) => "Custom",
+            // Fallback: use format! for other types (rare in hot path)
+            _ => return type_strs.iter().any(|t| format!("{:?}", event_type).contains(t)),
+        };
+        type_strs.iter().any(|t| type_name.contains(t.as_str()))
+    }
+
+    /// Check a correlation rule (optimized - avoids format! in hot path)
+    #[inline]
     fn check_rule(&self, rule: &CorrelationRule, event: &DetectionEvent) -> Option<Vec<DetectionEvent>> {
         let now = Utc::now();
         let window = chrono::Duration::seconds(rule.window_seconds as i64);
 
         match &rule.rule_type {
             RuleType::Count { event_types, threshold, group_by } => {
-                // Check if event matches the types we're looking for
-                let event_type_str = format!("{:?}", event.event_type);
-                if !event_types.iter().any(|t| event_type_str.contains(t)) {
+                // Check if event matches the types we're looking for (no allocation)
+                if !Self::event_type_matches(&event.event_type, event_types) {
                     return None;
                 }
 
                 // Count matching events in window
-                let mut matching = Vec::new();
+                let mut matching = Vec::with_capacity(*threshold);
 
                 // Get events from the same source/destination
-                let ips_to_check: Vec<IpAddr> = match group_by.as_deref() {
-                    Some("src_ip") => vec![event.src_ip],
-                    Some("dst_ip") => vec![event.dst_ip],
-                    _ => vec![event.src_ip, event.dst_ip],
+                let ips_to_check: [Option<IpAddr>; 2] = match group_by.as_deref() {
+                    Some("src_ip") => [Some(event.src_ip), None],
+                    Some("dst_ip") => [Some(event.dst_ip), None],
+                    _ => [Some(event.src_ip), Some(event.dst_ip)],
                 };
 
-                for ip in ips_to_check {
-                    if let Some(event_ids) = self.events_by_src.get(&ip) {
+                for ip_opt in ips_to_check.iter().flatten() {
+                    if let Some(event_ids) = self.events_by_src.get(ip_opt) {
                         for event_id in event_ids {
                             if let Some(e) = self.events.get(event_id) {
                                 if now - e.timestamp < window {
-                                    let e_type_str = format!("{:?}", e.event_type);
-                                    if event_types.iter().any(|t| e_type_str.contains(t)) {
+                                    if Self::event_type_matches(&e.event_type, event_types) {
                                         matching.push(e.clone());
+                                        // Early exit if we have enough
+                                        if matching.len() >= *threshold {
+                                            return Some(matching);
+                                        }
                                     }
                                 }
                             }
@@ -360,9 +441,8 @@ impl CorrelationEngine {
 
                 for event_id in event_ids {
                     if let Some(e) = self.events.get(event_id) {
-                        let e_type_str = format!("{:?}", e.event_type);
                         for (i, stage) in stages.iter().enumerate() {
-                            if e_type_str.contains(stage) {
+                            if Self::event_type_matches(&e.event_type, &[stage.clone()]) {
                                 stage_events[i].push(e.clone());
                             }
                         }
@@ -371,7 +451,7 @@ impl CorrelationEngine {
 
                 // Check if sequence is complete within time gap
                 let mut prev_time: Option<DateTime<Utc>> = None;
-                let mut sequence_events = Vec::new();
+                let mut sequence_events = Vec::with_capacity(stages.len());
 
                 for stage_list in &stage_events {
                     if stage_list.is_empty() {

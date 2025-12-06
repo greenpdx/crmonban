@@ -41,17 +41,14 @@ impl FeatureStats {
     }
 
     /// Update stats with a new value using Welford's algorithm
+    #[inline]
     pub fn update(&mut self, value: f32) {
         self.count += 1;
         self.sum += value as f64;
 
-        // Update min/max
-        if value < self.min {
-            self.min = value;
-        }
-        if value > self.max {
-            self.max = value;
-        }
+        // Update min/max (branchless-friendly)
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
 
         // Welford's online mean and variance
         let delta = value - self.mean;
@@ -60,24 +57,27 @@ impl FeatureStats {
         self.m2 += delta * delta2;
 
         // Simple percentile marker update (approximate)
+        // Only update periodically to reduce overhead
         if self.count == 1 {
             self.percentile_markers = [value; 5];
-        } else {
-            // Exponential moving update for percentile approximation
-            let alpha = 0.01;
-            for (i, target) in [0.05, 0.25, 0.5, 0.75, 0.95].iter().enumerate() {
+        } else if self.count % 10 == 0 {
+            // Exponential moving update for percentile approximation (every 10th sample)
+            let alpha = 0.1; // Larger alpha since we update less frequently
+            let range = (self.max - self.min).max(1.0);
+            for (i, &target) in [0.05f32, 0.25, 0.5, 0.75, 0.95].iter().enumerate() {
                 let current = self.percentile_markers[i];
                 let adjustment = if value < current {
-                    -alpha * (1.0 - target) as f32
+                    -alpha * (1.0 - target)
                 } else {
-                    alpha * *target as f32
+                    alpha * target
                 };
-                self.percentile_markers[i] = current + adjustment * (self.max - self.min).max(1.0);
+                self.percentile_markers[i] = current + adjustment * range;
             }
         }
     }
 
     /// Get standard deviation
+    #[inline]
     pub fn std(&self) -> f32 {
         if self.count < 2 {
             0.0
@@ -113,8 +113,19 @@ impl FeatureStats {
     }
 
     /// Get z-score for a value
+    #[inline]
     pub fn zscore(&self, value: f32) -> f32 {
         let std = self.std();
+        if std < f32::EPSILON {
+            0.0
+        } else {
+            (value - self.mean) / std
+        }
+    }
+
+    /// Get z-score with pre-computed std (faster when calling multiple times)
+    #[inline]
+    pub fn zscore_with_std(&self, value: f32, std: f32) -> f32 {
         if std < f32::EPSILON {
             0.0
         } else {
@@ -248,6 +259,33 @@ impl Baseline {
             .entry(service_key.clone())
             .or_insert_with(|| ServiceBaseline::new(features.protocol))
             .update(features);
+    }
+
+    /// Fast update - only global stats (for high-throughput scenarios)
+    #[inline]
+    pub fn update_fast(&mut self, features: &FeatureVector) {
+        self.total_samples += 1;
+
+        // Only update global stats - skip time profile and service baselines
+        for (i, &value) in features.features.iter().enumerate() {
+            if i < self.global_stats.len() {
+                self.global_stats[i].update(value);
+            }
+        }
+
+        // Update last_update only periodically to avoid syscall overhead
+        if self.total_samples % 100 == 0 {
+            self.last_update = Utc::now();
+        }
+    }
+
+    /// Batch update multiple feature vectors efficiently
+    #[inline]
+    pub fn update_batch(&mut self, features_batch: &[FeatureVector]) {
+        for features in features_batch {
+            self.update_fast(features);
+        }
+        self.last_update = Utc::now();
     }
 
     /// Get anomaly scores for each feature
