@@ -30,11 +30,13 @@ pub mod ast;
 pub mod parser;
 pub mod matcher;
 pub mod loader;
+pub mod storage;
 
 pub use ast::*;
 pub use parser::{parse_rule, apply_content_modifiers, ParseError};
 pub use matcher::{SignatureEngine, MatchResult, PatternMatcher};
 pub use loader::{RuleLoader, RuleSet, RuleSource};
+pub use storage::{SignatureStorage, SignatureSet, SignatureSetMetadata, StorageStats, SIGNATURE_DATA_DIR};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -51,6 +53,15 @@ pub struct SignatureConfig {
 
     /// Rule directories to scan
     pub rule_dirs: Vec<PathBuf>,
+
+    /// Persistent storage directory for compiled signatures
+    pub storage_dir: PathBuf,
+
+    /// Load signatures from persistent storage on startup
+    pub load_from_storage: bool,
+
+    /// Save loaded signatures to persistent storage
+    pub save_to_storage: bool,
 
     /// Variables for rule substitution
     pub variables: HashMap<String, String>,
@@ -98,6 +109,9 @@ impl Default for SignatureConfig {
             enabled: true,
             rule_files: Vec::new(),
             rule_dirs: vec![PathBuf::from("/etc/crmonban/rules")],
+            storage_dir: PathBuf::from(SIGNATURE_DATA_DIR),
+            load_from_storage: true,
+            save_to_storage: true,
             variables: default_variables(),
             max_rules: 0,
             prefilter_enabled: true,

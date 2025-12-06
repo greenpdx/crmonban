@@ -165,3 +165,6 @@ nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detectio
 scan = []
 # Network Scanning - Commercial (Nessus, Acunetix) - only when explicitly requested
 scan-commercial = ["scan"]
+
+[dev-dependencies]
+tempfile = "*"

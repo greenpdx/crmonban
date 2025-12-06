@@ -980,6 +980,63 @@ impl SignatureEngine {
     pub fn cleanup(&self, max_age: Duration) {
         self.threshold_state.write().cleanup_expired(max_age);
     }
+
+    /// Load rules from persistent storage
+    pub fn load_from_storage(&mut self) -> std::io::Result<usize> {
+        use super::storage::SignatureStorage;
+
+        let mut storage = SignatureStorage::with_path(&self.config.storage_dir);
+
+        // Initialize storage directory if needed
+        storage.init()?;
+
+        // Load all enabled signature sets
+        let sets = storage.load_all_enabled()?;
+        let mut total_loaded = 0;
+
+        for set in sets {
+            for rule in set.rules {
+                self.add_rule(rule);
+                total_loaded += 1;
+            }
+        }
+
+        if total_loaded > 0 {
+            self.rebuild_prefilter();
+        }
+
+        Ok(total_loaded)
+    }
+
+    /// Save current rules to persistent storage
+    pub fn save_to_storage(&self, name: &str) -> std::io::Result<std::path::PathBuf> {
+        use super::storage::{SignatureSet, SignatureStorage};
+
+        let mut storage = SignatureStorage::with_path(&self.config.storage_dir);
+        storage.init()?;
+
+        let mut set = SignatureSet::new(name, "custom");
+        for rule in self.rules.values() {
+            set.add_rule(rule.clone());
+        }
+
+        storage.save_set(&set)
+    }
+
+    /// Get all current rules for export
+    pub fn get_all_rules(&self) -> Vec<&Rule> {
+        self.rules.values().collect()
+    }
+
+    /// Get the storage directory path
+    pub fn storage_dir(&self) -> &std::path::Path {
+        &self.config.storage_dir
+    }
+
+    /// Check if storage loading is enabled
+    pub fn storage_enabled(&self) -> bool {
+        self.config.load_from_storage
+    }
 }
 
 #[cfg(test)]
