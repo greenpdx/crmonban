@@ -143,3 +143,8 @@ correlation = ["dep:parking_lot", "flow-tracking"]
 packet-engine = ["dep:crossbeam-channel", "dep:num_cpus", "dep:parking_lot", "correlation"]
 # Full NIDS functionality (all stages)
 nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detection", "correlation", "packet-engine"]
+
+# Network Scanning - Free/Open Source (Nmap, Ettercap, Metasploit, Burp)
+scan = []
+# Network Scanning - Commercial (Nessus, Acunetix) - only when explicitly requested
+scan-commercial = ["scan"]

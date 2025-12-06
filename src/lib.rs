@@ -40,6 +40,10 @@ pub mod correlation;
 #[cfg(feature = "packet-engine")]
 pub mod engine;
 
+// Network Scanning (Free: Nmap, Ettercap, Metasploit, Burp)
+#[cfg(feature = "scan")]
+pub mod network;
+
 use anyhow::Result;
 use chrono::Utc;
 use std::net::IpAddr;
