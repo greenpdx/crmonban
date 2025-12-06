@@ -142,3 +142,196 @@ ban_time = 3600
 name = "auth_failed"
 regex = 'auth failed, \d+ attempts .* rip=(?P<ip>\d+\.\d+\.\d+\.\d+)'
 event_type = "failed_auth"
+
+# ============================================================================
+# Port-Based Firewall Rules (UFW-like)
+# ============================================================================
+# When enabled, all ports are blocked by default.
+# You must explicitly allow ports you want to be accessible.
+#
+# CLI Usage:
+#   crmonban port enable                    # Enable port filtering
+#   crmonban port disable                   # Disable port filtering
+#   crmonban port allow 22/tcp              # Allow SSH
+#   crmonban port allow 80/tcp              # Allow HTTP
+#   crmonban port allow 443/tcp             # Allow HTTPS
+#   crmonban port deny 3306/tcp             # Deny MySQL
+#   crmonban port allow 22/tcp --from 192.168.1.0/24  # Allow SSH from LAN
+#   crmonban port list                      # List all rules
+#   crmonban port status                    # Show status
+
+[port_rules]
+# Enable port-based filtering (default deny)
+enabled = false
+
+# Default policies (drop, reject, accept)
+default_input_policy = "drop"
+default_output_policy = "accept"
+default_forward_policy = "drop"
+
+# Always allow these (for sanity)
+allow_established = true  # Allow established/related connections
+allow_loopback = true     # Allow localhost traffic
+allow_icmp = true         # Allow ping
+
+# Port rules (applied in priority order, lower = first)
+# Each rule has: priority, action, direction, protocol, port, from, to, comment
+
+[[port_rules.rules]]
+priority = 100
+action = "allow"
+direction = "in"
+protocol = "tcp"
+port = "22"
+comment = "Allow SSH"
+enabled = true
+
+# Example: Allow HTTP/HTTPS
+# [[port_rules.rules]]
+# priority = 100
+# action = "allow"
+# direction = "in"
+# protocol = "tcp"
+# port = "80"
+# comment = "Allow HTTP"
+# enabled = true
+
+# [[port_rules.rules]]
+# priority = 100
+# action = "allow"
+# direction = "in"
+# protocol = "tcp"
+# port = "443"
+# comment = "Allow HTTPS"
+# enabled = true
+
+# Example: Allow DNS
+# [[port_rules.rules]]
+# priority = 100
+# action = "allow"
+# direction = "in"
+# protocol = "udp"
+# port = "53"
+# comment = "Allow DNS"
+# enabled = true
+
+# Example: Allow port range
+# [[port_rules.rules]]
+# priority = 100
+# action = "allow"
+# direction = "in"
+# protocol = "tcp"
+# port = "6000-6010"
+# comment = "Allow X11 forwarding"
+# enabled = true
+
+# Example: Allow from specific network
+# [[port_rules.rules]]
+# priority = 100
+# action = "allow"
+# direction = "in"
+# protocol = "tcp"
+# port = "3306"
+# from = "192.168.1.0/24"
+# comment = "Allow MySQL from LAN"
+# enabled = true
+
+# ============================================================================
+# eBPF Malware Detection (Symbiote/BPFDoor Detection)
+# ============================================================================
+# Detects malicious eBPF programs commonly used by advanced malware:
+# - Symbiote: Uses BPF filters for traffic hiding and port-hopping C2
+# - BPFDoor: Uses raw socket BPF for covert backdoor communication
+
+[ebpf_malware]
+# Enable eBPF malware detection
+enabled = false
+
+# Monitor bpf() syscalls for unauthorized program loading
+monitor_bpf_syscalls = true
+
+# Monitor raw socket creation with SO_ATTACH_FILTER
+monitor_socket_filters = true
+
+# Alert on any BPF program attachment (even whitelisted)
+alert_on_attach = true
+
+# Processes allowed to load BPF programs
+whitelist_processes = [
+    "systemd",
+    "dockerd",
+    "containerd",
+    "cilium",
+    "bpftrace",
+    "tcpdump",
+    "wireshark",
+    "crmonban"
+]
+
+# Known malicious Symbiote port-hopping ports
+known_malicious_ports = [54778, 58870, 59666, 54879, 57987, 64322, 45677, 63227]
+
+# Ban duration for detected malware C2 connections (24 hours)
+ban_time = 86400
+
+# ============================================================================
+# DNS Covert Channel Detection
+# ============================================================================
+# Detects DNS-based C2 and data exfiltration channels:
+# - High-entropy subdomain queries (encoded data)
+# - Oversized TXT record responses
+# - Excessive query rates from single source
+
+[dns_monitor]
+# Enable DNS monitoring
+enabled = false
+
+# Detect potential covert channels in DNS traffic
+detect_covert_channels = true
+
+# Maximum allowed DNS query name length (longer may indicate tunneling)
+max_query_length = 63
+
+# Minimum entropy threshold (high values indicate encoded/encrypted data)
+# Normal domains: ~2.5-3.5, Tunneling: ~4.0+
+entropy_threshold = 4.0
+
+# Maximum queries per minute from single IP before flagging
+max_queries_per_minute = 100
+
+# Detect TXT record abuse (common for data exfiltration)
+detect_txt_abuse = true
+
+# Maximum TXT record response size in bytes
+max_txt_response_size = 512
+
+# Ban duration for DNS tunneling (1 hour)
+ban_time = 3600
+
+# NFQUEUE number for DNS inspection (must be different from DPI queue)
+queue_num = 101
+
+# ============================================================================
+# Port Hopping Detection (Symbiote-style)
+# ============================================================================
+# Detects malware communication patterns that rapidly cycle through
+# multiple high ports to evade detection.
+
+[port_hopping]
+# Enable port hopping detection
+enabled = false
+
+# Number of unique high ports that triggers detection
+threshold = 5
+
+# Time window in seconds to count port accesses
+window_secs = 30
+
+# Minimum port number to consider (ignore well-known ports)
+min_port = 1024
+
+# Ban duration for port hopping detection (2 hours)
+ban_time = 7200
+
+# Protocols to monitor
+protocols = ["tcp", "udp"]

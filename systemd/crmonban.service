@@ -1,0 +1,49 @@
+[Unit]
+Description=crmonban - nftables-based intrusion prevention system
+Documentation=https://github.com/crmonban
+After=network.target nftables.service
+Wants=nftables.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/crmonban start --foreground
+ExecStop=/usr/local/bin/crmonban stop
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Paths
+RuntimeDirectory=crmonban
+StateDirectory=crmonban
+ConfigurationDirectory=crmonban
+
+# Environment
+Environment=RUST_LOG=info
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+LockPersonality=true
+
+# Required capabilities for nftables and reading logs
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+
+# Allow read access to log files
+ReadOnlyPaths=/var/log
+
+# Allow write access to state directory
+ReadWritePaths=/var/lib/crmonban
+
+[Install]
+WantedBy=multi-user.target

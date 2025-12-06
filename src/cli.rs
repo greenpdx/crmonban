@@ -5,7 +5,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use tabled::{Table, Tabled};
 
-use crmonban::config::Config;
+use crmonban::config::{Config, PortAction, PortRule};
 use crmonban::dbus::DbusClient;
 use crmonban::intel::format_intel;
 use crmonban::models::BanSource;
@@ -116,6 +116,61 @@ pub enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+
+    /// Manage port rules (UFW-like firewall)
+    Port {
+        #[command(subcommand)]
+        action: PortRuleAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PortRuleAction {
+    /// Allow a port (like: crmonban port allow 80/tcp)
+    Allow {
+        /// Port specification (e.g., "80", "443/tcp", "53/udp", "1000-2000")
+        port_spec: String,
+
+        /// Source IP/CIDR to allow from (optional)
+        #[arg(short, long)]
+        from: Option<String>,
+
+        /// Comment for the rule
+        #[arg(short, long)]
+        comment: Option<String>,
+    },
+
+    /// Deny a port
+    Deny {
+        /// Port specification (e.g., "80", "443/tcp", "53/udp")
+        port_spec: String,
+
+        /// Source IP/CIDR to deny from (optional)
+        #[arg(short, long)]
+        from: Option<String>,
+
+        /// Comment for the rule
+        #[arg(short, long)]
+        comment: Option<String>,
+    },
+
+    /// Log traffic to a port (without blocking)
+    Log {
+        /// Port specification
+        port_spec: String,
+    },
+
+    /// List current port rules
+    List,
+
+    /// Enable port filtering (default deny policy)
+    Enable,
+
+    /// Disable port filtering (accept all)
+    Disable,
+
+    /// Show port filter status
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -203,6 +258,7 @@ pub async fn run_command(cli: Cli) -> Result<()> {
         Commands::Init => cmd_init(config).await,
         Commands::Flush { yes } => cmd_flush(config, yes).await,
         Commands::GenConfig { output } => cmd_gen_config(output),
+        Commands::Port { action } => cmd_port(config, action).await,
     }
 }
 
@@ -593,5 +649,204 @@ fn cmd_gen_config(output: Option<PathBuf>) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Parse port specification like "80", "443/tcp", "53/udp", "1000-2000/tcp"
+fn parse_port_spec(spec: &str) -> Result<(String, String)> {
+    let parts: Vec<&str> = spec.split('/').collect();
+    match parts.len() {
+        1 => Ok((parts[0].to_string(), "tcp".to_string())), // Default to TCP
+        2 => Ok((parts[0].to_string(), parts[1].to_lowercase())),
+        _ => anyhow::bail!("Invalid port specification: {}", spec),
+    }
+}
+
+async fn cmd_port(mut config: Config, action: PortRuleAction) -> Result<()> {
+    match action {
+        PortRuleAction::Allow { port_spec, from, comment } => {
+            let (port, protocol) = parse_port_spec(&port_spec)?;
+            let rule = PortRule {
+                priority: 100,
+                action: PortAction::Allow,
+                direction: "in".to_string(),
+                protocol,
+                port: port.clone(),
+                from,
+                to: None,
+                comment: comment.unwrap_or_else(|| format!("Allow port {}", port_spec)),
+                enabled: true,
+            };
+
+            // Add to config and save
+            config.port_rules.rules.push(rule.clone());
+            save_port_rules_config(&config)?;
+
+            // Apply to firewall if enabled
+            if config.port_rules.enabled {
+                let crmonban = Crmonban::new(config)?;
+                crmonban.add_port_rule(&rule)?;
+            }
+
+            println!("{} port {} ({})", "Allowed".green().bold(), port, port_spec);
+        }
+
+        PortRuleAction::Deny { port_spec, from, comment } => {
+            let (port, protocol) = parse_port_spec(&port_spec)?;
+            let rule = PortRule {
+                priority: 100,
+                action: PortAction::Deny,
+                direction: "in".to_string(),
+                protocol,
+                port: port.clone(),
+                from,
+                to: None,
+                comment: comment.unwrap_or_else(|| format!("Deny port {}", port_spec)),
+                enabled: true,
+            };
+
+            config.port_rules.rules.push(rule.clone());
+            save_port_rules_config(&config)?;
+
+            if config.port_rules.enabled {
+                let crmonban = Crmonban::new(config)?;
+                crmonban.add_port_rule(&rule)?;
+            }
+
+            println!("{} port {} ({})", "Denied".red().bold(), port, port_spec);
+        }
+
+        PortRuleAction::Log { port_spec } => {
+            let (port, protocol) = parse_port_spec(&port_spec)?;
+            let rule = PortRule {
+                priority: 50, // Log rules should be early
+                action: PortAction::Log,
+                direction: "in".to_string(),
+                protocol,
+                port: port.clone(),
+                from: None,
+                to: None,
+                comment: format!("Log port {}", port_spec),
+                enabled: true,
+            };
+
+            config.port_rules.rules.push(rule.clone());
+            save_port_rules_config(&config)?;
+
+            if config.port_rules.enabled {
+                let crmonban = Crmonban::new(config)?;
+                crmonban.add_port_rule(&rule)?;
+            }
+
+            println!("{} port {} ({})", "Logging".cyan().bold(), port, port_spec);
+        }
+
+        PortRuleAction::List => {
+            println!("{}", "=== Port Filter Rules ===".bold());
+            println!();
+            println!("Status: {}", if config.port_rules.enabled {
+                "ENABLED".green().bold()
+            } else {
+                "DISABLED".red().bold()
+            });
+            println!("Default policy (input):   {}", config.port_rules.default_input_policy.to_uppercase().yellow());
+            println!("Default policy (output):  {}", config.port_rules.default_output_policy.to_uppercase());
+            println!("Default policy (forward): {}", config.port_rules.default_forward_policy.to_uppercase());
+            println!();
+
+            if config.port_rules.rules.is_empty() {
+                println!("No port rules defined");
+            } else {
+                println!("{:<6} {:<10} {:<8} {:<15} {:<20} {}",
+                    "PRIO", "ACTION", "PROTO", "PORT", "FROM", "COMMENT");
+                println!("{}", "-".repeat(80));
+
+                let mut rules = config.port_rules.rules.clone();
+                rules.sort_by_key(|r| r.priority);
+
+                for rule in &rules {
+                    if !rule.enabled {
+                        continue;
+                    }
+                    let action_str = match rule.action {
+                        PortAction::Allow => "ALLOW".green().to_string(),
+                        PortAction::Deny => "DENY".red().to_string(),
+                        PortAction::Reject => "REJECT".yellow().to_string(),
+                        PortAction::Log => "LOG".cyan().to_string(),
+                    };
+                    println!("{:<6} {:<10} {:<8} {:<15} {:<20} {}",
+                        rule.priority,
+                        action_str,
+                        rule.protocol.to_uppercase(),
+                        rule.port,
+                        rule.from.as_deref().unwrap_or("any"),
+                        rule.comment);
+                }
+            }
+        }
+
+        PortRuleAction::Enable => {
+            config.port_rules.enabled = true;
+            save_port_rules_config(&config)?;
+
+            // Initialize port rules in firewall
+            let crmonban = Crmonban::new(config.clone())?;
+            crmonban.init_firewall()?;
+
+            println!("{}", "Port filtering ENABLED".green().bold());
+            println!("Default policy: {} all incoming traffic", "DROP".red().bold());
+            println!("Only explicitly allowed ports will be accessible");
+        }
+
+        PortRuleAction::Disable => {
+            config.port_rules.enabled = false;
+            save_port_rules_config(&config)?;
+
+            println!("{}", "Port filtering DISABLED".yellow().bold());
+            println!("All ports are now accessible (only IP bans apply)");
+            println!("Run 'crmonban init' to apply changes to firewall");
+        }
+
+        PortRuleAction::Status => {
+            println!("{}", "=== Port Filter Status ===".bold());
+            println!();
+            if config.port_rules.enabled {
+                println!("Status: {}", "ENABLED".green().bold());
+                println!("Default policy: {} (drop all, allow explicit)", "DENY".red().bold());
+            } else {
+                println!("Status: {}", "DISABLED".yellow().bold());
+                println!("Default policy: {} (allow all)", "ACCEPT".green().bold());
+            }
+            println!();
+            println!("Allow loopback:     {}", if config.port_rules.allow_loopback { "yes".green() } else { "no".red() });
+            println!("Allow established:  {}", if config.port_rules.allow_established { "yes".green() } else { "no".red() });
+            println!("Allow ICMP (ping):  {}", if config.port_rules.allow_icmp { "yes".green() } else { "no".red() });
+            println!();
+            println!("Rules defined: {}", config.port_rules.rules.len());
+        }
+    }
+
+    Ok(())
+}
+
+fn save_port_rules_config(config: &Config) -> Result<()> {
+    // Try to save to the config file that was loaded
+    let paths = [
+        std::path::PathBuf::from("/etc/crmonban/config.toml"),
+        dirs_next::config_dir()
+            .map(|p| p.join("crmonban/config.toml"))
+            .unwrap_or_default(),
+        std::path::PathBuf::from("config.toml"),
+    ];
+
+    for path in &paths {
+        if path.exists() {
+            config.save(path)?;
+            return Ok(());
+        }
+    }
+
+    // If no config exists, save to local config.toml
+    config.save("config.toml")?;
     Ok(())
 }

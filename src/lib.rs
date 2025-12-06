@@ -5,13 +5,40 @@ pub mod dpi;
 pub mod ebpf;
 pub mod firewall;
 pub mod intel;
+pub mod malware_detect;
 pub mod models;
 pub mod monitor;
 pub mod port_scan_monitor;
 pub mod shared_whitelist;
 pub mod siem;
+#[cfg(feature = "signatures")]
+pub mod signatures;
 pub mod tls_proxy;
 pub mod zones;
+
+// NIDS Stage 2 & 3: Flow tracking and protocol analysis
+#[cfg(feature = "flow-tracking")]
+pub mod core;
+#[cfg(feature = "flow-tracking")]
+pub mod flow;
+#[cfg(feature = "protocols")]
+pub mod protocols;
+
+// NIDS Stage 5: Threat intelligence feeds
+#[cfg(feature = "threat-intel")]
+pub mod threat_intel;
+
+// NIDS Stage 6: ML/Anomaly detection
+#[cfg(feature = "ml-detection")]
+pub mod ml;
+
+// NIDS Stage 7: Alert Correlation
+#[cfg(feature = "correlation")]
+pub mod correlation;
+
+// NIDS Stage 8: Packet Engine
+#[cfg(feature = "packet-engine")]
+pub mod engine;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -56,7 +83,12 @@ impl Crmonban {
         } else {
             None
         };
-        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi, tls_proxy);
+        let port_rules = if config.port_rules.enabled {
+            Some(config.port_rules.clone())
+        } else {
+            None
+        };
+        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi, tls_proxy, port_rules);
         let intel = IntelGatherer::new(config.intel.clone())?;
 
         Ok(Self {
@@ -85,7 +117,12 @@ impl Crmonban {
         } else {
             None
         };
-        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi, tls_proxy);
+        let port_rules = if config.port_rules.enabled {
+            Some(config.port_rules.clone())
+        } else {
+            None
+        };
+        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi, tls_proxy, port_rules);
         let intel = IntelGatherer::new(config.intel.clone())?;
 
         Ok(Self {
@@ -99,6 +136,11 @@ impl Crmonban {
     /// Initialize the firewall (create table, chains, sets)
     pub fn init_firewall(&self) -> Result<()> {
         self.firewall.init()
+    }
+
+    /// Add a port rule to the firewall
+    pub fn add_port_rule(&self, rule: &config::PortRule) -> Result<()> {
+        self.firewall.add_port_rule(rule)
     }
 
     /// Sync database bans to nftables

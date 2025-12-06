@@ -24,7 +24,26 @@ notify = "*"
 notify-debouncer-mini = "*"
 
 # Pattern matching
-regex = "*"
+regex = { version = "*", features = ["std"] }
+
+# Signature engine dependencies (optional)
+nom = { version = "*", optional = true }
+aho-corasick = { version = "*", optional = true }
+parking_lot = { version = "*", optional = true }
+
+# Flow tracking and protocol analysis dependencies (optional)
+md5 = { version = "*", optional = true }
+
+# Threat intelligence dependencies (optional)
+bincode = { version = "1", optional = true }
+async-trait = { version = "*", optional = true }
+
+# ML/Anomaly detection dependencies (optional)
+rand = { version = "*", optional = true }
+
+# Correlation and packet engine dependencies (optional)
+crossbeam-channel = { version = "*", optional = true }
+num_cpus = { version = "*", optional = true }
 
 # Database
 rusqlite = { version = "*", features = ["bundled"] }
@@ -55,7 +74,7 @@ thiserror = "*"
 anyhow = "*"
 
 # IP address handling
-ipnetwork = "*"
+ipnetwork = { version = "*", features = ["serde"] }
 
 # DNS lookups
 trust-dns-resolver = "*"
@@ -108,3 +127,19 @@ path = "src/lib.rs"
 default = []
 # External firewall integration (requires separate firewall daemon)
 crrouter = []
+# Signature-based detection (Suricata/Snort rule compatibility)
+signatures = ["dep:nom", "dep:aho-corasick", "dep:parking_lot"]
+# Flow tracking for ML/anomaly detection (Stage 2)
+flow-tracking = ["dep:parking_lot"]
+# Protocol analyzers with JA3 fingerprinting (Stage 3)
+protocols = ["dep:md5"]
+# Threat intelligence feeds (Stage 5)
+threat-intel = ["dep:bincode", "dep:async-trait", "dep:parking_lot"]
+# ML/Anomaly detection (Stage 6)
+ml-detection = ["dep:rand", "dep:bincode", "dep:parking_lot", "flow-tracking"]
+# Alert Correlation (Stage 7)
+correlation = ["dep:parking_lot", "flow-tracking"]
+# Packet Engine (Stage 8)
+packet-engine = ["dep:crossbeam-channel", "dep:num_cpus", "dep:parking_lot", "correlation"]
+# Full NIDS functionality (all stages)
+nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detection", "correlation", "packet-engine"]

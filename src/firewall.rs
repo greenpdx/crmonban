@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use nftables::{
     batch::Batch,
-    expr::{Elem, Expression, NamedExpression, Payload, PayloadField},
+    expr::{Elem, Expression, NamedExpression, Payload, PayloadField, Range},
     helper::{apply_ruleset, get_current_ruleset},
     schema::{
         Chain, Element, FlushObject, NfCmd, NfListObject, NfObject, Rule, Set, SetFlag,
@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use tracing::{debug, info, warn};
 
-use crate::config::{DpiConfig, NftablesConfig, PortScanConfig, TlsProxyConfig};
+use crate::config::{DpiConfig, NftablesConfig, PortAction, PortRule, PortRulesConfig, PortScanConfig, TlsProxyConfig};
 
 /// Firewall manager for nftables operations
 pub struct Firewall {
@@ -23,6 +23,7 @@ pub struct Firewall {
     port_scan_config: Option<PortScanConfig>,
     dpi_config: Option<DpiConfig>,
     tls_proxy_config: Option<TlsProxyConfig>,
+    port_rules_config: Option<PortRulesConfig>,
 }
 
 impl Firewall {
@@ -33,6 +34,7 @@ impl Firewall {
             port_scan_config: None,
             dpi_config: None,
             tls_proxy_config: None,
+            port_rules_config: None,
         }
     }
 
@@ -43,6 +45,7 @@ impl Firewall {
             port_scan_config: Some(port_scan_config),
             dpi_config: None,
             tls_proxy_config: None,
+            port_rules_config: None,
         }
     }
 
@@ -52,12 +55,14 @@ impl Firewall {
         port_scan_config: Option<PortScanConfig>,
         dpi_config: Option<DpiConfig>,
         tls_proxy_config: Option<TlsProxyConfig>,
+        port_rules_config: Option<PortRulesConfig>,
     ) -> Self {
         Self {
             config,
             port_scan_config,
             dpi_config,
             tls_proxy_config,
+            port_rules_config,
         }
     }
 
@@ -198,6 +203,13 @@ impl Firewall {
         if let Some(ref tls_config) = self.tls_proxy_config {
             if tls_config.enabled {
                 self.add_tls_proxy_rules(&mut batch, tls_config);
+            }
+        }
+
+        // Add port rules (UFW-like) if enabled
+        if let Some(ref port_rules) = self.port_rules_config {
+            if port_rules.enabled {
+                self.add_port_rules(&mut batch, port_rules);
             }
         }
 
@@ -845,6 +857,317 @@ impl Firewall {
         apply_ruleset(&ruleset).context("Failed to apply DPI rules")?;
 
         info!("DPI rules initialized");
+        Ok(())
+    }
+
+    /// Add port-based firewall rules (UFW-like functionality)
+    fn add_port_rules(&self, batch: &mut Batch, config: &PortRulesConfig) {
+        info!("Adding port-based firewall rules (default policy: {})", config.default_input_policy);
+
+        // Create a separate chain for port filtering with higher priority (runs after blocklist)
+        batch.add(NfListObject::Chain(Chain {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            name: Cow::Borrowed("port_filter"),
+            newname: None,
+            handle: None,
+            _type: Some(NfChainType::Filter),
+            hook: Some(NfHook::Input),
+            prio: Some(self.config.priority + 50), // After blocklist but with room for other chains
+            dev: None,
+            policy: Some(NfChainPolicy::Drop), // Default deny - rules must explicitly allow
+        }));
+
+        // Allow loopback traffic
+        if config.allow_loopback {
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Borrowed("port_filter"),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Allow loopback")),
+                expr: Cow::Owned(vec![
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("meta"),
+                                field: Cow::Borrowed("iifname"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Borrowed("lo")),
+                        op: Operator::EQ,
+                    }),
+                    Statement::Accept(None),
+                ]),
+            }));
+        }
+
+        // Allow established/related connections (stateful)
+        if config.allow_established {
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Borrowed("port_filter"),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Allow established/related")),
+                expr: Cow::Owned(vec![
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("ct"),
+                                field: Cow::Borrowed("state"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Borrowed("established,related")),
+                        op: Operator::EQ,
+                    }),
+                    Statement::Accept(None),
+                ]),
+            }));
+        }
+
+        // Allow ICMP (ping)
+        if config.allow_icmp {
+            // IPv4 ICMP
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Borrowed("port_filter"),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Allow ICMP (ping)")),
+                expr: Cow::Owned(vec![
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("meta"),
+                                field: Cow::Borrowed("l4proto"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Borrowed("icmp")),
+                        op: Operator::EQ,
+                    }),
+                    Statement::Accept(None),
+                ]),
+            }));
+            // IPv6 ICMPv6
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Borrowed("port_filter"),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Allow ICMPv6")),
+                expr: Cow::Owned(vec![
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("meta"),
+                                field: Cow::Borrowed("l4proto"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Borrowed("ipv6-icmp")),
+                        op: Operator::EQ,
+                    }),
+                    Statement::Accept(None),
+                ]),
+            }));
+        }
+
+        // Sort rules by priority (lower number = earlier evaluation)
+        let mut sorted_rules: Vec<&PortRule> = config.rules.iter().filter(|r| r.enabled).collect();
+        sorted_rules.sort_by_key(|r| r.priority);
+
+        // Add user-defined port rules
+        for rule in sorted_rules {
+            if rule.direction == "in" || rule.direction == "both" {
+                self.add_single_port_rule(batch, rule, "port_filter");
+            }
+        }
+
+        // Log denied packets before dropping (optional)
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("port_filter"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Log denied packets")),
+            expr: Cow::Owned(vec![
+                Statement::Log(Some(Log {
+                    prefix: Some(Cow::Borrowed("[crmonban-denied] ")),
+                    group: None,
+                    snaplen: None,
+                    queue_threshold: None,
+                    level: Some(LogLevel::Warn),
+                    flags: None,
+                })),
+            ]),
+        }));
+
+        // Default policy is DROP (set in chain policy above)
+        info!("Port filter rules added ({} user rules)", config.rules.len());
+    }
+
+    /// Add a single port rule to the batch
+    fn add_single_port_rule<'a>(&self, batch: &mut Batch<'a>, rule: &PortRule, chain: &'a str) {
+        let protocol = rule.protocol.as_str();
+        let port_str = &rule.port;
+
+        // Build match expressions
+        let mut exprs: Vec<Statement> = Vec::new();
+
+        // Protocol match (unless "any")
+        if protocol != "any" {
+            exprs.push(Statement::Match(Match {
+                left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                    PayloadField {
+                        protocol: Cow::Borrowed("meta"),
+                        field: Cow::Borrowed("l4proto"),
+                    },
+                ))),
+                right: Expression::String(Cow::Owned(protocol.to_string())),
+                op: Operator::EQ,
+            }));
+        }
+
+        // Port match
+        if port_str.contains('-') {
+            // Port range - use set with range
+            let parts: Vec<&str> = port_str.split('-').collect();
+            if parts.len() == 2 {
+                if let (Ok(start), Ok(end)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                    exprs.push(Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Owned(protocol.to_string()),
+                                field: Cow::Borrowed("dport"),
+                            },
+                        ))),
+                        right: Expression::Range(Box::new(Range {
+                            range: [
+                                Expression::Number(start),
+                                Expression::Number(end),
+                            ],
+                        })),
+                        op: Operator::EQ,
+                    }));
+                }
+            }
+        } else {
+            // Single port or comma-separated
+            if let Ok(port) = port_str.parse::<u32>() {
+                exprs.push(Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Owned(protocol.to_string()),
+                            field: Cow::Borrowed("dport"),
+                        },
+                    ))),
+                    right: Expression::Number(port),
+                    op: Operator::EQ,
+                }));
+            }
+        }
+
+        // Source IP match (if specified)
+        if let Some(ref from) = rule.from {
+            if !from.is_empty() {
+                exprs.push(Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("ip"),
+                            field: Cow::Borrowed("saddr"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Owned(from.clone())),
+                    op: Operator::EQ,
+                }));
+            }
+        }
+
+        // Action
+        match rule.action {
+            PortAction::Allow => {
+                exprs.push(Statement::Accept(None));
+            }
+            PortAction::Deny => {
+                exprs.push(Statement::Drop(None));
+            }
+            PortAction::Reject => {
+                exprs.push(Statement::Reject(None));
+            }
+            PortAction::Log => {
+                exprs.push(Statement::Log(Some(Log {
+                    prefix: Some(Cow::Owned(format!("[crmonban-port-{}] ", port_str))),
+                    group: None,
+                    snaplen: None,
+                    queue_threshold: None,
+                    level: Some(LogLevel::Info),
+                    flags: None,
+                })));
+            }
+        }
+
+        let comment = if rule.comment.is_empty() {
+            format!("{} {} port {}", rule.action, protocol, port_str)
+        } else {
+            rule.comment.clone()
+        };
+
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed(chain),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Owned(comment)),
+            expr: Cow::Owned(exprs),
+        }));
+    }
+
+    /// Initialize port rules (can be called separately to add rules to existing table)
+    pub fn init_port_rules(&self, config: &PortRulesConfig) -> Result<()> {
+        if !config.enabled {
+            debug!("Port rules are disabled");
+            return Ok(());
+        }
+
+        if !self.table_exists()? {
+            return Err(anyhow::anyhow!(
+                "Table {} does not exist. Initialize firewall first.",
+                self.config.table_name
+            ));
+        }
+
+        let mut batch = Batch::new();
+        self.add_port_rules(&mut batch, config);
+
+        let ruleset = batch.to_nftables();
+        apply_ruleset(&ruleset).context("Failed to apply port rules")?;
+
+        info!("Port rules initialized");
+        Ok(())
+    }
+
+    /// Add a single port rule dynamically (runtime)
+    pub fn add_port_rule(&self, rule: &PortRule) -> Result<()> {
+        if !self.table_exists()? {
+            return Err(anyhow::anyhow!(
+                "Table {} does not exist. Initialize firewall first.",
+                self.config.table_name
+            ));
+        }
+
+        let mut batch = Batch::new();
+        self.add_single_port_rule(&mut batch, rule, "port_filter");
+
+        let ruleset = batch.to_nftables();
+        apply_ruleset(&ruleset).context("Failed to add port rule")?;
+
+        info!("Added port rule: {} {} port {}", rule.action, rule.protocol, rule.port);
         Ok(())
     }
 }

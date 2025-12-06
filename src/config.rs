@@ -7,6 +7,7 @@ use crate::ebpf::EbpfConfig;
 use crate::shared_whitelist::SharedWhitelistConfig;
 use crate::siem::SiemConfig;
 use crate::zones::ZoneConfig;
+use std::net::IpAddr;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +44,18 @@ pub struct Config {
 
     #[serde(default)]
     pub tls_proxy: TlsProxyConfig,
+
+    #[serde(default)]
+    pub port_rules: PortRulesConfig,
+
+    #[serde(default)]
+    pub ebpf_malware: EbpfMalwareConfig,
+
+    #[serde(default)]
+    pub dns_monitor: DnsMonitorConfig,
+
+    #[serde(default)]
+    pub port_hopping: PortHoppingConfig,
 
     #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
@@ -112,6 +125,10 @@ impl Default for Config {
             port_scan: PortScanConfig::default(),
             dpi: DpiConfig::default(),
             tls_proxy: TlsProxyConfig::default(),
+            port_rules: PortRulesConfig::default(),
+            ebpf_malware: EbpfMalwareConfig::default(),
+            dns_monitor: DnsMonitorConfig::default(),
+            port_hopping: PortHoppingConfig::default(),
             services,
         }
     }
@@ -753,6 +770,426 @@ impl Default for TlsProxyConfig {
             cert_validity_days: default_cert_validity_days(),
             ca_common_name: default_ca_cn(),
             ca_organization: default_ca_org(),
+        }
+    }
+}
+
+/// eBPF malware detection configuration
+/// Detects malicious eBPF programs like Symbiote and BPFDoor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EbpfMalwareConfig {
+    /// Enable eBPF malware detection
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Monitor bpf() syscalls for unauthorized program loading
+    #[serde(default = "default_true")]
+    pub monitor_bpf_syscalls: bool,
+
+    /// Monitor raw socket creation with SO_ATTACH_FILTER
+    #[serde(default = "default_true")]
+    pub monitor_socket_filters: bool,
+
+    /// Alert on any eBPF program attachment
+    #[serde(default = "default_true")]
+    pub alert_on_attach: bool,
+
+    /// Whitelist of processes allowed to load eBPF programs
+    #[serde(default = "default_ebpf_whitelist")]
+    pub whitelist_processes: Vec<String>,
+
+    /// Known malicious port patterns (Symbiote-style port hopping)
+    #[serde(default = "default_malicious_ports")]
+    pub known_malicious_ports: Vec<u16>,
+
+    /// Ban duration for detected eBPF malware C2 IPs
+    #[serde(default = "default_ebpf_ban_time")]
+    pub ban_time: i64,
+}
+
+fn default_ebpf_whitelist() -> Vec<String> {
+    vec![
+        "systemd".to_string(),
+        "dockerd".to_string(),
+        "containerd".to_string(),
+        "cilium".to_string(),
+        "bpftrace".to_string(),
+        "tcpdump".to_string(),
+        "wireshark".to_string(),
+    ]
+}
+
+fn default_malicious_ports() -> Vec<u16> {
+    // Known Symbiote port-hopping ports
+    vec![54778, 58870, 59666, 54879, 57987, 64322, 45677, 63227]
+}
+
+fn default_ebpf_ban_time() -> i64 {
+    86400 // 24 hours for malware C2
+}
+
+impl Default for EbpfMalwareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            monitor_bpf_syscalls: true,
+            monitor_socket_filters: true,
+            alert_on_attach: true,
+            whitelist_processes: default_ebpf_whitelist(),
+            known_malicious_ports: default_malicious_ports(),
+            ban_time: default_ebpf_ban_time(),
+        }
+    }
+}
+
+/// DNS covert channel detection configuration
+/// Detects DNS-based C2 channels like BPFDoor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsMonitorConfig {
+    /// Enable DNS monitoring
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Detect potential covert channels in DNS traffic
+    #[serde(default = "default_true")]
+    pub detect_covert_channels: bool,
+
+    /// Maximum allowed DNS query name length (longer may indicate tunneling)
+    #[serde(default = "default_max_query_length")]
+    pub max_query_length: usize,
+
+    /// Minimum entropy threshold for detecting encoded data in queries
+    #[serde(default = "default_entropy_threshold")]
+    pub entropy_threshold: f64,
+
+    /// Maximum queries per minute from single IP before flagging
+    #[serde(default = "default_max_dns_rate")]
+    pub max_queries_per_minute: u32,
+
+    /// Detect TXT record abuse (common for data exfiltration)
+    #[serde(default = "default_true")]
+    pub detect_txt_abuse: bool,
+
+    /// Maximum TXT record response size (bytes)
+    #[serde(default = "default_max_txt_size")]
+    pub max_txt_response_size: usize,
+
+    /// Ban duration for DNS tunneling attempts
+    #[serde(default = "default_dns_ban_time")]
+    pub ban_time: i64,
+
+    /// NFQUEUE number for DNS inspection
+    #[serde(default = "default_dns_queue")]
+    pub queue_num: u16,
+}
+
+fn default_max_query_length() -> usize {
+    63 // Standard max label length
+}
+
+fn default_entropy_threshold() -> f64 {
+    4.0 // High entropy indicates encoded/encrypted data
+}
+
+fn default_max_dns_rate() -> u32 {
+    100 // queries per minute
+}
+
+fn default_max_txt_size() -> usize {
+    512 // bytes
+}
+
+fn default_dns_ban_time() -> i64 {
+    3600 // 1 hour
+}
+
+fn default_dns_queue() -> u16 {
+    101 // Different from DPI queue
+}
+
+impl Default for DnsMonitorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            detect_covert_channels: true,
+            max_query_length: default_max_query_length(),
+            entropy_threshold: default_entropy_threshold(),
+            max_queries_per_minute: default_max_dns_rate(),
+            detect_txt_abuse: true,
+            max_txt_response_size: default_max_txt_size(),
+            ban_time: default_dns_ban_time(),
+            queue_num: default_dns_queue(),
+        }
+    }
+}
+
+/// Port hopping detection configuration
+/// Detects malware-style rapid port cycling (like Symbiote)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortHoppingConfig {
+    /// Enable port hopping detection
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Number of unique high ports that triggers detection
+    #[serde(default = "default_hopping_threshold")]
+    pub threshold: u32,
+
+    /// Time window in seconds to count port accesses
+    #[serde(default = "default_hopping_window")]
+    pub window_secs: u64,
+
+    /// Minimum port number to consider (ignore well-known ports)
+    #[serde(default = "default_min_port")]
+    pub min_port: u16,
+
+    /// Ban duration for port hopping detection
+    #[serde(default = "default_hopping_ban_time")]
+    pub ban_time: i64,
+
+    /// Protocols to monitor: tcp, udp, both
+    #[serde(default = "default_hopping_protocols")]
+    pub protocols: Vec<String>,
+}
+
+fn default_hopping_threshold() -> u32 {
+    5 // 5 different high ports
+}
+
+fn default_hopping_window() -> u64 {
+    30 // 30 seconds
+}
+
+fn default_min_port() -> u16 {
+    1024 // Ignore well-known ports
+}
+
+fn default_hopping_ban_time() -> i64 {
+    7200 // 2 hours
+}
+
+fn default_hopping_protocols() -> Vec<String> {
+    vec!["tcp".to_string(), "udp".to_string()]
+}
+
+impl Default for PortHoppingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_hopping_threshold(),
+            window_secs: default_hopping_window(),
+            min_port: default_min_port(),
+            ban_time: default_hopping_ban_time(),
+            protocols: default_hopping_protocols(),
+        }
+    }
+}
+
+/// Port-based firewall rules configuration (like UFW)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortRulesConfig {
+    /// Enable port-based filtering (default deny policy)
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Default policy for incoming traffic: "drop", "reject", or "accept"
+    #[serde(default = "default_port_policy")]
+    pub default_input_policy: String,
+
+    /// Default policy for outgoing traffic: "drop", "reject", or "accept"
+    #[serde(default = "default_accept_policy")]
+    pub default_output_policy: String,
+
+    /// Default policy for forwarded traffic: "drop", "reject", or "accept"
+    #[serde(default = "default_port_policy")]
+    pub default_forward_policy: String,
+
+    /// Allow established/related connections (stateful firewall)
+    #[serde(default = "default_true")]
+    pub allow_established: bool,
+
+    /// Allow loopback traffic
+    #[serde(default = "default_true")]
+    pub allow_loopback: bool,
+
+    /// Allow ICMP (ping)
+    #[serde(default = "default_true")]
+    pub allow_icmp: bool,
+
+    /// Port rules
+    #[serde(default)]
+    pub rules: Vec<PortRule>,
+}
+
+/// A single port rule
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortRule {
+    /// Rule number/priority (lower = evaluated first)
+    #[serde(default)]
+    pub priority: u32,
+
+    /// Action: "allow", "deny", "reject", "log"
+    pub action: PortAction,
+
+    /// Direction: "in", "out", "both"
+    #[serde(default = "default_direction")]
+    pub direction: String,
+
+    /// Protocol: "tcp", "udp", "any"
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
+
+    /// Port number or range (e.g., "22", "80", "1000-2000")
+    pub port: String,
+
+    /// Source IP/CIDR (optional, empty = any)
+    #[serde(default)]
+    pub from: Option<String>,
+
+    /// Destination IP/CIDR (optional, empty = any)
+    #[serde(default)]
+    pub to: Option<String>,
+
+    /// Comment/description
+    #[serde(default)]
+    pub comment: String,
+
+    /// Whether this rule is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Port rule action
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PortAction {
+    Allow,
+    Deny,
+    Reject,
+    Log,
+}
+
+impl std::fmt::Display for PortAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PortAction::Allow => write!(f, "allow"),
+            PortAction::Deny => write!(f, "deny"),
+            PortAction::Reject => write!(f, "reject"),
+            PortAction::Log => write!(f, "log"),
+        }
+    }
+}
+
+impl std::str::FromStr for PortAction {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "allow" => Ok(PortAction::Allow),
+            "deny" | "drop" => Ok(PortAction::Deny),
+            "reject" => Ok(PortAction::Reject),
+            "log" => Ok(PortAction::Log),
+            _ => Err(format!("Invalid action: {}", s)),
+        }
+    }
+}
+
+fn default_port_policy() -> String {
+    "drop".to_string()
+}
+
+fn default_accept_policy() -> String {
+    "accept".to_string()
+}
+
+fn default_direction() -> String {
+    "in".to_string()
+}
+
+fn default_protocol() -> String {
+    "tcp".to_string()
+}
+
+impl Default for PortRulesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_input_policy: default_port_policy(),
+            default_output_policy: default_accept_policy(),
+            default_forward_policy: default_port_policy(),
+            allow_established: true,
+            allow_loopback: true,
+            allow_icmp: true,
+            rules: vec![
+                // Default allow SSH
+                PortRule {
+                    priority: 100,
+                    action: PortAction::Allow,
+                    direction: "in".to_string(),
+                    protocol: "tcp".to_string(),
+                    port: "22".to_string(),
+                    from: None,
+                    to: None,
+                    comment: "Allow SSH".to_string(),
+                    enabled: true,
+                },
+            ],
+        }
+    }
+}
+
+impl PortRule {
+    /// Create a new allow rule
+    pub fn allow(port: &str, protocol: &str) -> Self {
+        Self {
+            priority: 100,
+            action: PortAction::Allow,
+            direction: "in".to_string(),
+            protocol: protocol.to_string(),
+            port: port.to_string(),
+            from: None,
+            to: None,
+            comment: String::new(),
+            enabled: true,
+        }
+    }
+
+    /// Create a new deny rule
+    pub fn deny(port: &str, protocol: &str) -> Self {
+        Self {
+            priority: 100,
+            action: PortAction::Deny,
+            direction: "in".to_string(),
+            protocol: protocol.to_string(),
+            port: port.to_string(),
+            from: None,
+            to: None,
+            comment: String::new(),
+            enabled: true,
+        }
+    }
+
+    /// Parse port string to get port number(s)
+    pub fn parse_ports(&self) -> Result<Vec<u16>, String> {
+        if self.port.contains('-') {
+            // Port range
+            let parts: Vec<&str> = self.port.split('-').collect();
+            if parts.len() != 2 {
+                return Err(format!("Invalid port range: {}", self.port));
+            }
+            let start: u16 = parts[0].parse().map_err(|_| format!("Invalid port: {}", parts[0]))?;
+            let end: u16 = parts[1].parse().map_err(|_| format!("Invalid port: {}", parts[1]))?;
+            Ok((start..=end).collect())
+        } else if self.port.contains(',') {
+            // Multiple ports
+            self.port
+                .split(',')
+                .map(|p| p.trim().parse::<u16>().map_err(|_| format!("Invalid port: {}", p)))
+                .collect()
+        } else {
+            // Single port
+            let port: u16 = self.port.parse().map_err(|_| format!("Invalid port: {}", self.port))?;
+            Ok(vec![port])
         }
     }
 }
