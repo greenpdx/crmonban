@@ -1,6 +1,11 @@
 //! Connection flow tracking
 //!
 //! Tracks bidirectional flows and computes statistics for ML/anomaly detection.
+//!
+//! Optimizations:
+//! - Streaming statistics (O(1) space vs O(n) for storing all samples)
+//! - Inline hints on hot paths
+//! - Pre-computed duration in update path
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -11,8 +16,68 @@ use serde::{Deserialize, Serialize};
 
 use super::packet::{AppProtocol, Direction, IpProtocol, Packet, TcpFlags};
 
+/// Streaming statistics accumulator (Welford's algorithm)
+/// Computes min, max, mean, variance in O(1) space
+#[derive(Debug, Clone, Default)]
+pub struct StreamingStats {
+    pub count: u64,
+    pub min: f32,
+    pub max: f32,
+    pub mean: f32,
+    pub m2: f32,  // For variance calculation
+    pub sum: f64, // For total
+}
+
+impl StreamingStats {
+    #[inline]
+    pub fn new() -> Self {
+        Self {
+            count: 0,
+            min: f32::MAX,
+            max: f32::MIN,
+            mean: 0.0,
+            m2: 0.0,
+            sum: 0.0,
+        }
+    }
+
+    /// Update with a new sample (Welford's online algorithm)
+    #[inline]
+    pub fn update(&mut self, value: f32) {
+        self.count += 1;
+        self.sum += value as f64;
+
+        // Min/max
+        if value < self.min { self.min = value; }
+        if value > self.max { self.max = value; }
+
+        // Welford's algorithm for mean and variance
+        let delta = value - self.mean;
+        self.mean += delta / self.count as f32;
+        let delta2 = value - self.mean;
+        self.m2 += delta * delta2;
+    }
+
+    /// Get standard deviation
+    #[inline]
+    pub fn std(&self) -> f32 {
+        if self.count < 2 {
+            0.0
+        } else {
+            (self.m2 / (self.count - 1) as f32).sqrt()
+        }
+    }
+
+    /// Get total sum
+    #[inline]
+    pub fn total(&self) -> f64 {
+        self.sum
+    }
+}
+
 /// Unique key identifying a flow (5-tuple normalized)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Custom Hash implementation for better performance
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowKey {
     pub ip_a: IpAddr,
     pub ip_b: IpAddr,
@@ -21,8 +86,30 @@ pub struct FlowKey {
     pub protocol: IpProtocol,
 }
 
+impl Hash for FlowKey {
+    /// Optimized hash - combines all fields efficiently
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hash IPs as bytes directly (faster than derived)
+        match self.ip_a {
+            IpAddr::V4(v4) => state.write(&v4.octets()),
+            IpAddr::V6(v6) => state.write(&v6.octets()),
+        }
+        match self.ip_b {
+            IpAddr::V4(v4) => state.write(&v4.octets()),
+            IpAddr::V6(v6) => state.write(&v6.octets()),
+        }
+        // Combine ports and protocol into single write
+        state.write_u32(
+            (self.port_a as u32) | ((self.port_b as u32) << 16)
+        );
+        state.write_u8(self.protocol as u8);
+    }
+}
+
 impl FlowKey {
     /// Create from packet (normalized so smaller IP/port is always first)
+    #[inline]
     pub fn from_packet(pkt: &Packet) -> Self {
         if (pkt.src_ip, pkt.src_port) <= (pkt.dst_ip, pkt.dst_port) {
             Self {
@@ -98,7 +185,7 @@ impl std::fmt::Display for FlowState {
     }
 }
 
-/// Bidirectional connection flow
+/// Bidirectional connection flow (optimized with streaming stats)
 #[derive(Debug, Clone)]
 pub struct Flow {
     /// Unique flow ID
@@ -132,10 +219,10 @@ pub struct Flow {
     pub fwd_packets: u64,
     /// Bytes from client
     pub fwd_bytes: u64,
-    /// Packet sizes (forward)
-    pub fwd_pkt_sizes: Vec<u16>,
-    /// Inter-arrival times (forward)
-    pub fwd_iats: Vec<Duration>,
+    /// Packet size streaming stats (forward) - O(1) space
+    pub fwd_pkt_stats: StreamingStats,
+    /// Inter-arrival time streaming stats (forward) - O(1) space
+    pub fwd_iat_stats: StreamingStats,
     /// Last forward packet time
     pub fwd_last_time: Option<Instant>,
 
@@ -144,10 +231,10 @@ pub struct Flow {
     pub bwd_packets: u64,
     /// Bytes from server
     pub bwd_bytes: u64,
-    /// Packet sizes (backward)
-    pub bwd_pkt_sizes: Vec<u16>,
-    /// Inter-arrival times (backward)
-    pub bwd_iats: Vec<Duration>,
+    /// Packet size streaming stats (backward) - O(1) space
+    pub bwd_pkt_stats: StreamingStats,
+    /// Inter-arrival time streaming stats (backward) - O(1) space
+    pub bwd_iat_stats: StreamingStats,
     /// Last backward packet time
     pub bwd_last_time: Option<Instant>,
 
@@ -188,6 +275,7 @@ pub struct Flow {
 
 impl Flow {
     /// Create a new flow from the first packet
+    #[inline]
     pub fn new(id: u64, pkt: &Packet) -> Self {
         let key = FlowKey::from_packet(pkt);
 
@@ -210,6 +298,10 @@ impl Flow {
 
         let now = Instant::now();
 
+        // Initialize streaming stats with first packet
+        let mut fwd_pkt_stats = StreamingStats::new();
+        fwd_pkt_stats.update(pkt.raw_len as f32);
+
         Self {
             id,
             key,
@@ -223,13 +315,13 @@ impl Flow {
             last_seen: now,
             fwd_packets: 1,
             fwd_bytes: pkt.raw_len as u64,
-            fwd_pkt_sizes: vec![pkt.raw_len as u16],
-            fwd_iats: Vec::new(),
+            fwd_pkt_stats,
+            fwd_iat_stats: StreamingStats::new(),
             fwd_last_time: Some(now),
             bwd_packets: 0,
             bwd_bytes: 0,
-            bwd_pkt_sizes: Vec::new(),
-            bwd_iats: Vec::new(),
+            bwd_pkt_stats: StreamingStats::new(),
+            bwd_iat_stats: StreamingStats::new(),
             bwd_last_time: None,
             client_isn: pkt.seq,
             server_isn: None,
@@ -248,7 +340,8 @@ impl Flow {
         }
     }
 
-    /// Update flow with a new packet
+    /// Update flow with a new packet (optimized with streaming stats)
+    #[inline]
     pub fn update(&mut self, pkt: &Packet) -> Direction {
         let now = Instant::now();
         self.last_seen = now;
@@ -261,21 +354,25 @@ impl Flow {
             Direction::ToClient
         };
 
-        // Update statistics
+        let pkt_size = pkt.raw_len as f32;
+
+        // Update statistics with streaming stats (O(1) space)
         if is_forward {
             self.fwd_packets += 1;
             self.fwd_bytes += pkt.raw_len as u64;
-            self.fwd_pkt_sizes.push(pkt.raw_len as u16);
+            self.fwd_pkt_stats.update(pkt_size);
             if let Some(last) = self.fwd_last_time {
-                self.fwd_iats.push(now.duration_since(last));
+                let iat_us = now.duration_since(last).as_micros() as f32;
+                self.fwd_iat_stats.update(iat_us);
             }
             self.fwd_last_time = Some(now);
         } else {
             self.bwd_packets += 1;
             self.bwd_bytes += pkt.raw_len as u64;
-            self.bwd_pkt_sizes.push(pkt.raw_len as u16);
+            self.bwd_pkt_stats.update(pkt_size);
             if let Some(last) = self.bwd_last_time {
-                self.bwd_iats.push(now.duration_since(last));
+                let iat_us = now.duration_since(last).as_micros() as f32;
+                self.bwd_iat_stats.update(iat_us);
             }
             self.bwd_last_time = Some(now);
 
@@ -507,29 +604,29 @@ pub struct FlowStats {
 }
 
 impl FlowStats {
-    /// Extract features from a flow
+    /// Extract features from a flow (optimized - uses pre-computed streaming stats)
+    #[inline]
     pub fn from_flow(flow: &Flow) -> Self {
         let duration = flow.duration();
         let duration_us = duration.as_micros() as u64;
         let duration_secs = duration.as_secs_f32().max(0.001);
 
-        // Forward packet length stats
-        let (fwd_min, fwd_max, fwd_mean, fwd_std) = compute_stats(&flow.fwd_pkt_sizes);
-        let (bwd_min, bwd_max, bwd_mean, bwd_std) = compute_stats(&flow.bwd_pkt_sizes);
+        // Get stats directly from streaming accumulators (O(1) - no iteration)
+        let fwd_pkt = &flow.fwd_pkt_stats;
+        let bwd_pkt = &flow.bwd_pkt_stats;
+        let fwd_iat = &flow.fwd_iat_stats;
+        let bwd_iat = &flow.bwd_iat_stats;
 
-        // Forward IAT stats
-        let fwd_iats_us: Vec<u64> = flow.fwd_iats.iter().map(|d| d.as_micros() as u64).collect();
-        let (_, _, fwd_iat_mean, fwd_iat_std) = compute_stats_u64(&fwd_iats_us);
-        let fwd_iat_total: u64 = fwd_iats_us.iter().sum();
-        let fwd_iat_min = fwd_iats_us.iter().copied().min().unwrap_or(0);
-        let fwd_iat_max = fwd_iats_us.iter().copied().max().unwrap_or(0);
+        // Handle uninitialized stats (min = MAX means no samples)
+        let fwd_min = if fwd_pkt.count > 0 { fwd_pkt.min as u16 } else { 0 };
+        let fwd_max = if fwd_pkt.count > 0 { fwd_pkt.max as u16 } else { 0 };
+        let bwd_min = if bwd_pkt.count > 0 { bwd_pkt.min as u16 } else { 0 };
+        let bwd_max = if bwd_pkt.count > 0 { bwd_pkt.max as u16 } else { 0 };
 
-        // Backward IAT stats
-        let bwd_iats_us: Vec<u64> = flow.bwd_iats.iter().map(|d| d.as_micros() as u64).collect();
-        let (_, _, bwd_iat_mean, bwd_iat_std) = compute_stats_u64(&bwd_iats_us);
-        let bwd_iat_total: u64 = bwd_iats_us.iter().sum();
-        let bwd_iat_min = bwd_iats_us.iter().copied().min().unwrap_or(0);
-        let bwd_iat_max = bwd_iats_us.iter().copied().max().unwrap_or(0);
+        let fwd_iat_min = if fwd_iat.count > 0 { fwd_iat.min as u64 } else { 0 };
+        let fwd_iat_max = if fwd_iat.count > 0 { fwd_iat.max as u64 } else { 0 };
+        let bwd_iat_min = if bwd_iat.count > 0 { bwd_iat.min as u64 } else { 0 };
+        let bwd_iat_max = if bwd_iat.count > 0 { bwd_iat.max as u64 } else { 0 };
 
         // Ratios
         let down_up_ratio = if flow.fwd_bytes > 0 {
@@ -544,24 +641,24 @@ impl FlowStats {
             total_bwd_packets: flow.bwd_packets,
             total_fwd_bytes: flow.fwd_bytes,
             total_bwd_bytes: flow.bwd_bytes,
-            fwd_pkt_len_min: fwd_min as u16,
-            fwd_pkt_len_max: fwd_max as u16,
-            fwd_pkt_len_mean: fwd_mean,
-            fwd_pkt_len_std: fwd_std,
-            bwd_pkt_len_min: bwd_min as u16,
-            bwd_pkt_len_max: bwd_max as u16,
-            bwd_pkt_len_mean: bwd_mean,
-            bwd_pkt_len_std: bwd_std,
+            fwd_pkt_len_min: fwd_min,
+            fwd_pkt_len_max: fwd_max,
+            fwd_pkt_len_mean: fwd_pkt.mean,
+            fwd_pkt_len_std: fwd_pkt.std(),
+            bwd_pkt_len_min: bwd_min,
+            bwd_pkt_len_max: bwd_max,
+            bwd_pkt_len_mean: bwd_pkt.mean,
+            bwd_pkt_len_std: bwd_pkt.std(),
             flow_bytes_per_sec: flow.total_bytes() as f32 / duration_secs,
             flow_packets_per_sec: flow.total_packets() as f32 / duration_secs,
-            fwd_iat_total_us: fwd_iat_total,
-            fwd_iat_mean_us: fwd_iat_mean,
-            fwd_iat_std_us: fwd_iat_std,
+            fwd_iat_total_us: fwd_iat.total() as u64,
+            fwd_iat_mean_us: fwd_iat.mean,
+            fwd_iat_std_us: fwd_iat.std(),
             fwd_iat_min_us: fwd_iat_min,
             fwd_iat_max_us: fwd_iat_max,
-            bwd_iat_total_us: bwd_iat_total,
-            bwd_iat_mean_us: bwd_iat_mean,
-            bwd_iat_std_us: bwd_iat_std,
+            bwd_iat_total_us: bwd_iat.total() as u64,
+            bwd_iat_mean_us: bwd_iat.mean,
+            bwd_iat_std_us: bwd_iat.std(),
             bwd_iat_min_us: bwd_iat_min,
             bwd_iat_max_us: bwd_iat_max,
             syn_flag_count: flow.syn_count,
@@ -663,49 +760,7 @@ impl FlowStats {
     }
 }
 
-/// Compute min, max, mean, std for u16 slice
-fn compute_stats(values: &[u16]) -> (u16, u16, f32, f32) {
-    if values.is_empty() {
-        return (0, 0, 0.0, 0.0);
-    }
-
-    let min = *values.iter().min().unwrap();
-    let max = *values.iter().max().unwrap();
-    let sum: u64 = values.iter().map(|&v| v as u64).sum();
-    let mean = sum as f32 / values.len() as f32;
-
-    let variance: f32 = values.iter()
-        .map(|&v| {
-            let diff = v as f32 - mean;
-            diff * diff
-        })
-        .sum::<f32>() / values.len() as f32;
-    let std = variance.sqrt();
-
-    (min, max, mean, std)
-}
-
-/// Compute min, max, mean, std for u64 slice
-fn compute_stats_u64(values: &[u64]) -> (u64, u64, f32, f32) {
-    if values.is_empty() {
-        return (0, 0, 0.0, 0.0);
-    }
-
-    let min = *values.iter().min().unwrap();
-    let max = *values.iter().max().unwrap();
-    let sum: u64 = values.iter().sum();
-    let mean = sum as f32 / values.len() as f32;
-
-    let variance: f32 = values.iter()
-        .map(|&v| {
-            let diff = v as f32 - mean;
-            diff * diff
-        })
-        .sum::<f32>() / values.len() as f32;
-    let std = variance.sqrt();
-
-    (min, max, mean, std)
-}
+// Note: compute_stats functions removed - now using StreamingStats
 
 #[cfg(test)]
 mod tests {
