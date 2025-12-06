@@ -1,0 +1,12 @@
+[package]
+name = "firewall-viz"
+version = "0.1.0"
+edition = "2024"
+description = "Visual display of crmonban firewall rules and packet flow"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
