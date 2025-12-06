@@ -1,11 +1,13 @@
 pub mod config;
 pub mod database;
 pub mod dbus;
+pub mod dpi;
 pub mod ebpf;
 pub mod firewall;
 pub mod intel;
 pub mod models;
 pub mod monitor;
+pub mod port_scan_monitor;
 pub mod shared_whitelist;
 pub mod siem;
 pub mod zones;
@@ -38,7 +40,17 @@ impl Crmonban {
     /// Create a new crmonban instance
     pub fn new(config: Config) -> Result<Self> {
         let db = Database::open(config.db_path())?;
-        let firewall = Firewall::new(config.nftables.clone());
+        let port_scan = if config.port_scan.enabled {
+            Some(config.port_scan.clone())
+        } else {
+            None
+        };
+        let dpi = if config.dpi.enabled {
+            Some(config.dpi.clone())
+        } else {
+            None
+        };
+        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi);
         let intel = IntelGatherer::new(config.intel.clone())?;
 
         Ok(Self {
@@ -52,7 +64,17 @@ impl Crmonban {
     /// Create instance with custom database path
     pub fn with_db_path<P: AsRef<Path>>(config: Config, db_path: P) -> Result<Self> {
         let db = Database::open(db_path)?;
-        let firewall = Firewall::new(config.nftables.clone());
+        let port_scan = if config.port_scan.enabled {
+            Some(config.port_scan.clone())
+        } else {
+            None
+        };
+        let dpi = if config.dpi.enabled {
+            Some(config.dpi.clone())
+        } else {
+            None
+        };
+        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi);
         let intel = IntelGatherer::new(config.intel.clone())?;
 
         Ok(Self {
@@ -312,6 +334,8 @@ impl Daemon {
 
         let services = crmonban.config.services.clone();
         let dbus_enabled = crmonban.config.dbus.enabled;
+        let port_scan_config = crmonban.config.port_scan.clone();
+        let dpi_config = crmonban.config.dpi.clone();
         drop(crmonban);
 
         // Start D-Bus server if enabled
@@ -335,12 +359,44 @@ impl Daemon {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         self.shutdown_tx = Some(shutdown_tx);
 
-        // Spawn monitoring task
+        // Spawn log monitoring task
+        let event_tx_log = event_tx.clone();
         let monitor_handle = tokio::spawn(async move {
-            if let Err(e) = start_monitoring(services, event_tx).await {
+            if let Err(e) = start_monitoring(services, event_tx_log).await {
                 error!("Monitor error: {}", e);
             }
         });
+
+        // Spawn port scan monitoring task if enabled
+        let port_scan_handle = if port_scan_config.enabled {
+            let event_tx_portscan = event_tx.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = port_scan_monitor::start_port_scan_monitoring(
+                    port_scan_config,
+                    event_tx_portscan,
+                )
+                .await
+                {
+                    error!("Port scan monitor error: {}", e);
+                }
+            }))
+        } else {
+            info!("Port scan detection is disabled");
+            None
+        };
+
+        // Spawn DPI task if enabled
+        let dpi_handle = if dpi_config.enabled {
+            let event_tx_dpi = event_tx.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = dpi::start_dpi(dpi_config, event_tx_dpi).await {
+                    error!("DPI error: {}", e);
+                }
+            }))
+        } else {
+            info!("Deep packet inspection is disabled");
+            None
+        };
 
         // Spawn cleanup task (runs every minute)
         let cleanup_crmonban = self.crmonban.clone();
@@ -459,6 +515,12 @@ impl Daemon {
 
         // Cleanup
         monitor_handle.abort();
+        if let Some(handle) = port_scan_handle {
+            handle.abort();
+        }
+        if let Some(handle) = dpi_handle {
+            handle.abort();
+        }
         cleanup_handle.abort();
 
         let crmonban = self.crmonban.read().await;

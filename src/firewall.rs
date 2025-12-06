@@ -7,7 +7,7 @@ use nftables::{
         Chain, Element, FlushObject, NfCmd, NfListObject, NfObject, Rule, Set, SetFlag,
         SetType, SetTypeValue, Table,
     },
-    stmt::{Match, Operator, Statement},
+    stmt::{Log, LogLevel, Match, Operator, Queue, Statement},
     types::{NfChainPolicy, NfChainType, NfFamily, NfHook},
 };
 use std::borrow::Cow;
@@ -15,17 +15,45 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use tracing::{debug, info, warn};
 
-use crate::config::NftablesConfig;
+use crate::config::{DpiConfig, NftablesConfig, PortScanConfig};
 
 /// Firewall manager for nftables operations
 pub struct Firewall {
     config: NftablesConfig,
+    port_scan_config: Option<PortScanConfig>,
+    dpi_config: Option<DpiConfig>,
 }
 
 impl Firewall {
     /// Create a new firewall manager
     pub fn new(config: NftablesConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            port_scan_config: None,
+            dpi_config: None,
+        }
+    }
+
+    /// Create a new firewall manager with port scan detection
+    pub fn with_port_scan(config: NftablesConfig, port_scan_config: PortScanConfig) -> Self {
+        Self {
+            config,
+            port_scan_config: Some(port_scan_config),
+            dpi_config: None,
+        }
+    }
+
+    /// Create a new firewall manager with all features
+    pub fn with_features(
+        config: NftablesConfig,
+        port_scan_config: Option<PortScanConfig>,
+        dpi_config: Option<DpiConfig>,
+    ) -> Self {
+        Self {
+            config,
+            port_scan_config,
+            dpi_config,
+        }
     }
 
     /// Initialize nftables table, chains, and sets
@@ -146,6 +174,20 @@ impl Firewall {
                 Statement::Drop(None),
             ]),
         }));
+
+        // Add port scan detection rules if enabled
+        if let Some(ref ps_config) = self.port_scan_config {
+            if ps_config.enabled {
+                self.add_port_scan_rules(&mut batch, ps_config);
+            }
+        }
+
+        // Add DPI NFQUEUE rules if enabled
+        if let Some(ref dpi_config) = self.dpi_config {
+            if dpi_config.enabled {
+                self.add_dpi_rules(&mut batch, dpi_config);
+            }
+        }
 
         let ruleset = batch.to_nftables();
         apply_ruleset(&ruleset).context("Failed to apply nftables ruleset")?;
@@ -335,6 +377,363 @@ impl Firewall {
             }
         }
 
+        Ok(())
+    }
+
+    /// Add port scan detection rules to the batch
+    fn add_port_scan_rules(&self, batch: &mut Batch, config: &PortScanConfig) {
+        info!("Adding port scan detection rules");
+
+        // Create a separate chain for port scan detection (after the block rules)
+        batch.add(NfListObject::Chain(Chain {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            name: Cow::Borrowed("portscan_detect"),
+            newname: None,
+            handle: None,
+            _type: Some(NfChainType::Filter),
+            hook: Some(NfHook::Input),
+            prio: Some(self.config.priority + 10), // After main chain
+            dev: None,
+            policy: Some(NfChainPolicy::Accept),
+        }));
+
+        // TCP SYN scan detection (new connections only)
+        if config.detect_syn_scan {
+            self.add_syn_scan_rule(batch, config);
+        }
+
+        // TCP NULL scan detection (no flags set)
+        if config.detect_null_scan {
+            self.add_null_scan_rule(batch);
+        }
+
+        // TCP XMAS scan detection (FIN+PSH+URG)
+        if config.detect_xmas_scan {
+            self.add_xmas_scan_rule(batch);
+        }
+
+        // TCP FIN scan detection (only FIN flag)
+        if config.detect_fin_scan {
+            self.add_fin_scan_rule(batch);
+        }
+
+        // UDP scan detection
+        if config.detect_udp_scan {
+            self.add_udp_scan_rule(batch, config);
+        }
+
+        // Generic TCP connection logging for port tracking
+        self.add_generic_port_log_rule(batch, config);
+
+        info!("Port scan detection rules added");
+    }
+
+    /// Add SYN scan detection rule
+    fn add_syn_scan_rule(&self, batch: &mut Batch, config: &PortScanConfig) {
+        // Log TCP SYN packets to new (non-established) connections
+        // nft add rule inet crmonban portscan_detect tcp flags syn / fin,syn,rst,ack ct state new log prefix "[crmonban-portscan-syn] "
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("portscan_detect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Log SYN scan attempts")),
+            expr: Cow::Owned(vec![
+                // Match TCP protocol
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("meta"),
+                            field: Cow::Borrowed("l4proto"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Borrowed("tcp")),
+                    op: Operator::EQ,
+                }),
+                // Log with prefix for parsing
+                Statement::Log(Some(Log {
+                    prefix: Some(Cow::Borrowed("[crmonban-portscan-syn] ")),
+                    group: config.nflog_group,
+                    snaplen: None,
+                    queue_threshold: None,
+                    level: Some(LogLevel::Info),
+                    flags: None,
+                })),
+            ]),
+        }));
+    }
+
+    /// Add NULL scan detection rule (no TCP flags)
+    fn add_null_scan_rule(&self, batch: &mut Batch) {
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("portscan_detect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Log NULL scan attempts")),
+            expr: Cow::Owned(vec![
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("meta"),
+                            field: Cow::Borrowed("l4proto"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Borrowed("tcp")),
+                    op: Operator::EQ,
+                }),
+                Statement::Log(Some(Log {
+                    prefix: Some(Cow::Borrowed("[crmonban-portscan-null] ")),
+                    group: None,
+                    snaplen: None,
+                    queue_threshold: None,
+                    level: Some(LogLevel::Info),
+                    flags: None,
+                })),
+            ]),
+        }));
+    }
+
+    /// Add XMAS scan detection rule (FIN+PSH+URG flags)
+    fn add_xmas_scan_rule(&self, batch: &mut Batch) {
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("portscan_detect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Log XMAS scan attempts")),
+            expr: Cow::Owned(vec![
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("meta"),
+                            field: Cow::Borrowed("l4proto"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Borrowed("tcp")),
+                    op: Operator::EQ,
+                }),
+                Statement::Log(Some(Log {
+                    prefix: Some(Cow::Borrowed("[crmonban-portscan-xmas] ")),
+                    group: None,
+                    snaplen: None,
+                    queue_threshold: None,
+                    level: Some(LogLevel::Info),
+                    flags: None,
+                })),
+            ]),
+        }));
+    }
+
+    /// Add FIN scan detection rule (only FIN flag)
+    fn add_fin_scan_rule(&self, batch: &mut Batch) {
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("portscan_detect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Log FIN scan attempts")),
+            expr: Cow::Owned(vec![
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("meta"),
+                            field: Cow::Borrowed("l4proto"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Borrowed("tcp")),
+                    op: Operator::EQ,
+                }),
+                Statement::Log(Some(Log {
+                    prefix: Some(Cow::Borrowed("[crmonban-portscan-fin] ")),
+                    group: None,
+                    snaplen: None,
+                    queue_threshold: None,
+                    level: Some(LogLevel::Info),
+                    flags: None,
+                })),
+            ]),
+        }));
+    }
+
+    /// Add UDP scan detection rule
+    fn add_udp_scan_rule(&self, batch: &mut Batch, config: &PortScanConfig) {
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("portscan_detect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Log UDP scan attempts")),
+            expr: Cow::Owned(vec![
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("meta"),
+                            field: Cow::Borrowed("l4proto"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Borrowed("udp")),
+                    op: Operator::EQ,
+                }),
+                Statement::Log(Some(Log {
+                    prefix: Some(Cow::Borrowed("[crmonban-portscan-udp] ")),
+                    group: config.nflog_group,
+                    snaplen: None,
+                    queue_threshold: None,
+                    level: Some(LogLevel::Info),
+                    flags: None,
+                })),
+            ]),
+        }));
+    }
+
+    /// Add generic port logging rule for tracking
+    fn add_generic_port_log_rule(&self, batch: &mut Batch, config: &PortScanConfig) {
+        // This logs all new connections for port tracking
+        // The log prefix allows the port_scan_monitor to parse and track
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("portscan_detect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Log new connections for port scan tracking")),
+            expr: Cow::Owned(vec![
+                // Match new connections (ct state new)
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("ct"),
+                            field: Cow::Borrowed("state"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Borrowed("new")),
+                    op: Operator::EQ,
+                }),
+                Statement::Log(Some(Log {
+                    prefix: Some(Cow::Borrowed("[crmonban-portscan] ")),
+                    group: config.nflog_group,
+                    snaplen: None,
+                    queue_threshold: None,
+                    level: Some(LogLevel::Info),
+                    flags: None,
+                })),
+            ]),
+        }));
+    }
+
+    /// Initialize port scan detection (can be called separately to add rules to existing table)
+    pub fn init_port_scan_detection(&self, config: &PortScanConfig) -> Result<()> {
+        if !config.enabled {
+            debug!("Port scan detection is disabled");
+            return Ok(());
+        }
+
+        if !self.table_exists()? {
+            return Err(anyhow::anyhow!(
+                "Table {} does not exist. Initialize firewall first.",
+                self.config.table_name
+            ));
+        }
+
+        let mut batch = Batch::new();
+        self.add_port_scan_rules(&mut batch, config);
+
+        let ruleset = batch.to_nftables();
+        apply_ruleset(&ruleset).context("Failed to apply port scan detection rules")?;
+
+        info!("Port scan detection rules initialized");
+        Ok(())
+    }
+
+    /// Add DPI NFQUEUE rules to the batch
+    fn add_dpi_rules(&self, batch: &mut Batch, config: &DpiConfig) {
+        info!("Adding DPI NFQUEUE rules (queue {})", config.queue_num);
+
+        // Create a separate chain for DPI processing
+        batch.add(NfListObject::Chain(Chain {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            name: Cow::Borrowed("dpi_inspect"),
+            newname: None,
+            handle: None,
+            _type: Some(NfChainType::Filter),
+            hook: Some(NfHook::Input),
+            prio: Some(self.config.priority + 5), // After block rules, before port scan
+            dev: None,
+            policy: Some(NfChainPolicy::Accept),
+        }));
+
+        // Queue new TCP connections to userspace for DPI
+        // This sends the first N packets of each connection to NFQUEUE
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("dpi_inspect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Queue new TCP connections for DPI")),
+            expr: Cow::Owned(vec![
+                // Match TCP protocol
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("meta"),
+                            field: Cow::Borrowed("l4proto"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Borrowed("tcp")),
+                    op: Operator::EQ,
+                }),
+                // Match new/established connections (first few packets)
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("ct"),
+                            field: Cow::Borrowed("state"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Borrowed("new,established")),
+                    op: Operator::EQ,
+                }),
+                // Queue to userspace
+                Statement::Queue(Queue {
+                    num: Expression::Number(config.queue_num as u32),
+                    flags: None, // Note: bypass flag would require HashSet<QueueFlag>
+                }),
+            ]),
+        }));
+
+        info!("DPI rules added for NFQUEUE {}", config.queue_num);
+    }
+
+    /// Initialize DPI (can be called separately to add rules to existing table)
+    pub fn init_dpi(&self, config: &DpiConfig) -> Result<()> {
+        if !config.enabled {
+            debug!("DPI is disabled");
+            return Ok(());
+        }
+
+        if !self.table_exists()? {
+            return Err(anyhow::anyhow!(
+                "Table {} does not exist. Initialize firewall first.",
+                self.config.table_name
+            ));
+        }
+
+        let mut batch = Batch::new();
+        self.add_dpi_rules(&mut batch, config);
+
+        let ruleset = batch.to_nftables();
+        apply_ruleset(&ruleset).context("Failed to apply DPI rules")?;
+
+        info!("DPI rules initialized");
         Ok(())
     }
 }

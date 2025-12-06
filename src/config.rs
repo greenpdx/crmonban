@@ -36,6 +36,12 @@ pub struct Config {
     pub ebpf: EbpfConfig,
 
     #[serde(default)]
+    pub port_scan: PortScanConfig,
+
+    #[serde(default)]
+    pub dpi: DpiConfig,
+
+    #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
 }
 
@@ -100,6 +106,8 @@ impl Default for Config {
             zones: ZoneConfig::default(),
             whitelist: SharedWhitelistConfig::default(),
             ebpf: EbpfConfig::default(),
+            port_scan: PortScanConfig::default(),
+            dpi: DpiConfig::default(),
             services,
         }
     }
@@ -376,6 +384,231 @@ fn default_find_time() -> u64 {
 
 fn default_service_ban_time() -> i64 {
     3600 // 1 hour
+}
+
+fn default_port_scan_threshold() -> u32 {
+    10 // ports
+}
+
+fn default_port_scan_window() -> u64 {
+    60 // seconds
+}
+
+fn default_port_scan_ban_time() -> i64 {
+    3600 // 1 hour
+}
+
+/// Port scan detection configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortScanConfig {
+    /// Enable port scan detection via nftables
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Number of unique ports that triggers a port scan detection
+    #[serde(default = "default_port_scan_threshold")]
+    pub threshold: u32,
+
+    /// Time window in seconds to count unique port hits
+    #[serde(default = "default_port_scan_window")]
+    pub window_secs: u64,
+
+    /// Ban duration in seconds for port scanners
+    #[serde(default = "default_port_scan_ban_time")]
+    pub ban_time: i64,
+
+    /// Ports to monitor (empty = all ports)
+    #[serde(default)]
+    pub monitored_ports: Vec<u16>,
+
+    /// Ports to exclude from monitoring (e.g., common services you expect traffic on)
+    #[serde(default = "default_excluded_ports")]
+    pub excluded_ports: Vec<u16>,
+
+    /// Detect TCP SYN scans (half-open connections)
+    #[serde(default = "default_true")]
+    pub detect_syn_scan: bool,
+
+    /// Detect TCP NULL scans (no flags set)
+    #[serde(default = "default_true")]
+    pub detect_null_scan: bool,
+
+    /// Detect TCP XMAS scans (FIN+PSH+URG flags)
+    #[serde(default = "default_true")]
+    pub detect_xmas_scan: bool,
+
+    /// Detect TCP FIN scans (only FIN flag)
+    #[serde(default = "default_true")]
+    pub detect_fin_scan: bool,
+
+    /// Detect UDP scans
+    #[serde(default = "default_true")]
+    pub detect_udp_scan: bool,
+
+    /// Log file path for nftables port scan logs (via nflog or /var/log/kern.log)
+    #[serde(default = "default_port_scan_log")]
+    pub log_path: String,
+
+    /// Use nflog group for logging (more efficient than kernel log)
+    #[serde(default)]
+    pub nflog_group: Option<u32>,
+}
+
+fn default_excluded_ports() -> Vec<u16> {
+    vec![22, 80, 443] // Common service ports
+}
+
+fn default_port_scan_log() -> String {
+    "/var/log/kern.log".to_string()
+}
+
+impl Default for PortScanConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_port_scan_threshold(),
+            window_secs: default_port_scan_window(),
+            ban_time: default_port_scan_ban_time(),
+            monitored_ports: vec![],
+            excluded_ports: default_excluded_ports(),
+            detect_syn_scan: true,
+            detect_null_scan: true,
+            detect_xmas_scan: true,
+            detect_fin_scan: true,
+            detect_udp_scan: true,
+            log_path: default_port_scan_log(),
+            nflog_group: None,
+        }
+    }
+}
+
+/// Deep packet inspection configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpiConfig {
+    /// Enable deep packet inspection
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// NFQUEUE number for packet inspection
+    #[serde(default = "default_dpi_queue")]
+    pub queue_num: u16,
+
+    /// Number of initial packets to inspect per connection
+    #[serde(default = "default_dpi_packet_count")]
+    pub packets_per_conn: u8,
+
+    /// Maximum payload bytes to inspect per packet
+    #[serde(default = "default_dpi_max_payload")]
+    pub max_payload_bytes: usize,
+
+    /// Ports to inspect (empty = all non-excluded ports)
+    #[serde(default)]
+    pub inspected_ports: Vec<u16>,
+
+    /// Ports to exclude from inspection
+    #[serde(default = "default_dpi_excluded_ports")]
+    pub excluded_ports: Vec<u16>,
+
+    /// Ban duration for detected threats (seconds)
+    #[serde(default = "default_dpi_ban_time")]
+    pub ban_time: i64,
+
+    /// Enable SQL injection detection
+    #[serde(default = "default_true")]
+    pub detect_sqli: bool,
+
+    /// Enable XSS detection
+    #[serde(default = "default_true")]
+    pub detect_xss: bool,
+
+    /// Enable command injection detection
+    #[serde(default = "default_true")]
+    pub detect_cmdi: bool,
+
+    /// Enable path traversal detection
+    #[serde(default = "default_true")]
+    pub detect_path_traversal: bool,
+
+    /// Enable shellcode/exploit detection
+    #[serde(default = "default_true")]
+    pub detect_shellcode: bool,
+
+    /// Enable protocol anomaly detection
+    #[serde(default = "default_true")]
+    pub detect_protocol_anomaly: bool,
+
+    /// Custom patterns to match (regex)
+    #[serde(default)]
+    pub custom_patterns: Vec<DpiPattern>,
+
+    /// Action on match: "ban", "log", "drop"
+    #[serde(default = "default_dpi_action")]
+    pub action: String,
+}
+
+/// Custom DPI pattern
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DpiPattern {
+    /// Pattern name
+    pub name: String,
+    /// Regex pattern to match in payload
+    pub pattern: String,
+    /// Severity: "low", "medium", "high", "critical"
+    #[serde(default = "default_pattern_severity")]
+    pub severity: String,
+    /// Description of the threat
+    #[serde(default)]
+    pub description: String,
+}
+
+fn default_dpi_queue() -> u16 {
+    100
+}
+
+fn default_dpi_packet_count() -> u8 {
+    6
+}
+
+fn default_dpi_max_payload() -> usize {
+    4096
+}
+
+fn default_dpi_excluded_ports() -> Vec<u16> {
+    vec![443] // HTTPS is encrypted, no point inspecting
+}
+
+fn default_dpi_ban_time() -> i64 {
+    7200 // 2 hours
+}
+
+fn default_dpi_action() -> String {
+    "ban".to_string()
+}
+
+fn default_pattern_severity() -> String {
+    "medium".to_string()
+}
+
+impl Default for DpiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            queue_num: default_dpi_queue(),
+            packets_per_conn: default_dpi_packet_count(),
+            max_payload_bytes: default_dpi_max_payload(),
+            inspected_ports: vec![],
+            excluded_ports: default_dpi_excluded_ports(),
+            ban_time: default_dpi_ban_time(),
+            detect_sqli: true,
+            detect_xss: true,
+            detect_cmdi: true,
+            detect_path_traversal: true,
+            detect_shellcode: true,
+            detect_protocol_anomaly: true,
+            custom_patterns: vec![],
+            action: default_dpi_action(),
+        }
+    }
 }
 
 #[cfg(test)]
