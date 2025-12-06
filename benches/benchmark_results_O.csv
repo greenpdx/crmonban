@@ -1,0 +1,11 @@
+workers,batch_size,flow_tracking,signatures,threat_intel,ml_detection,correlation,with_feed_data,lat_min_us,lat_max_us,lat_avg_us,lat_p50_us,lat_p95_us,lat_p99_us,events_per_sec,packets_per_sec,bytes_per_sec,total_events,duration_ms,detection_to_alert_us,alert_to_action_us,correlation_time_us,notifications_sent
+1,100,false,false,false,false,false,false,1030,1113,1060,1061,1072,1113,94243.36,94243.36,141365033.58,10000,106,1060,10,0,0
+4,100,true,false,false,false,false,false,396,523,435,435,439,523,229490.30,229490.30,344235453.75,10000,43,435,10,0,0
+4,100,false,true,false,false,false,false,602,646,609,610,616,646,163772.68,163772.68,245659020.86,10000,61,609,10,0,0
+4,100,false,false,true,false,false,false,327,433,334,335,343,433,298395.50,298395.50,447593246.36,10000,33,334,10,0,0
+4,100,false,false,true,false,false,true,399,542,436,435,443,542,228815.24,228815.24,343222865.45,10000,43,436,10,0,0
+4,100,true,false,false,true,false,false,666,778,686,685,696,778,145537.49,145537.49,218306238.45,10000,68,686,10,0,0
+4,100,true,true,true,true,true,false,1093,1208,1129,1113,1191,1208,88483.15,88483.15,132724726.17,10000,113,1129,50,225,100
+4,100,true,true,true,true,true,true,1202,1323,1228,1213,1290,1323,81350.19,81350.19,122025277.94,10000,122,1228,50,245,100
+8,1000,true,true,true,false,true,true,4512,4688,4584,4572,4644,4688,218094.06,218094.06,327141086.18,100000,458,4584,50,916,100
+8,10,true,false,false,false,false,false,69,150,70,69,72,150,140672.76,140672.76,211009134.30,1000,7,70,10,0,0
