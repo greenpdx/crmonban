@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  # iperf3 server for throughput testing
+  iperf-server:
+    image: networkstatic/iperf3
+    container_name: crmonban-iperf
+    network_mode: host
+    command: -s
+    restart: unless-stopped
+
+  # netperf server for latency testing
+  netperf-server:
+    image: networkstatic/netperf
+    container_name: crmonban-netperf
+    network_mode: host
+    restart: unless-stopped

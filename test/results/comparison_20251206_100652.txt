@@ -1,0 +1,18 @@
+Firewall Performance Comparison - 20251206_100652
+============================================
+
+Test Duration: 10s per test
+
+Throughput (Gbps):
+  Baseline:        67.7
+  With Firewall:   67.3
+  With DPI:        N/A
+
+Latency (ms):
+  Baseline:        0.094
+  With Firewall:   0.093
+  With DPI:        0.122
+
+Overhead:
+  Firewall throughput: 0.59%
+  DPI throughput:      -nan%

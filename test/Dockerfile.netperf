@@ -1,0 +1,8 @@
+# Netperf server for latency testing
+FROM alpine:latest
+
+RUN apk add --no-cache netperf
+
+EXPOSE 12865
+
+ENTRYPOINT ["netserver", "-D"]
