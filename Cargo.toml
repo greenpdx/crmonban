@@ -86,6 +86,16 @@ nfq = "*"
 # Packet parsing
 etherparse = "*"
 
+# TLS/SSL for MITM proxy
+tokio-rustls = "*"
+rustls = "*"
+rustls-pemfile = "*"
+rcgen = "*"
+webpki-roots = "*"
+x509-parser = "*"
+time = "*"
+pem = "*"
+
 [[bin]]
 name = "crmonban"
 path = "src/main.rs"

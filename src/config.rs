@@ -42,6 +42,9 @@ pub struct Config {
     pub dpi: DpiConfig,
 
     #[serde(default)]
+    pub tls_proxy: TlsProxyConfig,
+
+    #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
 }
 
@@ -108,6 +111,7 @@ impl Default for Config {
             ebpf: EbpfConfig::default(),
             port_scan: PortScanConfig::default(),
             dpi: DpiConfig::default(),
+            tls_proxy: TlsProxyConfig::default(),
             services,
         }
     }
@@ -607,6 +611,148 @@ impl Default for DpiConfig {
             detect_protocol_anomaly: true,
             custom_patterns: vec![],
             action: default_dpi_action(),
+        }
+    }
+}
+
+/// TLS interception proxy configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsProxyConfig {
+    /// Enable TLS interception proxy
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Listen address for the proxy
+    #[serde(default = "default_tls_proxy_listen")]
+    pub listen_addr: String,
+
+    /// Listen port for the proxy
+    #[serde(default = "default_tls_proxy_port")]
+    pub listen_port: u16,
+
+    /// Path to CA certificate file (PEM format)
+    /// If not specified, will auto-generate and store in data_dir
+    #[serde(default)]
+    pub ca_cert_path: Option<String>,
+
+    /// Path to CA private key file (PEM format)
+    #[serde(default)]
+    pub ca_key_path: Option<String>,
+
+    /// Directory to cache generated certificates
+    #[serde(default = "default_tls_cert_cache")]
+    pub cert_cache_dir: String,
+
+    /// Ports to intercept (redirect to proxy)
+    #[serde(default = "default_tls_intercept_ports")]
+    pub intercept_ports: Vec<u16>,
+
+    /// Domains to bypass (no interception, passthrough)
+    #[serde(default)]
+    pub bypass_domains: Vec<String>,
+
+    /// Enable certificate validation for upstream connections
+    #[serde(default = "default_true")]
+    pub verify_upstream: bool,
+
+    /// Log decrypted traffic to file (for debugging)
+    #[serde(default)]
+    pub log_decrypted: bool,
+
+    /// Path for decrypted traffic log
+    #[serde(default)]
+    pub decrypted_log_path: Option<String>,
+
+    /// Maximum concurrent connections
+    #[serde(default = "default_tls_max_connections")]
+    pub max_connections: usize,
+
+    /// Connection timeout in seconds
+    #[serde(default = "default_tls_timeout")]
+    pub timeout_secs: u64,
+
+    /// Enable inspection of decrypted content via DPI
+    #[serde(default = "default_true")]
+    pub inspect_decrypted: bool,
+
+    /// CA certificate validity in days
+    #[serde(default = "default_ca_validity_days")]
+    pub ca_validity_days: u32,
+
+    /// Generated certificate validity in days
+    #[serde(default = "default_cert_validity_days")]
+    pub cert_validity_days: u32,
+
+    /// CA common name
+    #[serde(default = "default_ca_cn")]
+    pub ca_common_name: String,
+
+    /// CA organization
+    #[serde(default = "default_ca_org")]
+    pub ca_organization: String,
+}
+
+fn default_tls_proxy_listen() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_tls_proxy_port() -> u16 {
+    8443
+}
+
+fn default_tls_cert_cache() -> String {
+    "/var/lib/crmonban/certs".to_string()
+}
+
+fn default_tls_intercept_ports() -> Vec<u16> {
+    vec![443, 8443, 993, 995, 465, 587] // HTTPS, IMAPS, POP3S, SMTPS
+}
+
+fn default_tls_max_connections() -> usize {
+    1000
+}
+
+fn default_tls_timeout() -> u64 {
+    30
+}
+
+fn default_ca_validity_days() -> u32 {
+    3650 // 10 years
+}
+
+fn default_cert_validity_days() -> u32 {
+    365 // 1 year
+}
+
+fn default_ca_cn() -> String {
+    "crmonban Inspection CA".to_string()
+}
+
+fn default_ca_org() -> String {
+    "crmonban Security".to_string()
+}
+
+impl Default for TlsProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_addr: default_tls_proxy_listen(),
+            listen_port: default_tls_proxy_port(),
+            ca_cert_path: None,
+            ca_key_path: None,
+            cert_cache_dir: default_tls_cert_cache(),
+            intercept_ports: default_tls_intercept_ports(),
+            bypass_domains: vec![],
+            verify_upstream: true,
+            log_decrypted: false,
+            decrypted_log_path: None,
+            max_connections: default_tls_max_connections(),
+            timeout_secs: default_tls_timeout(),
+            inspect_decrypted: true,
+            ca_validity_days: default_ca_validity_days(),
+            cert_validity_days: default_cert_validity_days(),
+            ca_common_name: default_ca_cn(),
+            ca_organization: default_ca_org(),
         }
     }
 }

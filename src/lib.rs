@@ -10,6 +10,7 @@ pub mod monitor;
 pub mod port_scan_monitor;
 pub mod shared_whitelist;
 pub mod siem;
+pub mod tls_proxy;
 pub mod zones;
 
 use anyhow::Result;
@@ -50,7 +51,12 @@ impl Crmonban {
         } else {
             None
         };
-        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi);
+        let tls_proxy = if config.tls_proxy.enabled {
+            Some(config.tls_proxy.clone())
+        } else {
+            None
+        };
+        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi, tls_proxy);
         let intel = IntelGatherer::new(config.intel.clone())?;
 
         Ok(Self {
@@ -74,7 +80,12 @@ impl Crmonban {
         } else {
             None
         };
-        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi);
+        let tls_proxy = if config.tls_proxy.enabled {
+            Some(config.tls_proxy.clone())
+        } else {
+            None
+        };
+        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi, tls_proxy);
         let intel = IntelGatherer::new(config.intel.clone())?;
 
         Ok(Self {

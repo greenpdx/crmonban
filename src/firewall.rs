@@ -15,13 +15,14 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use tracing::{debug, info, warn};
 
-use crate::config::{DpiConfig, NftablesConfig, PortScanConfig};
+use crate::config::{DpiConfig, NftablesConfig, PortScanConfig, TlsProxyConfig};
 
 /// Firewall manager for nftables operations
 pub struct Firewall {
     config: NftablesConfig,
     port_scan_config: Option<PortScanConfig>,
     dpi_config: Option<DpiConfig>,
+    tls_proxy_config: Option<TlsProxyConfig>,
 }
 
 impl Firewall {
@@ -31,6 +32,7 @@ impl Firewall {
             config,
             port_scan_config: None,
             dpi_config: None,
+            tls_proxy_config: None,
         }
     }
 
@@ -40,6 +42,7 @@ impl Firewall {
             config,
             port_scan_config: Some(port_scan_config),
             dpi_config: None,
+            tls_proxy_config: None,
         }
     }
 
@@ -48,11 +51,13 @@ impl Firewall {
         config: NftablesConfig,
         port_scan_config: Option<PortScanConfig>,
         dpi_config: Option<DpiConfig>,
+        tls_proxy_config: Option<TlsProxyConfig>,
     ) -> Self {
         Self {
             config,
             port_scan_config,
             dpi_config,
+            tls_proxy_config,
         }
     }
 
@@ -186,6 +191,13 @@ impl Firewall {
         if let Some(ref dpi_config) = self.dpi_config {
             if dpi_config.enabled {
                 self.add_dpi_rules(&mut batch, dpi_config);
+            }
+        }
+
+        // Add TLS proxy redirect rules if enabled
+        if let Some(ref tls_config) = self.tls_proxy_config {
+            if tls_config.enabled {
+                self.add_tls_proxy_rules(&mut batch, tls_config);
             }
         }
 
@@ -711,6 +723,105 @@ impl Firewall {
         }));
 
         info!("DPI rules added for NFQUEUE {}", config.queue_num);
+    }
+
+    /// Add TLS proxy redirect rules for transparent MITM interception
+    fn add_tls_proxy_rules(&self, batch: &mut Batch, config: &TlsProxyConfig) {
+        info!(
+            "Adding TLS proxy redirect rules (proxy port {})",
+            config.listen_port
+        );
+
+        // Create a NAT table and chain for DNAT/REDIRECT
+        // Note: For transparent proxying, we need prerouting DNAT
+        batch.add(NfListObject::Chain(Chain {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            name: Cow::Borrowed("tls_redirect"),
+            newname: None,
+            handle: None,
+            _type: Some(NfChainType::NAT),
+            hook: Some(NfHook::Prerouting),
+            prio: Some(-100), // Before regular filter chains
+            dev: None,
+            policy: Some(NfChainPolicy::Accept),
+        }));
+
+        // Redirect HTTPS traffic (port 443) to local TLS proxy
+        // Only redirect traffic coming from other hosts, not locally generated
+        for port in &config.intercept_ports {
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Borrowed("tls_redirect"),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Owned(format!(
+                    "Redirect port {} to TLS proxy",
+                    port
+                ))),
+                expr: Cow::Owned(vec![
+                    // Match TCP protocol
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("meta"),
+                                field: Cow::Borrowed("l4proto"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Borrowed("tcp")),
+                        op: Operator::EQ,
+                    }),
+                    // Match destination port
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("tcp"),
+                                field: Cow::Borrowed("dport"),
+                            },
+                        ))),
+                        right: Expression::Number(*port as u32),
+                        op: Operator::EQ,
+                    }),
+                    // Redirect to local proxy port
+                    Statement::Redirect(Some(nftables::stmt::NAT {
+                        addr: None,
+                        family: None,
+                        port: Some(Expression::Number(config.listen_port as u32)),
+                        flags: None,
+                    })),
+                ]),
+            }));
+        }
+
+        info!(
+            "TLS proxy redirect rules added for ports {:?} -> {}",
+            config.intercept_ports, config.listen_port
+        );
+    }
+
+    /// Initialize TLS proxy redirect rules (can be called separately)
+    pub fn init_tls_proxy(&self, config: &TlsProxyConfig) -> Result<()> {
+        if !config.enabled {
+            debug!("TLS proxy is disabled");
+            return Ok(());
+        }
+
+        if !self.table_exists()? {
+            return Err(anyhow::anyhow!(
+                "Table {} does not exist. Initialize firewall first.",
+                self.config.table_name
+            ));
+        }
+
+        let mut batch = Batch::new();
+        self.add_tls_proxy_rules(&mut batch, config);
+
+        let ruleset = batch.to_nftables();
+        apply_ruleset(&ruleset).context("Failed to apply TLS proxy rules")?;
+
+        info!("TLS proxy redirect rules initialized");
+        Ok(())
     }
 
     /// Initialize DPI (can be called separately to add rules to existing table)
