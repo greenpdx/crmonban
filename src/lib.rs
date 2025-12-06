@@ -40,6 +40,10 @@ pub mod correlation;
 #[cfg(feature = "packet-engine")]
 pub mod engine;
 
+// Parallel processing
+#[cfg(feature = "parallel")]
+pub mod parallel;
+
 // Network Scanning (Free: Nmap, Ettercap, Metasploit, Burp)
 #[cfg(feature = "scan")]
 pub mod network;

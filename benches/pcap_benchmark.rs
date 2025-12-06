@@ -27,6 +27,18 @@ use crmonban::threat_intel::IocCache;
 #[cfg(feature = "ml-detection")]
 use crmonban::ml::{AnomalyDetector, Baseline, FeatureExtractor};
 
+#[cfg(feature = "parallel")]
+use crmonban::parallel::ParallelConfig;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
+#[cfg(feature = "parallel")]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+#[cfg(feature = "parallel")]
+use std::sync::Arc;
+
 #[derive(Parser, Debug)]
 #[command(name = "pcap_benchmark")]
 #[command(about = "Benchmark NIDS pipeline with real PCAP traffic")]
@@ -66,6 +78,18 @@ struct Args {
     /// Path to CSV file or directory (NetFlow v3 format)
     #[arg(short, long)]
     csv_path: Option<PathBuf>,
+
+    /// Enable parallel processing
+    #[arg(long)]
+    parallel: bool,
+
+    /// Number of threads for parallel processing (0 = auto-detect)
+    #[arg(long, default_value = "0")]
+    threads: usize,
+
+    /// Batch size for parallel processing
+    #[arg(long, default_value = "1000")]
+    batch_size: usize,
 }
 
 /// NetFlow v3 CSV record (NF-ToN-IoT format)
@@ -783,6 +807,221 @@ impl PcapBenchmark {
         Ok(())
     }
 
+    /// Run benchmark with parallel processing
+    #[cfg(feature = "parallel")]
+    fn run_parallel(&mut self) -> anyhow::Result<()> {
+        let path = &self.args.pcap_path;
+        let batch_size = self.args.batch_size;
+        let num_threads = if self.args.threads == 0 {
+            num_cpus::get()
+        } else {
+            self.args.threads
+        };
+
+        // Initialize rayon thread pool
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .ok(); // Ignore if already initialized
+
+        // Collect PCAP files
+        let pcap_files: Vec<PathBuf> = if path.is_file() {
+            vec![path.clone()]
+        } else if path.is_dir() {
+            fs::read_dir(path)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension()
+                        .map(|e| e == "pcap" || e == "pcapng")
+                        .unwrap_or(false)
+                })
+                .collect()
+        } else {
+            println!("No PCAP files found at {:?}", path);
+            return Ok(());
+        };
+
+        if pcap_files.is_empty() {
+            println!("No PCAP files found at {:?}", path);
+            return Ok(());
+        }
+
+        println!("PCAP Replay Benchmark (PARALLEL)");
+        println!("=================================");
+        println!("Files: {:?}", pcap_files.iter().map(|p| p.file_name().unwrap()).collect::<Vec<_>>());
+        println!("Max packets: {}", if self.args.max_packets == 0 { "unlimited".to_string() } else { self.args.max_packets.to_string() });
+        println!("Warmup: {} packets", self.args.warmup);
+        println!("Threads: {}", num_threads);
+        println!("Batch size: {}", batch_size);
+        println!();
+        println!("Features enabled:");
+        println!("  Flow tracking: {}", self.flow_tracker.is_some());
+        #[cfg(feature = "signatures")]
+        println!("  Signatures: {}", self.signature_engine.is_some());
+        println!();
+
+        // Thread-safe counters
+        let packets_processed = Arc::new(AtomicU64::new(0));
+        let bytes_processed = Arc::new(AtomicU64::new(0));
+        let signature_matches = Arc::new(AtomicU64::new(0));
+        let packets_with_payload = Arc::new(AtomicU64::new(0));
+        let total_payload_bytes = Arc::new(AtomicU64::new(0));
+
+        let start = Instant::now();
+        let mut total_raw_packets = 0usize;
+
+        for pcap_file in pcap_files {
+            println!("Processing {:?}...", pcap_file.file_name().unwrap());
+
+            let mut cap = Capture::from_file(&pcap_file)?;
+            let mut batch: Vec<Vec<u8>> = Vec::with_capacity(batch_size);
+
+            while let Ok(packet) = cap.next_packet() {
+                // Skip warmup packets
+                if total_raw_packets < self.args.warmup {
+                    total_raw_packets += 1;
+                    continue;
+                }
+
+                batch.push(packet.data.to_vec());
+                total_raw_packets += 1;
+
+                // Process batch when full
+                if batch.len() >= batch_size {
+                    self.process_batch_parallel(
+                        &batch,
+                        &packets_processed,
+                        &bytes_processed,
+                        &signature_matches,
+                        &packets_with_payload,
+                        &total_payload_bytes,
+                    );
+                    batch.clear();
+
+                    // Progress indicator
+                    let processed = packets_processed.load(Ordering::Relaxed);
+                    if processed % 10000 < batch_size as u64 {
+                        print!("\r  {} packets processed...", processed);
+                        std::io::Write::flush(&mut std::io::stdout())?;
+                    }
+                }
+
+                if self.args.max_packets > 0 && packets_processed.load(Ordering::Relaxed) >= self.args.max_packets as u64 {
+                    break;
+                }
+            }
+
+            // Process remaining packets
+            if !batch.is_empty() {
+                self.process_batch_parallel(
+                    &batch,
+                    &packets_processed,
+                    &bytes_processed,
+                    &signature_matches,
+                    &packets_with_payload,
+                    &total_payload_bytes,
+                );
+            }
+            println!();
+
+            if self.args.max_packets > 0 && packets_processed.load(Ordering::Relaxed) >= self.args.max_packets as u64 {
+                break;
+            }
+        }
+
+        let elapsed = start.elapsed();
+
+        // Update self stats from atomics for print_results
+        self.packets_processed = packets_processed.load(Ordering::Relaxed) as usize;
+        self.bytes_processed = bytes_processed.load(Ordering::Relaxed);
+        self.detection_stats.signature_matches = signature_matches.load(Ordering::Relaxed) as usize;
+        self.detection_stats.packets_with_payload = packets_with_payload.load(Ordering::Relaxed) as usize;
+        self.detection_stats.total_payload_bytes = total_payload_bytes.load(Ordering::Relaxed) as usize;
+
+        // Print results
+        self.print_results(elapsed);
+        println!();
+        println!("Parallel processing: {} threads, batch size {}", num_threads, batch_size);
+
+        Ok(())
+    }
+
+    /// Process a batch of packets in parallel
+    #[cfg(feature = "parallel")]
+    fn process_batch_parallel(
+        &self,
+        batch: &[Vec<u8>],
+        packets_processed: &Arc<AtomicU64>,
+        bytes_processed: &Arc<AtomicU64>,
+        signature_matches: &Arc<AtomicU64>,
+        packets_with_payload: &Arc<AtomicU64>,
+        total_payload_bytes: &Arc<AtomicU64>,
+    ) {
+        // Parse all packets in parallel
+        let parsed: Vec<_> = batch.par_iter()
+            .filter_map(|data| self.parse_packet(data))
+            .collect();
+
+        // Update byte counter
+        let total_bytes: u64 = parsed.iter().map(|p| p.raw_len as u64).sum();
+        bytes_processed.fetch_add(total_bytes, Ordering::Relaxed);
+        packets_processed.fetch_add(parsed.len() as u64, Ordering::Relaxed);
+
+        // Count payload stats
+        let payload_count: u64 = parsed.iter().filter(|p| !p.payload.is_empty()).count() as u64;
+        let payload_bytes: u64 = parsed.iter().map(|p| p.payload.len() as u64).sum();
+        packets_with_payload.fetch_add(payload_count, Ordering::Relaxed);
+        total_payload_bytes.fetch_add(payload_bytes, Ordering::Relaxed);
+
+        // Signature matching in parallel
+        #[cfg(feature = "signatures")]
+        if let Some(ref engine) = self.signature_engine {
+            // Build PacketContexts
+            let contexts: Vec<_> = parsed.par_iter()
+                .map(|pkt| PacketContext {
+                    src_ip: Some(pkt.src_ip),
+                    dst_ip: Some(pkt.dst_ip),
+                    src_port: Some(pkt.src_port),
+                    dst_port: Some(pkt.dst_port),
+                    protocol: match pkt.protocol {
+                        IpProtocol::Tcp => Protocol::Tcp,
+                        IpProtocol::Udp => Protocol::Udp,
+                        IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
+                        _ => Protocol::Ip,
+                    },
+                    tcp_flags: pkt.tcp_flags.as_ref().map(|f| {
+                        let mut flags = 0u8;
+                        if f.syn { flags |= 0x02; }
+                        if f.ack { flags |= 0x10; }
+                        if f.fin { flags |= 0x01; }
+                        if f.rst { flags |= 0x04; }
+                        if f.psh { flags |= 0x08; }
+                        if f.urg { flags |= 0x20; }
+                        flags
+                    }).unwrap_or(0),
+                    ttl: 64,
+                    payload: pkt.payload.clone(),
+                    established: false,
+                    to_server: true,
+                    http_uri: None,
+                    http_method: None,
+                    http_headers: None,
+                    http_host: None,
+                    http_user_agent: None,
+                    dns_query: None,
+                    tls_sni: None,
+                    ja3_hash: None,
+                })
+                .collect();
+
+            // Match all packets in parallel
+            let results = engine.match_batch(&contexts);
+            let match_count: u64 = results.iter().filter(|r| !r.is_empty()).count() as u64;
+            signature_matches.fetch_add(match_count, Ordering::Relaxed);
+        }
+    }
+
     fn print_results(&self, elapsed: Duration) {
         println!();
         println!("════════════════════════════════════════════════════════════════════════════════");
@@ -1151,6 +1390,10 @@ fn main() -> anyhow::Result<()> {
     if benchmark.args.csv_path.is_some() {
         benchmark.run_csv()
     } else {
+        #[cfg(feature = "parallel")]
+        if benchmark.args.parallel {
+            return benchmark.run_parallel();
+        }
         benchmark.run()
     }
 }

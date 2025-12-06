@@ -45,6 +45,9 @@ rand = { version = "*", optional = true }
 crossbeam-channel = { version = "*", optional = true }
 num_cpus = { version = "*", optional = true }
 
+# Parallel processing
+rayon = { version = "1.10", optional = true }
+
 # Database
 rusqlite = { version = "*", features = ["bundled"] }
 
@@ -153,8 +156,10 @@ ml-detection = ["dep:rand", "dep:bincode", "dep:parking_lot", "flow-tracking"]
 correlation = ["dep:parking_lot", "flow-tracking"]
 # Packet Engine (Stage 8)
 packet-engine = ["dep:crossbeam-channel", "dep:num_cpus", "dep:parking_lot", "correlation"]
+# Parallel processing
+parallel = ["dep:rayon", "dep:num_cpus"]
 # Full NIDS functionality (all stages)
-nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detection", "correlation", "packet-engine"]
+nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detection", "correlation", "packet-engine", "parallel"]
 
 # Network Scanning - Free/Open Source (Nmap, Ettercap, Metasploit, Burp)
 scan = []

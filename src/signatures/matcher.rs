@@ -11,6 +11,9 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 use regex::bytes::Regex;
 use parking_lot::RwLock;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use super::ast::*;
 use super::{SignatureConfig, RuleStats};
 
@@ -449,6 +452,51 @@ impl SignatureEngine {
         }
 
         results
+    }
+
+    /// Match multiple packets in parallel batches
+    /// Returns a vector of (packet_index, matches) tuples
+    #[cfg(feature = "parallel")]
+    pub fn match_packets_parallel(&self, contexts: &[PacketContext]) -> Vec<(usize, Vec<MatchResult>)> {
+        contexts
+            .par_iter()
+            .enumerate()
+            .map(|(idx, ctx)| (idx, self.match_packet(ctx)))
+            .collect()
+    }
+
+    /// Match multiple packets in parallel batches (non-parallel fallback)
+    #[cfg(not(feature = "parallel"))]
+    pub fn match_packets_parallel(&self, contexts: &[PacketContext]) -> Vec<(usize, Vec<MatchResult>)> {
+        contexts
+            .iter()
+            .enumerate()
+            .map(|(idx, ctx)| (idx, self.match_packet(ctx)))
+            .collect()
+    }
+
+    /// Match packets in batches with parallel processing
+    /// More efficient for large batches as it reduces overhead
+    #[cfg(feature = "parallel")]
+    pub fn match_batch(&self, contexts: &[PacketContext]) -> Vec<Vec<MatchResult>> {
+        contexts
+            .par_iter()
+            .map(|ctx| self.match_packet(ctx))
+            .collect()
+    }
+
+    /// Match packets in batches (non-parallel fallback)
+    #[cfg(not(feature = "parallel"))]
+    pub fn match_batch(&self, contexts: &[PacketContext]) -> Vec<Vec<MatchResult>> {
+        contexts
+            .iter()
+            .map(|ctx| self.match_packet(ctx))
+            .collect()
+    }
+
+    /// Count total matches from a batch (useful for statistics)
+    pub fn count_batch_matches(results: &[Vec<MatchResult>]) -> usize {
+        results.iter().map(|v| v.len()).sum()
     }
 
     /// Get rule IDs for a protocol
