@@ -566,7 +566,7 @@ fn default_dpi_queue() -> u16 {
 }
 
 fn default_dpi_packet_count() -> u8 {
-    6
+    8 // Minimum needed to capture full TLS handshake
 }
 
 fn default_dpi_max_payload() -> usize {
@@ -574,7 +574,7 @@ fn default_dpi_max_payload() -> usize {
 }
 
 fn default_dpi_excluded_ports() -> Vec<u16> {
-    vec![443] // HTTPS is encrypted, no point inspecting
+    vec![] // Empty by default - inspect all ports including TLS handshakes
 }
 
 fn default_dpi_ban_time() -> i64 {

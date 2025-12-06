@@ -116,6 +116,7 @@ impl DpiEngine {
         // Protocol anomaly patterns
         if config.detect_protocol_anomaly {
             rules.extend(Self::compile_protocol_anomaly_rules()?);
+            rules.extend(Self::compile_tls_anomaly_rules()?);
         }
 
         // Custom patterns
@@ -369,6 +370,81 @@ impl DpiEngine {
                 r"(?i)^host\s*:.*@",
                 ThreatSeverity::Medium,
                 "HTTP Host header injection",
+            ),
+        ];
+
+        Self::compile_patterns(patterns)
+    }
+
+    /// Compile TLS/SSL anomaly detection rules
+    fn compile_tls_anomaly_rules() -> Result<Vec<CompiledRule>> {
+        // TLS record types and handshake detection via byte patterns
+        // TLS records start with: ContentType (1 byte) | Version (2 bytes) | Length (2 bytes)
+        // ContentType: 0x14=ChangeCipherSpec, 0x15=Alert, 0x16=Handshake, 0x17=Application
+        // Version: 0x0301=TLS1.0, 0x0302=TLS1.1, 0x0303=TLS1.2, 0x0304=TLS1.3
+        let patterns = vec![
+            (
+                "tls_sslv2_client_hello",
+                // SSLv2 ClientHello - deprecated and insecure
+                r"^\x80[\x20-\xff]\x01\x00\x02",
+                ThreatSeverity::High,
+                "SSLv2 ClientHello detected - deprecated protocol",
+            ),
+            (
+                "tls_sslv3_handshake",
+                // SSLv3 - deprecated and vulnerable (POODLE)
+                r"^\x16\x03\x00",
+                ThreatSeverity::Medium,
+                "SSLv3 detected - vulnerable to POODLE",
+            ),
+            (
+                "tls_heartbleed_probe",
+                // Heartbeat request with suspicious length
+                r"^\x18\x03[\x00-\x03]",
+                ThreatSeverity::Critical,
+                "Potential Heartbleed probe",
+            ),
+            (
+                "tls_export_cipher",
+                // EXPORT cipher suites in ClientHello - weak crypto
+                r"\x00\x03|\x00\x06|\x00\x08|\x00\x0b|\x00\x0e|\x00\x11|\x00\x14|\x00\x17|\x00\x19|\x00\x26",
+                ThreatSeverity::High,
+                "EXPORT cipher suite offered - weak cryptography",
+            ),
+            (
+                "tls_null_cipher",
+                // NULL cipher suites - no encryption
+                r"\x00\x00|\x00\x01|\x00\x02|\x00\x2c|\x00\x2d|\x00\x2e|\x00\x3b",
+                ThreatSeverity::Critical,
+                "NULL cipher suite - no encryption",
+            ),
+            (
+                "tls_anonymous_dh",
+                // Anonymous DH - no authentication
+                r"\x00\x18|\x00\x1b|\x00\x34|\x00\x3a|\x00\x46|\x00\x6c",
+                ThreatSeverity::High,
+                "Anonymous DH cipher suite - no authentication",
+            ),
+            (
+                "tls_rc4_cipher",
+                // RC4 cipher suites - broken
+                r"\x00\x04|\x00\x05|\x00\x24|\x00\x28|\x00\x8a|\x00\x8e|\x00\x92|\xc0\x02|\xc0\x07|\xc0\x0c|\xc0\x11",
+                ThreatSeverity::Medium,
+                "RC4 cipher suite - broken encryption",
+            ),
+            (
+                "tls_des_cipher",
+                // DES/3DES cipher suites - weak
+                r"\x00\x09|\x00\x0c|\x00\x0f|\x00\x12|\x00\x15|\x00\x1a|\x00\x1d|\x00\x21",
+                ThreatSeverity::Medium,
+                "DES/3DES cipher suite - weak encryption",
+            ),
+            (
+                "tls_renegotiation_attack",
+                // Empty renegotiation_info in handshake without SCSV
+                r"\xff\x01\x00\x01\x00",
+                ThreatSeverity::Medium,
+                "Potential TLS renegotiation attack",
             ),
         ];
 
