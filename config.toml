@@ -9,7 +9,7 @@ db_path = "/var/lib/crmonban/crmonban.db"
 pid_file = "/var/run/crmonban.pid"
 
 # Log level: trace, debug, info, warn, error
-log_level = "info"
+log_level = "debug"
 
 # Automatically gather intelligence when banning an IP
 auto_intel = true
@@ -335,3 +335,54 @@ ban_time = 7200
 
 # Protocols to monitor
 protocols = ["tcp", "udp"]
+
+# ============================================================================
+# Packet Engine (NIDS) Configuration
+# ============================================================================
+# Live packet capture and signature-based detection
+
+[packet_engine]
+# Enable packet engine
+enabled = true
+
+# Capture method: "af_packet", "nfqueue", or "pcap"
+capture_method = "af_packet"
+
+# Interface to capture on
+interface = "lo"
+
+# NFQUEUE number (for nfqueue mode)
+nfqueue_num = 100
+
+# Enable promiscuous mode
+promiscuous = true
+
+# Snapshot length (max bytes per packet)
+snaplen = 65535
+
+# Read timeout in milliseconds
+timeout_ms = 100
+
+# Number of worker threads (0 = auto-detect)
+workers = 0
+
+# Enable signature matching
+signatures_enabled = true
+
+# Path to rules directory
+rules_dir = "rules"
+
+# Enable flow tracking
+flow_tracking = true
+
+# Enable ML anomaly detection
+ml_detection = true
+
+# Enable threat intel lookups
+threat_intel = true
+
+# Ban duration for detected attacks (seconds)
+ban_duration = 3600
+
+# Auto-ban on signature match
+auto_ban = true

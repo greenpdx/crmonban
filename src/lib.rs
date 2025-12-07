@@ -58,7 +58,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use config::Config;
 use database::Database;
@@ -430,6 +430,7 @@ impl Daemon {
         let port_scan_config = crmonban.config.port_scan.clone();
         let dpi_config = crmonban.config.dpi.clone();
         let display_config = crmonban.config.display.clone();
+        let packet_engine_config = crmonban.config.packet_engine.clone();
         let db_path = crmonban.config.db_path().to_string_lossy().to_string();
         drop(crmonban);
 
@@ -548,6 +549,28 @@ impl Daemon {
             }))
         } else {
             info!("Deep packet inspection is disabled");
+            None
+        };
+
+        // Spawn packet engine task if enabled
+        #[cfg(feature = "packet-engine")]
+        let packet_engine_handle = if packet_engine_config.enabled {
+            let event_tx_engine = event_tx.clone();
+            let crmonban_for_engine = self.crmonban.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = start_packet_engine(packet_engine_config, event_tx_engine, crmonban_for_engine).await {
+                    error!("Packet engine error: {}", e);
+                }
+            }))
+        } else {
+            info!("Packet engine is disabled");
+            None
+        };
+        #[cfg(not(feature = "packet-engine"))]
+        let packet_engine_handle: Option<tokio::task::JoinHandle<()>> = {
+            if packet_engine_config.enabled {
+                warn!("Packet engine requested but not compiled in (missing packet-engine feature)");
+            }
             None
         };
 
@@ -718,6 +741,9 @@ impl Daemon {
             handle.abort();
         }
         if let Some(handle) = dpi_handle {
+            handle.abort();
+        }
+        if let Some(handle) = packet_engine_handle {
             handle.abort();
         }
         cleanup_handle.abort();
@@ -1142,6 +1168,249 @@ async fn handle_action(
             success: false,
             message: format!("Action failed: {}", e),
         }),
+    }
+}
+
+/// Start the packet engine for live packet capture and NIDS processing
+#[cfg(feature = "packet-engine")]
+async fn start_packet_engine(
+    config: config::PacketEngineConfig,
+    event_tx: mpsc::Sender<MonitorEvent>,
+    _crmonban: Arc<RwLock<Crmonban>>,
+) -> Result<()> {
+    use engine::capture::{CaptureConfig, CaptureMethod, create_capture};
+    use core::packet::IpProtocol;
+
+    info!("Starting packet engine on interface: {:?}", config.interface);
+
+    // Convert config to capture config
+    let capture_method = match config.capture_method.as_str() {
+        "af_packet" | "afpacket" => CaptureMethod::AfPacket,
+        "nfqueue" => CaptureMethod::Nfqueue,
+        "pcap" => CaptureMethod::Pcap,
+        _ => CaptureMethod::AfPacket,
+    };
+
+    let capture_config = CaptureConfig {
+        method: capture_method,
+        nfqueue_num: config.nfqueue_num,
+        interface: config.interface.clone(),
+        pcap_file: None,
+        snaplen: config.snaplen,
+        timeout_ms: config.timeout_ms,
+        buffer_size: 65536,
+        promiscuous: config.promiscuous,
+    };
+
+    // Create capture
+    let mut capture = create_capture(&capture_config)?;
+
+    // Load signatures if enabled
+    #[cfg(feature = "signatures")]
+    let signature_engine = if config.signatures_enabled {
+        info!("Loading signatures...");
+        let mut sig_config = signatures::SignatureConfig::default();
+
+        // Override rules_dir from packet engine config
+        if let Some(ref rules_dir) = config.rules_dir {
+            sig_config.rule_dirs = vec![std::path::PathBuf::from(rules_dir)];
+        }
+
+        let mut engine = signatures::SignatureEngine::new(sig_config.clone());
+
+        // Load rules using RuleLoader
+        let mut loader = signatures::RuleLoader::new(sig_config.clone());
+
+        // Load classification.config for priority mapping
+        if let Some(ref rules_dir) = config.rules_dir {
+            let classification_path = std::path::Path::new(rules_dir).join("classification.config");
+            if classification_path.exists() {
+                if let Err(e) = loader.load_classifications(&classification_path) {
+                    warn!("Failed to load classification.config: {}", e);
+                }
+            }
+        }
+
+        match loader.load_all() {
+            Ok(ruleset) => {
+                info!("Loaded {} rules ({} enabled, {} with content patterns)",
+                    ruleset.stats.total_rules,
+                    ruleset.stats.total_rules - ruleset.stats.disabled,
+                    ruleset.stats.with_content);
+                // Add rules to engine
+                for (_, rule) in ruleset.rules {
+                    engine.add_rule(rule);
+                }
+                engine.rebuild_prefilter();
+                info!("Prefilter patterns: {}", engine.prefilter_pattern_count());
+            }
+            Err(e) => {
+                warn!("Failed to load rules: {}", e);
+            }
+        }
+        Some(engine)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "signatures"))]
+    let signature_engine: Option<()> = None;
+
+    // Create flow tracker if enabled
+    #[cfg(feature = "flow-tracking")]
+    let _flow_tracker = if config.flow_tracking {
+        Some(flow::FlowTracker::new(flow::FlowConfig::default()))
+    } else {
+        None
+    };
+
+    info!("Packet engine started, listening for packets...");
+
+    let mut packet_count: u64 = 0;
+    let mut alert_count: u64 = 0;
+
+    // Timing statistics (in microseconds)
+    let mut timing_capture_us: u64 = 0;
+    let mut timing_context_us: u64 = 0;
+    let mut timing_match_us: u64 = 0;
+    let mut timing_event_us: u64 = 0;
+    let mut timing_total_us: u64 = 0;
+    let mut timing_samples: u64 = 0;
+
+    // Main capture loop
+    loop {
+        let loop_start = std::time::Instant::now();
+
+        // Stage 1: Capture (includes parsing in AfPacketCapture)
+        let capture_start = std::time::Instant::now();
+        match capture.next_packet() {
+            Ok(Some(packet)) => {
+                let capture_elapsed = capture_start.elapsed().as_micros() as u64;
+                timing_capture_us += capture_elapsed;
+
+                packet_count += 1;
+                timing_samples += 1;
+
+                // Log timing stats periodically
+                if packet_count % 10000 == 0 {
+                    let avg_capture = timing_capture_us / timing_samples.max(1);
+                    let avg_context = timing_context_us / timing_samples.max(1);
+                    let avg_match = timing_match_us / timing_samples.max(1);
+                    let avg_event = timing_event_us / timing_samples.max(1);
+                    let avg_total = timing_total_us / timing_samples.max(1);
+                    info!(
+                        "Packets: {} alerts: {} | Timing (us): capture={} ctx={} match={} event={} total={}",
+                        packet_count, alert_count,
+                        avg_capture, avg_context, avg_match, avg_event, avg_total
+                    );
+                }
+
+                // Check signatures
+                #[cfg(feature = "signatures")]
+                if let Some(ref engine) = signature_engine {
+                    use signatures::matcher::PacketContext;
+                    use signatures::ast::Protocol;
+
+                    // Stage 2: Build context
+                    let context_start = std::time::Instant::now();
+                    let ctx = PacketContext {
+                        src_ip: Some(packet.src_ip),
+                        dst_ip: Some(packet.dst_ip),
+                        src_port: Some(packet.src_port),
+                        dst_port: Some(packet.dst_port),
+                        protocol: match packet.protocol {
+                            IpProtocol::Tcp => Protocol::Tcp,
+                            IpProtocol::Udp => Protocol::Udp,
+                            IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
+                            _ => Protocol::Ip,
+                        },
+                        tcp_flags: packet.tcp_flags.as_ref().map(|f| {
+                            let mut flags = 0u8;
+                            if f.syn { flags |= 0x02; }
+                            if f.ack { flags |= 0x10; }
+                            if f.fin { flags |= 0x01; }
+                            if f.rst { flags |= 0x04; }
+                            if f.psh { flags |= 0x08; }
+                            if f.urg { flags |= 0x20; }
+                            flags
+                        }).unwrap_or(0),
+                        ttl: 64,
+                        payload: packet.payload.clone(),
+                        established: false,
+                        to_server: true,
+                        http_uri: None,
+                        http_method: None,
+                        http_headers: None,
+                        http_host: None,
+                        http_user_agent: None,
+                        dns_query: None,
+                        tls_sni: None,
+                        ja3_hash: None,
+                    };
+                    let context_elapsed = context_start.elapsed().as_micros() as u64;
+                    timing_context_us += context_elapsed;
+
+                    // Stage 3: Signature matching
+                    let match_start = std::time::Instant::now();
+                    let matches = engine.match_packet(&ctx);
+                    let match_elapsed = match_start.elapsed().as_micros() as u64;
+                    timing_match_us += match_elapsed;
+
+                    // Stage 4: Event processing
+                    let event_start = std::time::Instant::now();
+                    for m in matches {
+                        alert_count += 1;
+                        let priority = m.priority;
+                        info!(
+                            "Signature match: [{}:{}] {} -> {}:{} - {}",
+                            m.sid, priority,
+                            packet.src_ip, packet.dst_ip, packet.dst_port,
+                            m.msg
+                        );
+
+                        // Send alert event
+                        let attack_event = models::AttackEvent {
+                            id: None,
+                            timestamp: chrono::Utc::now(),
+                            ip: packet.src_ip,
+                            service: format!("nids:{}", m.classtype.as_deref().unwrap_or("unknown")),
+                            event_type: models::AttackEventType::SignatureMatch,
+                            details: Some(format!("[{}] {}", m.sid, m.msg)),
+                            log_line: String::new(),
+                        };
+
+                        if let Err(e) = event_tx.send(MonitorEvent::Attack(attack_event)).await {
+                            warn!("Failed to send attack event: {}", e);
+                        }
+
+                        // Auto-ban if configured (priority 1-2 are high severity)
+                        if config.auto_ban && priority <= 2 {
+                            let ban_reason = format!("NIDS signature match: [{}] {}", m.sid, m.msg);
+                            if let Err(e) = event_tx.send(MonitorEvent::Ban {
+                                ip: packet.src_ip,
+                                service: "nids".to_string(),
+                                reason: ban_reason,
+                                duration_secs: config.ban_duration,
+                            }).await {
+                                warn!("Failed to send ban event: {}", e);
+                            }
+                        }
+                    }
+                    let event_elapsed = event_start.elapsed().as_micros() as u64;
+                    timing_event_us += event_elapsed;
+                }
+
+                let total_elapsed = loop_start.elapsed().as_micros() as u64;
+                timing_total_us += total_elapsed;
+            }
+            Ok(None) => {
+                // No packet available (timeout)
+                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+            }
+            Err(e) => {
+                error!("Capture error: {}", e);
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            }
+        }
     }
 }
 

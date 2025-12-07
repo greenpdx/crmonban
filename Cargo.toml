@@ -93,7 +93,7 @@ daemonize = "*"
 zbus = { version = "*", optional = true }
 
 # SIEM export
-uuid = { version = "*", features = ["v4"] }
+uuid = { version = "*", features = ["v4", "serde"] }
 hostname = "*"
 
 # Zone config parsing
@@ -122,6 +122,7 @@ webpki-roots = "*"
 x509-parser = "*"
 time = "*"
 pem = "*"
+pnet = "0.35.0"
 
 [[bin]]
 name = "crmonban"
@@ -132,12 +133,16 @@ name = "pcap_benchmark"
 path = "benches/pcap_benchmark.rs"
 required-features = ["flow-tracking"]
 
+[[bin]]
+name = "pcap_replay"
+path = "src/bin/pcap_replay.rs"
+
 [lib]
 name = "crmonban"
 path = "src/lib.rs"
 
 [features]
-default = ["dbus"]
+default = ["nids"]
 # D-Bus integration for daemon control
 dbus = ["dep:zbus"]
 # External firewall integration (requires separate firewall daemon)

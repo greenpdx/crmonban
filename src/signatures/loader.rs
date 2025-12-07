@@ -127,6 +127,8 @@ pub struct RuleLoader {
     /// SID modifications
     #[allow(dead_code)]
     sid_modifications: HashMap<u32, Vec<String>>,
+    /// Classification priorities (classtype -> priority)
+    classifications: HashMap<String, ClassificationInfo>,
 }
 
 impl RuleLoader {
@@ -138,7 +140,22 @@ impl RuleLoader {
             disabled_sids: Vec::new(),
             enabled_sids: Vec::new(),
             sid_modifications: HashMap::new(),
+            classifications: HashMap::new(),
         }
+    }
+
+    /// Load classification.config and store classifications
+    pub fn load_classifications(&mut self, path: &Path) -> Result<(), std::io::Error> {
+        self.classifications = self.load_classification_config(path)?;
+        Ok(())
+    }
+
+    /// Get priority for a classtype
+    pub fn get_priority_for_classtype(&self, classtype: &str) -> u8 {
+        self.classifications
+            .get(classtype)
+            .map(|c| c.priority)
+            .unwrap_or(3)
     }
 
     /// Load all configured rules
@@ -228,6 +245,13 @@ impl RuleLoader {
                     rule.enabled = enabled;
                     rule.source_file = Some(file_path.clone());
                     rule.source_line = Some(line_num);
+                    // Apply classification-based priority if rule doesn't have explicit priority
+                    // and has a classtype
+                    if rule.priority == 3 {
+                        if let Some(ref classtype) = rule.classtype {
+                            rule.priority = self.get_priority_for_classtype(classtype);
+                        }
+                    }
                     ruleset.add_rule(rule);
                 }
                 Err(mut e) => {

@@ -303,6 +303,9 @@ impl SiemExporter {
             AttackEventType::PortScan => Severity::Medium,
             AttackEventType::FailedAuth | AttackEventType::InvalidUser => Severity::Low,
             AttackEventType::RateLimit => Severity::Medium,
+            AttackEventType::SignatureMatch => Severity::High,
+            AttackEventType::Anomaly => Severity::Medium,
+            AttackEventType::ThreatIntel => Severity::High,
             AttackEventType::Other(_) => Severity::Low,
         };
 

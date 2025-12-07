@@ -9,8 +9,8 @@ use nom::{
     character::complete::{char, digit1, multispace0, multispace1},
     combinator::{map, map_res, opt, recognize, value},
     multi::{separated_list0, separated_list1},
-    sequence::{delimited, preceded, tuple},
-    IResult,
+    sequence::{delimited, preceded},
+    IResult, Parser,
 };
 
 use std::net::IpAddr;
@@ -133,7 +133,7 @@ fn parse_action(input: &str) -> IResult<&str, Action> {
         value(Action::Reject, tag_no_case("reject")),
         value(Action::Pass, tag_no_case("pass")),
         value(Action::Log, tag_no_case("log")),
-    ))(input)
+    )).parse(input)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -158,7 +158,7 @@ fn parse_protocol(input: &str) -> IResult<&str, Protocol> {
         value(Protocol::Ntp, tag_no_case("ntp")),
         value(Protocol::Ip, tag_no_case("ip")),
         value(Protocol::Any, tag_no_case("any")),
-    ))(input)
+    )).parse(input)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -170,7 +170,7 @@ fn parse_direction(input: &str) -> IResult<&str, Direction> {
         value(Direction::Both, tag("<>")),
         value(Direction::ToClient, tag("<-")),
         value(Direction::ToServer, tag("->")),
-    ))(input)
+    )).parse(input)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -188,7 +188,7 @@ fn parse_ip_spec(input: &str) -> IResult<&str, IpSpec> {
             delimited(
                 char('['),
                 separated_list1(
-                    tuple((multispace0, char(','), multispace0)),
+                    (multispace0, char(','), multispace0),
                     parse_ip_spec_inner,
                 ),
                 char(']'),
@@ -196,7 +196,7 @@ fn parse_ip_spec(input: &str) -> IResult<&str, IpSpec> {
             IpSpec::List,
         ),
         parse_ip_spec_inner,
-    ))(input)
+    )).parse(input)
 }
 
 fn parse_ip_spec_inner(input: &str) -> IResult<&str, IpSpec> {
@@ -209,11 +209,11 @@ fn parse_ip_spec_inner(input: &str) -> IResult<&str, IpSpec> {
         ),
         // CIDR notation
         map_res(
-            recognize(tuple((
+            recognize((
                 take_while1(|c: char| c.is_ascii_digit() || c == '.' || c == ':'),
                 char('/'),
                 digit1,
-            ))),
+            )),
             |s: &str| -> Result<IpSpec, &'static str> {
                 let parts: Vec<&str> = s.split('/').collect();
                 if parts.len() != 2 {
@@ -232,7 +232,7 @@ fn parse_ip_spec_inner(input: &str) -> IResult<&str, IpSpec> {
                 Ok(IpSpec::Single(ip))
             },
         ),
-    ))(input)
+    )).parse(input)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -250,7 +250,7 @@ fn parse_port_spec(input: &str) -> IResult<&str, PortSpec> {
             delimited(
                 char('['),
                 separated_list1(
-                    tuple((multispace0, char(','), multispace0)),
+                    (multispace0, char(','), multispace0),
                     parse_port_spec_inner,
                 ),
                 char(']'),
@@ -258,7 +258,7 @@ fn parse_port_spec(input: &str) -> IResult<&str, PortSpec> {
             PortSpec::List,
         ),
         parse_port_spec_inner,
-    ))(input)
+    )).parse(input)
 }
 
 fn parse_port_spec_inner(input: &str) -> IResult<&str, PortSpec> {
@@ -271,7 +271,7 @@ fn parse_port_spec_inner(input: &str) -> IResult<&str, PortSpec> {
         ),
         // Port range (1024:65535)
         map_res(
-            recognize(tuple((digit1, char(':'), digit1))),
+            recognize((digit1, char(':'), digit1)),
             |s: &str| -> Result<PortSpec, &'static str> {
                 let parts: Vec<&str> = s.split(':').collect();
                 if parts.len() != 2 {
@@ -287,7 +287,7 @@ fn parse_port_spec_inner(input: &str) -> IResult<&str, PortSpec> {
             let port: u16 = s.parse().map_err(|_| "Invalid port")?;
             Ok(PortSpec::Single(port))
         }),
-    ))(input)
+    )).parse(input)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -296,13 +296,13 @@ fn parse_port_spec_inner(input: &str) -> IResult<&str, PortSpec> {
 
 fn parse_options(input: &str) -> IResult<&str, Vec<RuleOption>> {
     delimited(
-        tuple((multispace0, char('('), multispace0)),
+        (multispace0, char('('), multispace0),
         separated_list0(
-            tuple((multispace0, char(';'), multispace0)),
+            (multispace0, char(';'), multispace0),
             parse_single_option,
         ),
-        tuple((multispace0, opt(char(';')), multispace0, char(')'))),
-    )(input)
+        (multispace0, opt(char(';')), multispace0, char(')')),
+    ).parse(input)
 }
 
 fn parse_single_option(input: &str) -> IResult<&str, RuleOption> {
@@ -311,9 +311,9 @@ fn parse_single_option(input: &str) -> IResult<&str, RuleOption> {
 
     // Check if there's a value
     let (input, value) = opt(preceded(
-        tuple((char(':'), multispace0)),
+        (char(':'), multispace0),
         parse_option_value,
-    ))(input)?;
+    )).parse(input)?;
 
     let option = match keyword.to_lowercase().as_str() {
         // Metadata
@@ -482,7 +482,7 @@ fn parse_option_value(input: &str) -> IResult<&str, &str> {
         delimited(char('"'), take_until("\""), char('"')),
         // Unquoted value (until semicolon or closing paren)
         take_till(|c| c == ';' || c == ')'),
-    ))(input)
+    )).parse(input)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

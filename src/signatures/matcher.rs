@@ -432,23 +432,154 @@ impl SignatureEngine {
     /// Match packet against all rules
     #[inline]
     pub fn match_packet(&self, ctx: &PacketContext) -> Vec<MatchResult> {
+        use tracing::debug;
+        use std::time::Instant;
+
+        let start = Instant::now();
         let mut results = Vec::new();
 
         // Get candidate rules from prefilter
+        let prefilter_start = Instant::now();
         let candidates = if let Some(ref prefilter) = self.prefilter {
-            prefilter.find_candidates(&ctx.payload)
+            let c = prefilter.find_candidates(&ctx.payload);
+            // Debug: log candidate count for non-empty payloads
+            if !ctx.payload.is_empty() && c.len() > 0 {
+                debug!("Prefilter found {} candidates for payload len {} in {:?}",
+                    c.len(), ctx.payload.len(), prefilter_start.elapsed());
+            }
+            c
         } else {
             // No prefilter - check all rules for matching protocol
+            debug!("No prefilter, checking protocol rules for {:?}", ctx.protocol);
             self.get_protocol_rules(ctx.protocol)
         };
 
+        // Debug: periodically log candidate stats
+        static MATCH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = MATCH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count % 10000 == 0 {
+            debug!(
+                "match_packet #{}: payload_len={}, candidates={}, proto={:?}",
+                count, ctx.payload.len(), candidates.len(), ctx.protocol
+            );
+        }
+
+        // Debug: track verification stats
+        let mut verified_count = 0u32;
+        let mut failed_protocol = 0u32;
+        let mut failed_address = 0u32;
+        let mut failed_flow = 0u32;
+        let mut failed_flowbits = 0u32;
+        let mut failed_content = 0u32;
+        let mut failed_pcre = 0u32;
+        let mut failed_threshold = 0u32;
+
         // Verify each candidate rule
-        for rule_id in candidates {
-            if let Some(rule) = self.rules.get(&rule_id) {
-                if let Some(result) = self.verify_rule(rule, ctx) {
-                    results.push(result);
+        let verify_start = Instant::now();
+        for rule_id in &candidates {
+            if let Some(rule) = self.rules.get(rule_id) {
+                verified_count += 1;
+
+                // Check each stage and count failures
+                if !self.check_protocol(rule, ctx) {
+                    failed_protocol += 1;
+                    continue;
                 }
+                if !self.check_addresses(rule, ctx) {
+                    failed_address += 1;
+                    // Log first few address failures for debugging
+                    if failed_address <= 3 && count % 10000 == 0 {
+                        debug!(
+                            "Addr fail SID {}: src_ip={:?} (rule: {:?}), dst_ip={:?} (rule: {:?}), src_port={:?} (rule: {:?}), dst_port={:?} (rule: {:?}), dir={:?}",
+                            rule.sid,
+                            ctx.src_ip, rule.src_ip,
+                            ctx.dst_ip, rule.dst_ip,
+                            ctx.src_port, rule.src_port,
+                            ctx.dst_port, rule.dst_port,
+                            rule.direction
+                        );
+                    }
+                    continue;
+                }
+                if !self.check_flow(rule, ctx) {
+                    failed_flow += 1;
+                    continue;
+                }
+                if !self.check_flowbits_prereqs(rule, ctx) {
+                    failed_flowbits += 1;
+                    continue;
+                }
+
+                // Match content patterns
+                let content_matches = match self.match_contents(rule, ctx) {
+                    Some(m) => m,
+                    None => {
+                        failed_content += 1;
+                        // Log first few content failures for debugging
+                        if failed_content <= 3 && count % 10000 == 0 {
+                            let patterns: Vec<_> = rule.options.iter()
+                                .filter_map(|o| match o {
+                                    RuleOption::Content(cm) => Some(format!("{:?}", String::from_utf8_lossy(&cm.pattern))),
+                                    _ => None,
+                                })
+                                .collect();
+                            debug!(
+                                "Content fail SID {}: payload_len={}, patterns={:?}",
+                                rule.sid, ctx.payload.len(), patterns
+                            );
+                        }
+                        continue;
+                    }
+                };
+
+                // Match PCRE patterns
+                if !self.match_pcre(rule, ctx) {
+                    failed_pcre += 1;
+                    continue;
+                }
+
+                // Check threshold
+                if !self.check_threshold(rule, ctx) {
+                    failed_threshold += 1;
+                    continue;
+                }
+
+                // Update flowbits state
+                self.update_flowbits(rule, ctx);
+
+                // Check for noalert
+                if rule.options.iter().any(|o| matches!(o, RuleOption::Noalert)) {
+                    continue;
+                }
+
+                debug!("Rule {} (SID {}) MATCHED: {}", rule.id, rule.sid, rule.msg);
+                results.push(MatchResult {
+                    rule_id: rule.id,
+                    sid: rule.sid,
+                    msg: rule.msg.clone(),
+                    classtype: rule.classtype.clone(),
+                    priority: rule.priority,
+                    action: rule.action,
+                    references: rule.references.clone(),
+                    timestamp: Instant::now(),
+                    content_matches,
+                });
             }
+        }
+
+        // Log verification stats periodically
+        if count % 10000 == 0 && candidates.len() > 0 {
+            debug!(
+                "Verify stats #{}: checked={}, proto_fail={}, addr_fail={}, flow_fail={}, flowbits_fail={}, content_fail={}, pcre_fail={}, thresh_fail={}, matched={}, time={:?}",
+                count, verified_count, failed_protocol, failed_address, failed_flow,
+                failed_flowbits, failed_content, failed_pcre, failed_threshold,
+                results.len(), verify_start.elapsed()
+            );
+        }
+
+        // Log total time periodically
+        if count % 100000 == 0 {
+            debug!("match_packet #{}: total_time={:?}", count, start.elapsed());
         }
 
         results

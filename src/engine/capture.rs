@@ -2,15 +2,18 @@
 //!
 //! Supports multiple capture methods:
 //! - NFQUEUE (inline with nftables)
-//! - AF_PACKET (raw socket)
+//! - AF_PACKET (raw socket via libpcap)
 //! - PCAP file replay
 
 use std::net::IpAddr;
 use std::time::Duration;
 
+use etherparse::SlicedPacket;
+use pcap::{Capture, Active, Offline};
 use serde::{Deserialize, Serialize};
+use tracing::{debug, info, warn};
 
-use crate::core::packet::{Packet, IpProtocol, AppProtocol};
+use crate::core::packet::{Packet, IpProtocol, AppProtocol, TcpFlags};
 
 /// Capture method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,7 +80,7 @@ pub trait PacketCapture: Send {
     fn set_verdict(&mut self, packet_id: u32, accept: bool) -> anyhow::Result<()>;
 
     /// Get capture statistics
-    fn stats(&self) -> CaptureStats;
+    fn stats(&mut self) -> CaptureStats;
 
     /// Close the capture
     fn close(&mut self);
@@ -229,7 +232,7 @@ impl PacketCapture for NfqueueCapture {
         Ok(())
     }
 
-    fn stats(&self) -> CaptureStats {
+    fn stats(&mut self) -> CaptureStats {
         self.stats.clone()
     }
 
@@ -238,33 +241,144 @@ impl PacketCapture for NfqueueCapture {
     }
 }
 
-/// AF_PACKET raw socket capture (passive mode)
+/// AF_PACKET raw socket capture (passive mode) using libpcap
 pub struct AfPacketCapture {
-    #[allow(dead_code)]
+    capture: Capture<Active>,
     interface: String,
     stats: CaptureStats,
+    packet_id: u64,
 }
 
 impl AfPacketCapture {
     pub fn new(config: &CaptureConfig) -> anyhow::Result<Self> {
         let interface = config.interface.clone()
-            .unwrap_or_else(|| "eth0".to_string());
+            .unwrap_or_else(|| "lo".to_string());
 
-        // In a real implementation, we'd create a raw socket here
-        // For now, this is a placeholder
+        info!("Opening capture on interface: {}", interface);
+
+        let capture = Capture::from_device(interface.as_str())?
+            .promisc(config.promiscuous)
+            .snaplen(config.snaplen as i32)
+            .timeout(config.timeout_ms as i32)
+            .open()?;
+
+        info!("Capture opened successfully on {}", interface);
 
         Ok(Self {
+            capture,
             interface,
             stats: CaptureStats::default(),
+            packet_id: 0,
         })
+    }
+
+    fn parse_raw_packet(&mut self, data: &[u8]) -> Option<Packet> {
+        self.packet_id += 1;
+
+        // Parse with etherparse
+        match SlicedPacket::from_ethernet(data) {
+            Ok(sliced) => {
+                // Extract IP layer
+                let (src_ip, dst_ip, protocol) = match &sliced.net {
+                    Some(etherparse::NetSlice::Ipv4(ipv4)) => {
+                        let src = IpAddr::from(ipv4.header().source_addr());
+                        let dst = IpAddr::from(ipv4.header().destination_addr());
+                        let proto = match ipv4.header().protocol() {
+                            etherparse::IpNumber::TCP => IpProtocol::Tcp,
+                            etherparse::IpNumber::UDP => IpProtocol::Udp,
+                            etherparse::IpNumber::ICMP => IpProtocol::Icmp,
+                            other => IpProtocol::Other(other.0),
+                        };
+                        (src, dst, proto)
+                    }
+                    Some(etherparse::NetSlice::Ipv6(ipv6)) => {
+                        let src = IpAddr::from(ipv6.header().source_addr());
+                        let dst = IpAddr::from(ipv6.header().destination_addr());
+                        let proto = match ipv6.header().next_header() {
+                            etherparse::IpNumber::TCP => IpProtocol::Tcp,
+                            etherparse::IpNumber::UDP => IpProtocol::Udp,
+                            etherparse::IpNumber::IPV6_ICMP => IpProtocol::Icmpv6,
+                            other => IpProtocol::Other(other.0),
+                        };
+                        (src, dst, proto)
+                    }
+                    _ => return None, // ARP, etc.
+                };
+
+                let mut packet = Packet::new(src_ip, dst_ip, protocol);
+                packet.id = self.packet_id;
+                packet.raw_len = data.len() as u32;
+
+                // Extract transport layer
+                match &sliced.transport {
+                    Some(etherparse::TransportSlice::Tcp(tcp)) => {
+                        packet.src_port = tcp.source_port();
+                        packet.dst_port = tcp.destination_port();
+                        packet.seq = Some(tcp.sequence_number());
+                        packet.ack = Some(tcp.acknowledgment_number());
+                        packet.tcp_flags = Some(TcpFlags {
+                            syn: tcp.syn(),
+                            ack: tcp.ack(),
+                            fin: tcp.fin(),
+                            rst: tcp.rst(),
+                            psh: tcp.psh(),
+                            urg: tcp.urg(),
+                            ece: tcp.ece(),
+                            cwr: tcp.cwr(),
+                        });
+                        packet.payload = tcp.payload().to_vec();
+
+                        // Detect app protocol
+                        packet.app_protocol = match (packet.src_port, packet.dst_port) {
+                            (80, _) | (_, 80) | (8080, _) | (_, 8080) => AppProtocol::Http,
+                            (443, _) | (_, 443) | (8443, _) | (_, 8443) => AppProtocol::Https,
+                            (22, _) | (_, 22) => AppProtocol::Ssh,
+                            (21, _) | (_, 21) => AppProtocol::Ftp,
+                            (25, _) | (_, 25) | (587, _) | (_, 587) => AppProtocol::Smtp,
+                            (53, _) | (_, 53) => AppProtocol::Dns,
+                            _ => AppProtocol::Unknown,
+                        };
+                    }
+                    Some(etherparse::TransportSlice::Udp(udp)) => {
+                        packet.src_port = udp.source_port();
+                        packet.dst_port = udp.destination_port();
+                        packet.payload = udp.payload().to_vec();
+
+                        packet.app_protocol = match (packet.src_port, packet.dst_port) {
+                            (53, _) | (_, 53) => AppProtocol::Dns,
+                            _ => AppProtocol::Unknown,
+                        };
+                    }
+                    _ => {}
+                }
+
+                Some(packet)
+            }
+            Err(e) => {
+                debug!("Failed to parse packet: {:?}", e);
+                None
+            }
+        }
     }
 }
 
 impl PacketCapture for AfPacketCapture {
     fn next_packet(&mut self) -> anyhow::Result<Option<Packet>> {
-        // Placeholder - would read from raw socket
-        std::thread::sleep(Duration::from_millis(100));
-        Ok(None)
+        match self.capture.next_packet() {
+            Ok(packet) => {
+                self.stats.received += 1;
+                let data = packet.data.to_vec();
+                Ok(self.parse_raw_packet(&data))
+            }
+            Err(pcap::Error::TimeoutExpired) => {
+                // No packet available within timeout
+                Ok(None)
+            }
+            Err(e) => {
+                warn!("Capture error: {:?}", e);
+                Err(e.into())
+            }
+        }
     }
 
     fn set_verdict(&mut self, _packet_id: u32, _accept: bool) -> anyhow::Result<()> {
@@ -272,20 +386,31 @@ impl PacketCapture for AfPacketCapture {
         Ok(())
     }
 
-    fn stats(&self) -> CaptureStats {
-        self.stats.clone()
+    fn stats(&mut self) -> CaptureStats {
+        let pcap_stats = self.capture.stats().unwrap_or(pcap::Stat {
+            received: 0,
+            dropped: 0,
+            if_dropped: 0,
+        });
+        CaptureStats {
+            received: self.stats.received,
+            dropped: pcap_stats.dropped as u64,
+            if_dropped: pcap_stats.if_dropped as u64,
+        }
     }
 
     fn close(&mut self) {
-        // Close socket
+        info!("Closing capture on {}", self.interface);
+        // Capture is closed when dropped
     }
 }
 
 /// PCAP file replay capture
 pub struct PcapCapture {
-    #[allow(dead_code)]
+    capture: Capture<Offline>,
     file_path: String,
     stats: CaptureStats,
+    packet_id: u64,
 }
 
 impl PcapCapture {
@@ -293,31 +418,125 @@ impl PcapCapture {
         let file_path = config.pcap_file.clone()
             .ok_or_else(|| anyhow::anyhow!("PCAP file path required"))?;
 
+        info!("Opening PCAP file: {}", file_path);
+        let capture = Capture::from_file(&file_path)?;
+
         Ok(Self {
+            capture,
             file_path,
             stats: CaptureStats::default(),
+            packet_id: 0,
         })
+    }
+
+    fn parse_raw_packet(&mut self, data: &[u8]) -> Option<Packet> {
+        self.packet_id += 1;
+
+        match SlicedPacket::from_ethernet(data) {
+            Ok(sliced) => {
+                let (src_ip, dst_ip, protocol) = match &sliced.net {
+                    Some(etherparse::NetSlice::Ipv4(ipv4)) => {
+                        let src = IpAddr::from(ipv4.header().source_addr());
+                        let dst = IpAddr::from(ipv4.header().destination_addr());
+                        let proto = match ipv4.header().protocol() {
+                            etherparse::IpNumber::TCP => IpProtocol::Tcp,
+                            etherparse::IpNumber::UDP => IpProtocol::Udp,
+                            etherparse::IpNumber::ICMP => IpProtocol::Icmp,
+                            other => IpProtocol::Other(other.0),
+                        };
+                        (src, dst, proto)
+                    }
+                    Some(etherparse::NetSlice::Ipv6(ipv6)) => {
+                        let src = IpAddr::from(ipv6.header().source_addr());
+                        let dst = IpAddr::from(ipv6.header().destination_addr());
+                        let proto = match ipv6.header().next_header() {
+                            etherparse::IpNumber::TCP => IpProtocol::Tcp,
+                            etherparse::IpNumber::UDP => IpProtocol::Udp,
+                            etherparse::IpNumber::IPV6_ICMP => IpProtocol::Icmpv6,
+                            other => IpProtocol::Other(other.0),
+                        };
+                        (src, dst, proto)
+                    }
+                    _ => return None, // ARP, etc.
+                };
+
+                let mut packet = Packet::new(src_ip, dst_ip, protocol);
+                packet.id = self.packet_id;
+                packet.raw_len = data.len() as u32;
+
+                match &sliced.transport {
+                    Some(etherparse::TransportSlice::Tcp(tcp)) => {
+                        packet.src_port = tcp.source_port();
+                        packet.dst_port = tcp.destination_port();
+                        packet.seq = Some(tcp.sequence_number());
+                        packet.ack = Some(tcp.acknowledgment_number());
+                        packet.tcp_flags = Some(TcpFlags {
+                            syn: tcp.syn(),
+                            ack: tcp.ack(),
+                            fin: tcp.fin(),
+                            rst: tcp.rst(),
+                            psh: tcp.psh(),
+                            urg: tcp.urg(),
+                            ece: tcp.ece(),
+                            cwr: tcp.cwr(),
+                        });
+                        packet.payload = tcp.payload().to_vec();
+
+                        packet.app_protocol = match (packet.src_port, packet.dst_port) {
+                            (80, _) | (_, 80) | (8080, _) | (_, 8080) => AppProtocol::Http,
+                            (443, _) | (_, 443) | (8443, _) | (_, 8443) => AppProtocol::Https,
+                            (22, _) | (_, 22) => AppProtocol::Ssh,
+                            (21, _) | (_, 21) => AppProtocol::Ftp,
+                            (25, _) | (_, 25) | (587, _) | (_, 587) => AppProtocol::Smtp,
+                            (53, _) | (_, 53) => AppProtocol::Dns,
+                            _ => AppProtocol::Unknown,
+                        };
+                    }
+                    Some(etherparse::TransportSlice::Udp(udp)) => {
+                        packet.src_port = udp.source_port();
+                        packet.dst_port = udp.destination_port();
+                        packet.payload = udp.payload().to_vec();
+
+                        packet.app_protocol = match (packet.src_port, packet.dst_port) {
+                            (53, _) | (_, 53) => AppProtocol::Dns,
+                            _ => AppProtocol::Unknown,
+                        };
+                    }
+                    _ => {}
+                }
+
+                Some(packet)
+            }
+            Err(_) => None,
+        }
     }
 }
 
 impl PacketCapture for PcapCapture {
     fn next_packet(&mut self) -> anyhow::Result<Option<Packet>> {
-        // Placeholder - would read from pcap file
-        std::thread::sleep(Duration::from_millis(10));
-        Ok(None)
+        match self.capture.next_packet() {
+            Ok(pkt) => {
+                self.stats.received += 1;
+                let data = pkt.data.to_vec();
+                Ok(self.parse_raw_packet(&data))
+            }
+            Err(pcap::Error::NoMorePackets) => {
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     fn set_verdict(&mut self, _packet_id: u32, _accept: bool) -> anyhow::Result<()> {
-        // PCAP is replay, no verdict
         Ok(())
     }
 
-    fn stats(&self) -> CaptureStats {
+    fn stats(&mut self) -> CaptureStats {
         self.stats.clone()
     }
 
     fn close(&mut self) {
-        // Close file
+        info!("Finished reading PCAP file: {}", self.file_path);
     }
 }
 
@@ -369,7 +588,7 @@ impl PacketCapture for DummyCapture {
         Ok(())
     }
 
-    fn stats(&self) -> CaptureStats {
+    fn stats(&mut self) -> CaptureStats {
         self.stats.clone()
     }
 

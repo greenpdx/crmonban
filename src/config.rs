@@ -67,6 +67,10 @@ pub struct Config {
     #[serde(default)]
     pub port_hopping: PortHoppingConfig,
 
+    /// Packet engine for live packet capture and NIDS processing
+    #[serde(default)]
+    pub packet_engine: PacketEngineConfig,
+
     #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
 }
@@ -142,6 +146,7 @@ impl Default for Config {
             ebpf_malware: EbpfMalwareConfig::default(),
             dns_monitor: DnsMonitorConfig::default(),
             port_hopping: PortHoppingConfig::default(),
+            packet_engine: PacketEngineConfig::default(),
             services,
         }
     }
@@ -1410,6 +1415,63 @@ impl PortRule {
             // Single port
             let port: u16 = self.port.parse().map_err(|_| format!("Invalid port: {}", self.port))?;
             Ok(vec![port])
+        }
+    }
+}
+
+/// Packet engine configuration for live packet capture
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PacketEngineConfig {
+    /// Enable packet engine
+    pub enabled: bool,
+    /// Capture method: "af_packet", "nfqueue", or "pcap"
+    pub capture_method: String,
+    /// Interface to capture on (for af_packet mode)
+    pub interface: Option<String>,
+    /// NFQUEUE number (for nfqueue mode)
+    pub nfqueue_num: u16,
+    /// Enable promiscuous mode
+    pub promiscuous: bool,
+    /// Snapshot length (max bytes per packet)
+    pub snaplen: u32,
+    /// Read timeout in milliseconds
+    pub timeout_ms: u32,
+    /// Number of worker threads (0 = auto-detect)
+    pub workers: usize,
+    /// Enable signature matching
+    pub signatures_enabled: bool,
+    /// Path to rules directory
+    pub rules_dir: Option<String>,
+    /// Enable flow tracking
+    pub flow_tracking: bool,
+    /// Enable ML anomaly detection
+    pub ml_detection: bool,
+    /// Enable threat intel lookups
+    pub threat_intel: bool,
+    /// Ban duration for detected attacks (seconds)
+    pub ban_duration: i64,
+    /// Auto-ban on signature match
+    pub auto_ban: bool,
+}
+
+impl Default for PacketEngineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            capture_method: "af_packet".to_string(),
+            interface: None,
+            nfqueue_num: 100,
+            promiscuous: true,
+            snaplen: 65535,
+            timeout_ms: 100,
+            workers: 0,
+            signatures_enabled: true,
+            rules_dir: Some("/var/lib/crmonban/data/signatures/suricata/rules".to_string()),
+            flow_tracking: true,
+            ml_detection: false,
+            threat_intel: false,
+            ban_duration: 3600,
+            auto_ban: false,
         }
     }
 }

@@ -142,6 +142,9 @@ pub enum AttackEventType {
     PortScan,
     Exploit,
     RateLimit,
+    SignatureMatch,
+    Anomaly,
+    ThreatIntel,
     Other(String),
 }
 
@@ -154,6 +157,9 @@ impl std::fmt::Display for AttackEventType {
             AttackEventType::PortScan => write!(f, "port_scan"),
             AttackEventType::Exploit => write!(f, "exploit"),
             AttackEventType::RateLimit => write!(f, "rate_limit"),
+            AttackEventType::SignatureMatch => write!(f, "signature_match"),
+            AttackEventType::Anomaly => write!(f, "anomaly"),
+            AttackEventType::ThreatIntel => write!(f, "threat_intel"),
             AttackEventType::Other(s) => write!(f, "other:{}", s),
         }
     }
