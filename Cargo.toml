@@ -67,6 +67,7 @@ dirs-next = "*"
 
 # Unix utilities
 libc = "*"
+nix = { version = "0.29", features = ["signal"] }
 
 # Logging
 tracing = "*"
@@ -88,8 +89,8 @@ futures = "*"
 # PID file and daemon
 daemonize = "*"
 
-# D-Bus integration
-zbus = "*"
+# D-Bus integration (optional)
+zbus = { version = "*", optional = true }
 
 # SIEM export
 uuid = { version = "*", features = ["v4"] }
@@ -127,11 +128,6 @@ name = "crmonban"
 path = "src/main.rs"
 
 [[bin]]
-name = "matrix_benchmark"
-path = "benches/matrix_benchmark.rs"
-required-features = ["flow-tracking"]
-
-[[bin]]
 name = "pcap_benchmark"
 path = "benches/pcap_benchmark.rs"
 required-features = ["flow-tracking"]
@@ -141,7 +137,9 @@ name = "crmonban"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["dbus"]
+# D-Bus integration for daemon control
+dbus = ["dep:zbus"]
 # External firewall integration (requires separate firewall daemon)
 crrouter = []
 # Signature-based detection (Suricata/Snort rule compatibility)
@@ -170,3 +168,19 @@ scan-commercial = ["scan"]
 
 [dev-dependencies]
 tempfile = "*"
+
+[profile.release]
+# Link-Time Optimization - optimizes across crate boundaries
+lto = true
+# Single codegen unit for better optimization
+codegen-units = 1
+# Optimize for size (use "s" for less aggressive, "z" for smallest)
+opt-level = "s"
+# Strip debug symbols
+strip = true
+# Abort on panic (no unwinding overhead)
+panic = "abort"
+
+[profile.release-small]
+inherits = "release"
+opt-level = "z"

@@ -8,6 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod api;
 mod handlers;
+mod ipc_handler;
 mod models;
 mod state;
 
@@ -81,7 +82,11 @@ async fn main() -> anyhow::Result<()> {
         .layer(CompressionLayer::new())
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 3001));
+    let port: u16 = std::env::var("CRMONBAN_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(3001);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Dashboard API listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -20,7 +20,7 @@ use crmonban::core::flow::Flow;
 use crmonban::core::packet::{AppProtocol, IpProtocol, Packet, TcpFlags};
 use crmonban::flow::{FlowConfig, FlowTracker};
 use crmonban::brute_force::BruteForceTracker;
-use crmonban::scan_detect::{PortScanTracker, ScanType};
+use crmonban::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
 
 #[cfg(feature = "signatures")]
 use crmonban::signatures::{SignatureConfig, SignatureEngine, RuleLoader, matcher::PacketContext, ast::Protocol};
@@ -414,7 +414,7 @@ struct PcapBenchmark {
 
     // Components
     flow_tracker: Option<FlowTracker>,
-    port_scan_tracker: PortScanTracker,
+    scan_detect_engine: ScanDetectEngine,
     brute_force_tracker: BruteForceTracker,
     #[cfg(feature = "signatures")]
     signature_engine: Option<SignatureEngine>,
@@ -525,7 +525,7 @@ impl PcapBenchmark {
             label_stats: LabelStats::new(),
             detection_stats: DetectionStats::new(),
             flow_tracker,
-            port_scan_tracker: PortScanTracker::new(),
+            scan_detect_engine: ScanDetectEngine::new(ScanDetectConfig::default()),
             brute_force_tracker: BruteForceTracker::new(),
             #[cfg(feature = "signatures")]
             signature_engine,
@@ -863,7 +863,13 @@ impl PcapBenchmark {
 
         // Port scan tracking - detect when a source touches many different destination ports
         let is_syn = pkt.tcp_flags.as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
-        let scan_alert = self.port_scan_tracker.track(pkt.src_ip, pkt.dst_port, is_syn);
+        let is_syn_ack = pkt.tcp_flags.as_ref().map(|f| f.syn && f.ack).unwrap_or(false);
+        let is_ack = pkt.tcp_flags.as_ref().map(|f| f.ack && !f.syn).unwrap_or(false);
+        let is_rst = pkt.tcp_flags.as_ref().map(|f| f.rst).unwrap_or(false);
+        let scan_alert = self.scan_detect_engine.process_packet(
+            pkt.src_ip, pkt.dst_port, is_syn, is_syn_ack, is_ack, is_rst,
+            pkt.payload.len(), None, None
+        );
 
         // Brute force tracking - detect repeated failed login attempts
         let is_fin = pkt.tcp_flags.as_ref().map(|f| f.fin).unwrap_or(false);
@@ -906,7 +912,8 @@ impl PcapBenchmark {
             // Track port scan alerts
             if let Some(ref alert) = scan_alert {
                 self.detection_stats.scan_alerts += 1;
-                if matches!(alert.scan_type, ScanType::Targeted) {
+                // Consider ConfirmedScan or LikelyAttack as targeted
+                if matches!(alert.classification, Classification::ConfirmedScan | Classification::LikelyAttack) {
                     self.detection_stats.targeted_scan_alerts += 1;
                 }
             }
@@ -1252,12 +1259,12 @@ impl PcapBenchmark {
         println!("  Scan alerts:          {:>8} (sources touching 10+ ports)", d.scan_alerts);
         println!("  Targeted scans:       {:>8} (>50% commonly targeted ports)", d.targeted_scan_alerts);
         // Show top scanners
-        let top_scanners = self.port_scan_tracker.top_scanners(5);
+        let top_scanners = self.scan_detect_engine.top_scanners(5);
         if !top_scanners.is_empty() {
-            println!("  Top scanners:");
-            for (ip, port_count) in top_scanners.iter().take(5) {
-                if *port_count >= 10 {
-                    println!("    {} -> {} unique ports", ip, port_count);
+            println!("  Top suspicious sources:");
+            for (ip, score, classification) in top_scanners.iter().take(5) {
+                if *score >= 3.0 {
+                    println!("    {} -> score={:.1} ({:?})", ip, score, classification);
                 }
             }
         }
