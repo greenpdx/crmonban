@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::core::event::{DetectionEvent, DetectionAction, Severity};
 

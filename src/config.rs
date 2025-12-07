@@ -7,7 +7,6 @@ use crate::ebpf::EbpfConfig;
 use crate::shared_whitelist::SharedWhitelistConfig;
 use crate::siem::SiemConfig;
 use crate::zones::ZoneConfig;
-use std::net::IpAddr;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]

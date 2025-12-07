@@ -1,5 +1,7 @@
 //! PCAP/CSV Replay Benchmark
 //!
+//! For packet generation only, all packet processing is in src/
+//!
 //! Reads real network traffic from PCAP files or CSV flow records
 //! and measures actual detection pipeline performance.
 

@@ -2,9 +2,8 @@
 
 use std::net::IpAddr;
 use std::process::Command;
-use std::io::Write;
 use anyhow::{Result, Context};
-use tracing::{info, debug};
+use tracing::info;
 
 use crate::network::{ScanResult, Finding, FindingSeverity, ToolPaths};
 use super::Scanner;
@@ -94,7 +93,7 @@ exit
     }
 
     fn run_script(&self, script: &str) -> Result<String> {
-        let mut child = Command::new(&self.binary)
+        let child = Command::new(&self.binary)
             .args(["-q", "-x", script])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

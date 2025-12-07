@@ -49,7 +49,7 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::core::event::DetectionEvent;
 use crate::core::packet::Packet;
@@ -209,7 +209,7 @@ impl PacketEngine {
         );
 
         // Create action executor
-        let action_executor = ActionExecutor::new(self.config.action.clone());
+        let _action_executor = ActionExecutor::new(self.config.action.clone());
 
         // Clone shared state for tasks
         let state = self.state.clone();

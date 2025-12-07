@@ -3,7 +3,7 @@
 use std::net::IpAddr;
 use std::process::Command;
 use anyhow::{Result, Context};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::network::{ScanResult, Finding, FindingSeverity, ToolPaths};
 use super::Scanner;

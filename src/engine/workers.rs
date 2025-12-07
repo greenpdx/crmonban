@@ -7,13 +7,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, trace};
-use uuid::Uuid;
+use tracing::trace;
 
-use crate::brute_force::{BruteForceTracker, BruteForceAlert};
-use crate::core::event::{DetectionEvent, DetectionType, DetectionAction, Severity};
+use crate::brute_force::BruteForceTracker;
+use crate::core::event::{DetectionEvent, DetectionType, Severity};
 use crate::core::packet::Packet;
-use crate::scan_detect::{PortScanTracker, ScanAlert, ScanType};
+use crate::scan_detect::{PortScanTracker, ScanType};
 
 use super::pipeline::PipelineConfig;
 

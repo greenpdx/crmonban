@@ -9,7 +9,7 @@ use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{debug, error, trace};
+use tracing::debug;
 
 use crate::core::event::DetectionEvent;
 use crate::core::packet::Packet;

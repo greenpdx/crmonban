@@ -8,7 +8,7 @@
 //! - Bloom filter for quick negative lookups
 //! - Inline hints on hot paths
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter};
@@ -81,6 +81,7 @@ impl BloomFilter {
         true
     }
 
+    #[allow(dead_code)]
     fn clear(&mut self) {
         self.bits.fill(0);
     }

@@ -8,7 +8,6 @@
 //! - Inline hints on hot paths
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::time::Instant;
 
 use crate::core::flow::{Flow, FlowKey};
@@ -159,7 +158,7 @@ impl FlowTable {
     /// Remove expired flows (optimized - uses extract_if pattern)
     pub fn cleanup_expired(&mut self) -> Vec<Flow> {
         let now = Instant::now();
-        let mut expired_flows = Vec::new();
+        let expired_flows = Vec::new();
 
         // Collect expired keys and flows in one pass
         self.flows.retain(|_key, entry| {
@@ -222,7 +221,7 @@ impl FlowTable {
 
     /// Get completed flows (for export) - optimized
     pub fn drain_completed(&mut self) -> Vec<Flow> {
-        let mut completed = Vec::new();
+        let completed = Vec::new();
 
         // Use retain to avoid intermediate allocation
         self.flows.retain(|_key, entry| {

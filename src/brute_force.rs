@@ -90,8 +90,6 @@ struct FailedAttempts {
     attempts: Vec<Instant>,
     /// Whether alert has been triggered
     alerted: bool,
-    /// First attempt time
-    first_seen: Instant,
 }
 
 impl FailedAttempts {
@@ -99,7 +97,6 @@ impl FailedAttempts {
         Self {
             attempts: Vec::new(),
             alerted: false,
-            first_seen: Instant::now(),
         }
     }
 

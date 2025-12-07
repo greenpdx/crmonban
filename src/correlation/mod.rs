@@ -39,11 +39,9 @@ pub mod incident;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -186,7 +184,6 @@ impl CorrelationEngine {
         }
 
         // 3. Store the event
-        let event_id = event.id;
         self.store_event(event.clone());
 
         // 4. Try to correlate with existing incidents
@@ -377,8 +374,6 @@ impl CorrelationEngine {
             DetectionType::CnC => "CnC",
             DetectionType::UnauthorizedAccess => "UnauthorizedAccess",
             DetectionType::Custom(_) => "Custom",
-            // Fallback: use format! for other types (rare in hot path)
-            _ => return type_strs.iter().any(|t| format!("{:?}", event_type).contains(t)),
         };
         type_strs.iter().any(|t| type_name.contains(t.as_str()))
     }

@@ -11,6 +11,7 @@ use super::Scanner;
 pub struct BurpScanner {
     binary: Option<String>,
     api_url: Option<String>,
+    #[allow(dead_code)]
     api_key: Option<String>,
 }
 
@@ -78,7 +79,7 @@ impl BurpScanner {
         })
     }
 
-    fn scan_with_api(&self, target: IpAddr, url: &str) -> Result<ScanResult> {
+    fn scan_with_api(&self, target: IpAddr, _url: &str) -> Result<ScanResult> {
         // API-based scanning would use reqwest/curl
         warn!("Burp API scanning not yet implemented");
 

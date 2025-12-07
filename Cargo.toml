@@ -129,10 +129,12 @@ path = "src/main.rs"
 [[bin]]
 name = "matrix_benchmark"
 path = "benches/matrix_benchmark.rs"
+required-features = ["flow-tracking"]
 
 [[bin]]
 name = "pcap_benchmark"
 path = "benches/pcap_benchmark.rs"
+required-features = ["flow-tracking"]
 
 [lib]
 name = "crmonban"
