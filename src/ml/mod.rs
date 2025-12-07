@@ -30,6 +30,7 @@ pub mod baseline;
 pub mod anomaly;
 pub mod models;
 pub mod training;
+pub mod storage;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -45,6 +46,7 @@ pub use baseline::{Baseline, FeatureStats, BaselineSummary};
 pub use anomaly::{AnomalyScore, AnomalyCategory, AnomalyDetector};
 pub use models::{AnomalyModel, ModelConfig, IsolationForest, StatisticalModel};
 pub use training::{TrainingData, TrainedModel, ModelTrainer, TrainingProgress, TrainingPhase};
+pub use storage::{MLStorage, MLStorageConfig, MLDataMetadata, ML_DATA_DIR};
 
 /// ML Engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

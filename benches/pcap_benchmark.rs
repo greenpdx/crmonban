@@ -21,6 +21,13 @@ use crmonban::flow::{FlowConfig, FlowTracker};
 #[cfg(feature = "signatures")]
 use crmonban::signatures::{SignatureConfig, SignatureEngine, RuleLoader, matcher::PacketContext, ast::Protocol};
 
+#[cfg(feature = "protocols")]
+use crmonban::protocols::{HttpConfig, TlsConfig};
+#[cfg(feature = "protocols")]
+use crmonban::protocols::http::HttpAnalyzer;
+#[cfg(feature = "protocols")]
+use crmonban::protocols::tls::TlsAnalyzer;
+
 #[cfg(feature = "threat-intel")]
 use crmonban::threat_intel::IocCache;
 
@@ -406,6 +413,10 @@ struct PcapBenchmark {
     anomaly_detector: Option<AnomalyDetector>,
     #[cfg(feature = "ml-detection")]
     baseline: Option<Baseline>,
+    #[cfg(feature = "protocols")]
+    http_analyzer: Option<HttpAnalyzer>,
+    #[cfg(feature = "protocols")]
+    tls_analyzer: Option<TlsAnalyzer>,
 }
 
 impl PcapBenchmark {
@@ -424,7 +435,7 @@ impl PcapBenchmark {
         let signature_engine = if args.signatures || enable_all {
             let mut config = SignatureConfig::default();
             // Add ET Open rules directory
-            let rules_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/rules/rules");
+            let rules_dir = PathBuf::from("/var/lib/crmonban/data/signatures/suricata/rules");
             if rules_dir.exists() {
                 config.rule_dirs = vec![rules_dir.clone()];
                 println!("Loading rules from: {:?}", rules_dir);
@@ -477,6 +488,21 @@ impl PcapBenchmark {
             (None, None, None)
         };
 
+        // Initialize protocol analyzers
+        #[cfg(feature = "protocols")]
+        let (http_analyzer, tls_analyzer) = if enable_all {
+            let mut http_config = HttpConfig::default();
+            http_config.extract_headers = true;
+            let mut tls_config = TlsConfig::default();
+            tls_config.ja3_enabled = true;
+            (
+                Some(HttpAnalyzer::new(http_config)),
+                Some(TlsAnalyzer::new(tls_config)),
+            )
+        } else {
+            (None, None)
+        };
+
         Self {
             args,
             timings: ComponentTimings::new(),
@@ -496,7 +522,113 @@ impl PcapBenchmark {
             anomaly_detector,
             #[cfg(feature = "ml-detection")]
             baseline,
+            #[cfg(feature = "protocols")]
+            http_analyzer,
+            #[cfg(feature = "protocols")]
+            tls_analyzer,
         }
+    }
+
+    /// Parse HTTP from payload
+    #[cfg(feature = "protocols")]
+    fn parse_http(&self, payload: &[u8]) -> Option<(Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>)> {
+        if let Some(ref analyzer) = self.http_analyzer {
+            if let Some(request) = analyzer.parse_request(payload) {
+                let method = Some(request.method.as_bytes().to_vec());
+                let uri = Some(request.uri.as_bytes().to_vec());
+                let host = request.host.map(|h| h.as_bytes().to_vec());
+                let user_agent = request.user_agent.map(|ua| ua.as_bytes().to_vec());
+                // Build headers buffer
+                let headers = {
+                    let mut buf = Vec::new();
+                    for (name, value) in &request.headers {
+                        buf.extend_from_slice(name.as_bytes());
+                        buf.extend_from_slice(b": ");
+                        buf.extend_from_slice(value.as_bytes());
+                        buf.extend_from_slice(b"\r\n");
+                    }
+                    if !buf.is_empty() { Some(buf) } else { None }
+                };
+                return Some((method, uri, host, user_agent, headers));
+            }
+        }
+        None
+    }
+
+    /// Parse TLS ClientHello from payload
+    #[cfg(feature = "protocols")]
+    fn parse_tls(&self, payload: &[u8]) -> Option<(Option<Vec<u8>>, Option<String>)> {
+        if let Some(ref analyzer) = self.tls_analyzer {
+            // TLS record: type (1) + version (2) + length (2) + handshake data
+            if payload.len() >= 5 && payload[0] == 22 { // Handshake record
+                let length = u16::from_be_bytes([payload[3], payload[4]]) as usize;
+                if payload.len() >= 5 + length {
+                    let handshake_data = &payload[5..5 + length];
+                    if !handshake_data.is_empty() && handshake_data[0] == 1 { // ClientHello
+                        // Parse SNI from ClientHello extensions
+                        if let Some(sni) = self.parse_sni(handshake_data) {
+                            let ja3 = self.compute_ja3_simple(handshake_data);
+                            return Some((Some(sni.as_bytes().to_vec()), ja3));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Parse SNI from ClientHello handshake data
+    #[cfg(feature = "protocols")]
+    fn parse_sni(&self, data: &[u8]) -> Option<String> {
+        if data.len() < 38 { return None; }
+        let mut offset = 38; // Skip past fixed fields
+
+        // Session ID
+        if offset >= data.len() { return None; }
+        let session_id_len = data[offset] as usize;
+        offset += 1 + session_id_len;
+
+        // Cipher suites
+        if offset + 2 > data.len() { return None; }
+        let cipher_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+        offset += 2 + cipher_len;
+
+        // Compression
+        if offset >= data.len() { return None; }
+        let comp_len = data[offset] as usize;
+        offset += 1 + comp_len;
+
+        // Extensions
+        if offset + 2 > data.len() { return None; }
+        let ext_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+        offset += 2;
+
+        let ext_end = offset + ext_len;
+        while offset + 4 <= ext_end && offset + 4 <= data.len() {
+            let ext_type = u16::from_be_bytes([data[offset], data[offset + 1]]);
+            let ext_data_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
+            offset += 4;
+
+            if ext_type == 0 && offset + ext_data_len <= data.len() { // SNI extension
+                // SNI list length (2) + type (1) + name length (2) + name
+                if ext_data_len >= 5 {
+                    let name_len = u16::from_be_bytes([data[offset + 3], data[offset + 4]]) as usize;
+                    if offset + 5 + name_len <= data.len() {
+                        return String::from_utf8(data[offset + 5..offset + 5 + name_len].to_vec()).ok();
+                    }
+                }
+            }
+            offset += ext_data_len;
+        }
+        None
+    }
+
+    /// Compute simple JA3 hash
+    #[cfg(feature = "protocols")]
+    fn compute_ja3_simple(&self, _data: &[u8]) -> Option<String> {
+        // For now, just return None - full JA3 computation is complex
+        // The TLS analyzer already does this properly
+        None
     }
 
     /// Parse raw packet bytes into our Packet struct
@@ -601,6 +733,27 @@ impl PcapBenchmark {
 
         self.bytes_processed += pkt.raw_len as u64;
 
+        // Parse HTTP/TLS before flow tracking to avoid borrow conflicts
+        #[cfg(feature = "protocols")]
+        let (http_method, http_uri, http_host, http_user_agent, http_headers) =
+            if !pkt.payload.is_empty() && (pkt.dst_port == 80 || pkt.dst_port == 8080 || pkt.src_port == 80 || pkt.src_port == 8080) {
+                self.parse_http(&pkt.payload).unwrap_or((None, None, None, None, None))
+            } else {
+                (None, None, None, None, None)
+            };
+        #[cfg(not(feature = "protocols"))]
+        let (http_method, http_uri, http_host, http_user_agent, http_headers): (Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>, Option<Vec<u8>>) = (None, None, None, None, None);
+
+        #[cfg(feature = "protocols")]
+        let (tls_sni, ja3_hash) =
+            if !pkt.payload.is_empty() && (pkt.dst_port == 443 || pkt.dst_port == 8443 || pkt.src_port == 443 || pkt.src_port == 8443) {
+                self.parse_tls(&pkt.payload).unwrap_or((None, None))
+            } else {
+                (None, None)
+            };
+        #[cfg(not(feature = "protocols"))]
+        let (tls_sni, ja3_hash): (Option<Vec<u8>>, Option<String>) = (None, None);
+
         // Flow tracking
         let mut flow_time = Duration::ZERO;
         let mut _flow_ref: Option<&Flow> = None;
@@ -620,6 +773,7 @@ impl PcapBenchmark {
         #[cfg(feature = "signatures")]
         if let Some(ref engine) = self.signature_engine {
             let start = Instant::now();
+
             let ctx = PacketContext {
                 src_ip: Some(pkt.src_ip),
                 dst_ip: Some(pkt.dst_ip),
@@ -645,14 +799,14 @@ impl PcapBenchmark {
                 payload: pkt.payload.clone(),
                 established: false,
                 to_server: true,
-                http_uri: None,
-                http_method: None,
-                http_headers: None,
-                http_host: None,
-                http_user_agent: None,
+                http_uri,
+                http_method,
+                http_headers,
+                http_host,
+                http_user_agent,
                 dns_query: None,
-                tls_sni: None,
-                ja3_hash: None,
+                tls_sni,
+                ja3_hash,
             };
             let matches = engine.match_packet(&ctx);
             sig_match_count = matches.len();
@@ -1082,6 +1236,31 @@ impl PcapBenchmark {
                  name, stats.mean_us(), stats.min_ns, stats.max_ns);
     }
 
+    /// Train the ML baseline on a benign flow record
+    #[cfg(feature = "ml-detection")]
+    fn train_baseline_from_record(&mut self, record: &CsvFlowRecord) {
+        // Only train on benign traffic
+        if record.attack != "Benign" && !record.attack.is_empty() {
+            return;
+        }
+
+        // Convert to packet and process through flow tracker
+        let pkt = record.to_packet();
+
+        if let Some(ref mut tracker) = self.flow_tracker {
+            let mut pkt_mut = pkt;
+            let (flow, _direction) = tracker.process(&mut pkt_mut);
+
+            // Extract features and train baseline
+            if let Some(ref mut extractor) = self.feature_extractor {
+                let features = extractor.extract(flow);
+                if let Some(ref mut baseline) = self.baseline {
+                    baseline.update_fast(&features);
+                }
+            }
+        }
+    }
+
     /// Process a CSV flow record through the pipeline
     fn process_csv_record(&mut self, record: &CsvFlowRecord, warmup: bool) {
         let total_start = Instant::now();
@@ -1238,6 +1417,71 @@ impl PcapBenchmark {
         println!("  ML detection: {}", self.feature_extractor.is_some());
         println!();
 
+        // Phase 1: Train baseline on benign flows from warmup records
+        #[cfg(feature = "ml-detection")]
+        if self.feature_extractor.is_some() && self.args.warmup > 0 {
+            println!("Phase 1: Training ML baseline on benign traffic...");
+            let train_start = Instant::now();
+            let mut trained_count = 0usize;
+            let mut warmup_count = 0usize;
+
+            'training: for csv_file in &csv_files {
+                let file = File::open(csv_file)?;
+                let reader = BufReader::new(file);
+                let mut lines = reader.lines();
+
+                // Parse header
+                let header_line = match lines.next() {
+                    Some(Ok(line)) => line,
+                    _ => continue,
+                };
+                let header_map: std::collections::HashMap<String, usize> = header_line
+                    .split(',')
+                    .enumerate()
+                    .map(|(i, name)| (name.to_string(), i))
+                    .collect();
+
+                for line_result in lines {
+                    if warmup_count >= self.args.warmup {
+                        break 'training;
+                    }
+
+                    let line = match line_result {
+                        Ok(l) => l,
+                        Err(_) => continue,
+                    };
+
+                    if let Some(record) = CsvFlowRecord::from_csv_line(&line, &header_map) {
+                        warmup_count += 1;
+
+                        // Train baseline on benign flows only
+                        if record.attack == "Benign" || record.attack.is_empty() {
+                            self.train_baseline_from_record(&record);
+                            trained_count += 1;
+                        }
+
+                        if warmup_count % 10000 == 0 {
+                            print!("\r  Training: {}/{} warmup records ({} benign)...",
+                                warmup_count, self.args.warmup, trained_count);
+                            std::io::Write::flush(&mut std::io::stdout())?;
+                        }
+                    }
+                }
+            }
+
+            let train_elapsed = train_start.elapsed();
+            println!();
+            println!("Baseline training complete: {} benign samples in {:.2?}", trained_count, train_elapsed);
+
+            #[cfg(feature = "ml-detection")]
+            if let Some(ref baseline) = self.baseline {
+                println!("Baseline stats: {} total samples", baseline.total_samples);
+            }
+            println!();
+        }
+
+        // Phase 2: Detection benchmark
+        println!("Phase 2: Running detection benchmark...");
         let start = Instant::now();
         let mut total_records = 0usize;
 
@@ -1266,11 +1510,16 @@ impl PcapBenchmark {
                 };
 
                 if let Some(record) = CsvFlowRecord::from_csv_line(&line, &header_map) {
-                    let is_warmup = total_records < self.args.warmup;
-                    self.process_csv_record(&record, is_warmup);
+                    // Skip warmup records (already used for training)
+                    if total_records < self.args.warmup {
+                        total_records += 1;
+                        continue;
+                    }
+
+                    self.process_csv_record(&record, false);
                     total_records += 1;
 
-                    if self.args.max_packets > 0 && total_records >= self.args.max_packets + self.args.warmup {
+                    if self.args.max_packets > 0 && (total_records - self.args.warmup) >= self.args.max_packets {
                         break;
                     }
 
@@ -1283,7 +1532,7 @@ impl PcapBenchmark {
             }
             println!();
 
-            if self.args.max_packets > 0 && total_records >= self.args.max_packets + self.args.warmup {
+            if self.args.max_packets > 0 && (total_records - self.args.warmup) >= self.args.max_packets {
                 break;
             }
         }
