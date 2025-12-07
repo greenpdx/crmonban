@@ -1,4 +1,6 @@
-# crmonban
+# CR Monban
+
+![TUX Monban](data/TUX_Monban.png)
 
 nftables-based intrusion prevention system with attacker intelligence gathering.
 
