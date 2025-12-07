@@ -107,7 +107,14 @@ impl Crmonban {
         } else {
             None
         };
-        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi, tls_proxy, port_rules);
+        let firewall = Firewall::with_all(
+            config.nftables.clone(),
+            config.deployment.clone(),
+            port_scan,
+            dpi,
+            tls_proxy,
+            port_rules,
+        );
         let intel = IntelGatherer::new(config.intel.clone())?;
 
         Ok(Self {
@@ -141,7 +148,14 @@ impl Crmonban {
         } else {
             None
         };
-        let firewall = Firewall::with_features(config.nftables.clone(), port_scan, dpi, tls_proxy, port_rules);
+        let firewall = Firewall::with_all(
+            config.nftables.clone(),
+            config.deployment.clone(),
+            port_scan,
+            dpi,
+            tls_proxy,
+            port_rules,
+        );
         let intel = IntelGatherer::new(config.intel.clone())?;
 
         Ok(Self {

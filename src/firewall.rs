@@ -15,11 +15,12 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use tracing::{debug, info, warn};
 
-use crate::config::{DpiConfig, NftablesConfig, PortAction, PortRule, PortRulesConfig, PortScanConfig, TlsProxyConfig};
+use crate::config::{DeploymentConfig, DeploymentMode, DpiConfig, NatMode, NftablesConfig, PortAction, PortRule, PortRulesConfig, PortScanConfig, TlsProxyConfig};
 
 /// Firewall manager for nftables operations
 pub struct Firewall {
     config: NftablesConfig,
+    deployment: DeploymentConfig,
     port_scan_config: Option<PortScanConfig>,
     dpi_config: Option<DpiConfig>,
     tls_proxy_config: Option<TlsProxyConfig>,
@@ -31,6 +32,19 @@ impl Firewall {
     pub fn new(config: NftablesConfig) -> Self {
         Self {
             config,
+            deployment: DeploymentConfig::default(),
+            port_scan_config: None,
+            dpi_config: None,
+            tls_proxy_config: None,
+            port_rules_config: None,
+        }
+    }
+
+    /// Create a new firewall manager with deployment mode
+    pub fn with_deployment(config: NftablesConfig, deployment: DeploymentConfig) -> Self {
+        Self {
+            config,
+            deployment,
             port_scan_config: None,
             dpi_config: None,
             tls_proxy_config: None,
@@ -42,6 +56,7 @@ impl Firewall {
     pub fn with_port_scan(config: NftablesConfig, port_scan_config: PortScanConfig) -> Self {
         Self {
             config,
+            deployment: DeploymentConfig::default(),
             port_scan_config: Some(port_scan_config),
             dpi_config: None,
             tls_proxy_config: None,
@@ -59,11 +74,36 @@ impl Firewall {
     ) -> Self {
         Self {
             config,
+            deployment: DeploymentConfig::default(),
             port_scan_config,
             dpi_config,
             tls_proxy_config,
             port_rules_config,
         }
+    }
+
+    /// Create a new firewall manager with all features and deployment config
+    pub fn with_all(
+        config: NftablesConfig,
+        deployment: DeploymentConfig,
+        port_scan_config: Option<PortScanConfig>,
+        dpi_config: Option<DpiConfig>,
+        tls_proxy_config: Option<TlsProxyConfig>,
+        port_rules_config: Option<PortRulesConfig>,
+    ) -> Self {
+        Self {
+            config,
+            deployment,
+            port_scan_config,
+            dpi_config,
+            tls_proxy_config,
+            port_rules_config,
+        }
+    }
+
+    /// Get the deployment mode
+    pub fn deployment_mode(&self) -> DeploymentMode {
+        self.deployment.mode
     }
 
     /// Initialize nftables table, chains, and sets
@@ -123,67 +163,161 @@ impl Firewall {
             comment: Some(Cow::Borrowed("crmonban blocked IPv6 addresses")),
         })));
 
-        // Create input chain
-        batch.add(NfListObject::Chain(Chain {
-            family: NfFamily::INet,
-            table: Cow::Owned(self.config.table_name.clone()),
-            name: Cow::Owned(self.config.chain_name.clone()),
-            newname: None,
-            handle: None,
-            _type: Some(NfChainType::Filter),
-            hook: Some(NfHook::Input),
-            prio: Some(self.config.priority),
-            dev: None,
-            policy: Some(NfChainPolicy::Accept),
-        }));
+        // Create chains based on deployment mode
+        info!(
+            "Deployment mode: {} (input={}, forward={})",
+            self.deployment.mode,
+            self.deployment.has_input_protection(),
+            self.deployment.has_forward_protection()
+        );
 
-        // Add rule to drop packets from blocked_v4 set
         let set_ref_v4 = format!("@{}", self.config.set_v4);
-        batch.add(NfListObject::Rule(Rule {
-            family: NfFamily::INet,
-            table: Cow::Owned(self.config.table_name.clone()),
-            chain: Cow::Owned(self.config.chain_name.clone()),
-            handle: None,
-            index: None,
-            comment: Some(Cow::Borrowed("Drop blocked IPv4")),
-            expr: Cow::Owned(vec![
-                Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("ip"),
-                            field: Cow::Borrowed("saddr"),
-                        },
-                    ))),
-                    right: Expression::String(Cow::Owned(set_ref_v4)),
-                    op: Operator::IN,
-                }),
-                Statement::Drop(None),
-            ]),
-        }));
-
-        // Add rule to drop packets from blocked_v6 set
         let set_ref_v6 = format!("@{}", self.config.set_v6);
-        batch.add(NfListObject::Rule(Rule {
-            family: NfFamily::INet,
-            table: Cow::Owned(self.config.table_name.clone()),
-            chain: Cow::Owned(self.config.chain_name.clone()),
-            handle: None,
-            index: None,
-            comment: Some(Cow::Borrowed("Drop blocked IPv6")),
-            expr: Cow::Owned(vec![
-                Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("ip6"),
-                            field: Cow::Borrowed("saddr"),
-                        },
-                    ))),
-                    right: Expression::String(Cow::Owned(set_ref_v6)),
-                    op: Operator::IN,
-                }),
-                Statement::Drop(None),
-            ]),
-        }));
+
+        // Create INPUT chain for host protection
+        if self.deployment.has_input_protection() {
+            batch.add(NfListObject::Chain(Chain {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                name: Cow::Owned(self.config.chain_name.clone()),
+                newname: None,
+                handle: None,
+                _type: Some(NfChainType::Filter),
+                hook: Some(NfHook::Input),
+                prio: Some(self.config.priority),
+                dev: None,
+                policy: Some(NfChainPolicy::Accept),
+            }));
+
+            // Add rule to drop packets from blocked_v4 set on INPUT
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Owned(self.config.chain_name.clone()),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Drop blocked IPv4 (input)")),
+                expr: Cow::Owned(vec![
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("ip"),
+                                field: Cow::Borrowed("saddr"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Owned(set_ref_v4.clone())),
+                        op: Operator::IN,
+                    }),
+                    Statement::Drop(None),
+                ]),
+            }));
+
+            // Add rule to drop packets from blocked_v6 set on INPUT
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Owned(self.config.chain_name.clone()),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Drop blocked IPv6 (input)")),
+                expr: Cow::Owned(vec![
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("ip6"),
+                                field: Cow::Borrowed("saddr"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Owned(set_ref_v6.clone())),
+                        op: Operator::IN,
+                    }),
+                    Statement::Drop(None),
+                ]),
+            }));
+        }
+
+        // Create FORWARD chain for network filtering (Gateway mode)
+        if self.deployment.has_forward_protection() {
+            let forward_chain_name = format!("{}_forward", self.config.chain_name);
+
+            batch.add(NfListObject::Chain(Chain {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                name: Cow::Owned(forward_chain_name.clone()),
+                newname: None,
+                handle: None,
+                _type: Some(NfChainType::Filter),
+                hook: Some(NfHook::Forward),
+                prio: Some(self.config.priority),
+                dev: None,
+                policy: Some(NfChainPolicy::Accept),
+            }));
+
+            // Add rule to drop packets from blocked_v4 set on FORWARD
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Owned(forward_chain_name.clone()),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Drop blocked IPv4 (forward)")),
+                expr: Cow::Owned(vec![
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("ip"),
+                                field: Cow::Borrowed("saddr"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Owned(set_ref_v4.clone())),
+                        op: Operator::IN,
+                    }),
+                    Statement::Drop(None),
+                ]),
+            }));
+
+            // Add rule to drop packets from blocked_v6 set on FORWARD
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Owned(forward_chain_name.clone()),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Drop blocked IPv6 (forward)")),
+                expr: Cow::Owned(vec![
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                            PayloadField {
+                                protocol: Cow::Borrowed("ip6"),
+                                field: Cow::Borrowed("saddr"),
+                            },
+                        ))),
+                        right: Expression::String(Cow::Owned(set_ref_v6.clone())),
+                        op: Operator::IN,
+                    }),
+                    Statement::Drop(None),
+                ]),
+            }));
+
+            // For gateway-only mode (no INPUT chain created), create a minimal one for the other rules
+            if !self.deployment.has_input_protection() {
+                batch.add(NfListObject::Chain(Chain {
+                    family: NfFamily::INet,
+                    table: Cow::Owned(self.config.table_name.clone()),
+                    name: Cow::Owned(self.config.chain_name.clone()),
+                    newname: None,
+                    handle: None,
+                    _type: Some(NfChainType::Filter),
+                    hook: Some(NfHook::Input),
+                    prio: Some(self.config.priority),
+                    dev: None,
+                    policy: Some(NfChainPolicy::Accept),
+                }));
+            }
+
+            // Add NAT rules if configured
+            self.add_nat_rules(&mut batch);
+        }
 
         // Add port scan detection rules if enabled
         if let Some(ref ps_config) = self.port_scan_config {
@@ -233,6 +367,68 @@ impl Firewall {
         }
 
         Ok(false)
+    }
+
+    /// Add NAT rules for filter/edge deployments
+    fn add_nat_rules(&self, batch: &mut Batch) {
+        if self.deployment.nat_mode == NatMode::None {
+            return;
+        }
+
+        // Create NAT table and postrouting chain
+        let nat_chain_name = format!("{}_nat", self.config.chain_name);
+
+        batch.add(NfListObject::Chain(Chain {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            name: Cow::Owned(nat_chain_name.clone()),
+            newname: None,
+            handle: None,
+            _type: Some(NfChainType::NAT),
+            hook: Some(NfHook::Postrouting),
+            prio: Some(100), // NAT priority
+            dev: None,
+            policy: Some(NfChainPolicy::Accept),
+        }));
+
+        // Add masquerade rule for outgoing traffic on external interfaces
+        for iface in &self.deployment.external_interfaces {
+            match self.deployment.nat_mode {
+                NatMode::Masquerade => {
+                    batch.add(NfListObject::Rule(Rule {
+                        family: NfFamily::INet,
+                        table: Cow::Owned(self.config.table_name.clone()),
+                        chain: Cow::Owned(nat_chain_name.clone()),
+                        handle: None,
+                        index: None,
+                        comment: Some(Cow::Owned(format!("Masquerade on {}", iface))),
+                        expr: Cow::Owned(vec![
+                            Statement::Match(Match {
+                                left: Expression::Named(NamedExpression::Meta(
+                                    nftables::expr::Meta {
+                                        key: nftables::expr::MetaKey::Oifname,
+                                    },
+                                )),
+                                right: Expression::String(Cow::Owned(iface.clone())),
+                                op: Operator::EQ,
+                            }),
+                            Statement::Masquerade(None),
+                        ]),
+                    }));
+                }
+                NatMode::Snat => {
+                    // SNAT requires a specific IP - for now just log that it needs config
+                    info!("SNAT mode configured but requires explicit IP address - skipping");
+                }
+                NatMode::None => {}
+            }
+        }
+
+        info!("NAT rules added for {} mode", match self.deployment.nat_mode {
+            NatMode::Masquerade => "masquerade",
+            NatMode::Snat => "snat",
+            NatMode::None => "none",
+        });
     }
 
     /// Ban an IP address

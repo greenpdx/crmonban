@@ -14,6 +14,14 @@ pub struct Config {
     #[serde(default)]
     pub general: GeneralConfig,
 
+    /// Deployment mode and network topology
+    #[serde(default)]
+    pub deployment: DeploymentConfig,
+
+    /// Log forwarding to remote syslog/SIEM
+    #[serde(default)]
+    pub log_forward: LogForwardConfig,
+
     #[serde(default)]
     pub nftables: NftablesConfig,
 
@@ -117,6 +125,8 @@ impl Default for Config {
 
         Self {
             general: GeneralConfig::default(),
+            deployment: DeploymentConfig::default(),
+            log_forward: LogForwardConfig::default(),
             nftables: NftablesConfig::default(),
             intel: IntelConfig::default(),
             dbus: DbusConfig::default(),
@@ -219,6 +229,173 @@ impl Default for GeneralConfig {
             default_ban_duration: default_ban_duration(),
         }
     }
+}
+
+/// Deployment mode for crmonban
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DeploymentMode {
+    /// Protect this host only (INPUT chain)
+    #[default]
+    Host,
+    /// Network gateway/firewall between internal and external networks (FORWARD chain)
+    /// Use `protect_self` in DeploymentConfig to also protect the gateway host
+    Gateway,
+}
+
+impl std::fmt::Display for DeploymentMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeploymentMode::Host => write!(f, "host"),
+            DeploymentMode::Gateway => write!(f, "gateway"),
+        }
+    }
+}
+
+/// Deployment configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentConfig {
+    /// Deployment mode: "host" or "gateway"
+    #[serde(default)]
+    pub mode: DeploymentMode,
+
+    /// For gateway mode: also protect the gateway host itself (adds INPUT chain rules)
+    #[serde(default = "default_true")]
+    pub protect_self: bool,
+
+    /// External/WAN interface(s) - traffic from these is untrusted
+    #[serde(default)]
+    pub external_interfaces: Vec<String>,
+
+    /// Internal/LAN interface(s) - traffic to these is protected
+    #[serde(default)]
+    pub internal_interfaces: Vec<String>,
+
+    /// Whether to track connection state for stateful filtering
+    #[serde(default = "default_true")]
+    pub stateful: bool,
+
+    /// Whether to inspect outbound traffic for data exfiltration/C2
+    #[serde(default)]
+    pub inspect_outbound: bool,
+
+    /// Rate limit for new connections per source IP (0 = disabled)
+    #[serde(default)]
+    pub conn_rate_limit: u32,
+
+    /// NAT mode: none, snat, masquerade
+    #[serde(default)]
+    pub nat_mode: NatMode,
+}
+
+impl Default for DeploymentConfig {
+    fn default() -> Self {
+        Self {
+            mode: DeploymentMode::Host,
+            protect_self: true,
+            external_interfaces: Vec::new(),
+            internal_interfaces: Vec::new(),
+            stateful: true,
+            inspect_outbound: false,
+            conn_rate_limit: 0,
+            nat_mode: NatMode::None,
+        }
+    }
+}
+
+impl DeploymentConfig {
+    /// Whether this config protects the local host (INPUT chain)
+    pub fn has_input_protection(&self) -> bool {
+        match self.mode {
+            DeploymentMode::Host => true,
+            DeploymentMode::Gateway => self.protect_self,
+        }
+    }
+
+    /// Whether this config inspects forwarded traffic (FORWARD chain)
+    pub fn has_forward_protection(&self) -> bool {
+        matches!(self.mode, DeploymentMode::Gateway)
+    }
+}
+
+/// NAT mode for filter/edge deployments
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NatMode {
+    #[default]
+    None,
+    /// Source NAT with specific IP
+    Snat,
+    /// Masquerade (dynamic SNAT)
+    Masquerade,
+}
+
+/// Log forwarding configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogForwardConfig {
+    /// Enable log forwarding
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Syslog server address (host:port)
+    #[serde(default)]
+    pub syslog_server: Option<String>,
+
+    /// Syslog protocol: udp, tcp, or tls
+    #[serde(default = "default_syslog_protocol")]
+    pub syslog_protocol: String,
+
+    /// Syslog facility (0-23, default 1 = user)
+    #[serde(default = "default_syslog_facility")]
+    pub syslog_facility: u8,
+
+    /// Forward security events
+    #[serde(default = "default_true")]
+    pub forward_events: bool,
+
+    /// Forward ban/unban actions
+    #[serde(default = "default_true")]
+    pub forward_bans: bool,
+
+    /// Forward statistics periodically
+    #[serde(default)]
+    pub forward_stats: bool,
+
+    /// Stats forwarding interval in seconds
+    #[serde(default = "default_stats_interval")]
+    pub stats_interval: u64,
+
+    /// JSON format for structured logging
+    #[serde(default = "default_true")]
+    pub json_format: bool,
+}
+
+impl Default for LogForwardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            syslog_server: None,
+            syslog_protocol: default_syslog_protocol(),
+            syslog_facility: default_syslog_facility(),
+            forward_events: true,
+            forward_bans: true,
+            forward_stats: false,
+            stats_interval: default_stats_interval(),
+            json_format: true,
+        }
+    }
+}
+
+fn default_syslog_protocol() -> String {
+    "udp".to_string()
+}
+
+fn default_syslog_facility() -> u8 {
+    1 // user
+}
+
+fn default_stats_interval() -> u64 {
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
