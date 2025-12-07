@@ -223,6 +223,7 @@ struct ChainPattern {
     required_tactics: Vec<MitreTactic>,
     optional_tactics: Vec<MitreTactic>,
     min_stages: usize,
+    #[allow(dead_code)]
     description: String,
 }
 

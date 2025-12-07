@@ -119,6 +119,7 @@ struct ConnectionRecord {
     src_ip: IpAddr,
     dst_ip: IpAddr,
     dst_port: u16,
+    #[allow(dead_code)]
     protocol: AppProtocol,
 }
 
@@ -422,6 +423,7 @@ fn ip_protocol_to_numeric(protocol: IpProtocol) -> f32 {
 }
 
 /// Convert application protocol to numeric value
+#[allow(dead_code)]
 fn app_protocol_to_numeric(protocol: AppProtocol) -> f32 {
     match protocol {
         AppProtocol::Http => 1.0,

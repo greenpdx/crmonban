@@ -1,9 +1,8 @@
 //! Scan orchestration and automation
 
 use std::net::IpAddr;
-use std::sync::Arc;
 use anyhow::Result;
-use tracing::{info, warn, error};
+use tracing::{info, warn};
 
 use crate::network::{ScanConfig, ScanRequest, ScanResult, ScanTrigger, Finding};
 use super::{Scanner, NmapScanner, EttercapScanner, MetasploitScanner, BurpScanner};

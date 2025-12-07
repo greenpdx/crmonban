@@ -70,14 +70,6 @@ fn default_cache_ttl() -> u64 {
     300 // 5 minutes
 }
 
-/// Cached whitelist entry
-#[derive(Debug, Clone)]
-struct CachedEntry {
-    ip: IpAddr,
-    source: String,
-    expires_at: std::time::Instant,
-}
-
 /// Shared whitelist manager
 pub struct SharedWhitelist {
     config: SharedWhitelistConfig,

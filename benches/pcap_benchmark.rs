@@ -1,5 +1,7 @@
 //! PCAP/CSV Replay Benchmark
 //!
+//! For packet generation only, all packet processing is in src/
+//!
 //! Reads real network traffic from PCAP files or CSV flow records
 //! and measures actual detection pipeline performance.
 
@@ -17,6 +19,8 @@ use pcap::Capture;
 use crmonban::core::flow::Flow;
 use crmonban::core::packet::{AppProtocol, IpProtocol, Packet, TcpFlags};
 use crmonban::flow::{FlowConfig, FlowTracker};
+use crmonban::brute_force::BruteForceTracker;
+use crmonban::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
 
 #[cfg(feature = "signatures")]
 use crmonban::signatures::{SignatureConfig, SignatureEngine, RuleLoader, matcher::PacketContext, ast::Protocol};
@@ -332,6 +336,13 @@ struct DetectionStats {
     ml_anomalies: usize,
     ml_scores_sum: f64,
 
+    // Port scan detections
+    scan_alerts: usize,
+    targeted_scan_alerts: usize,
+
+    // Brute force detections
+    brute_force_alerts: usize,
+
     // Confusion matrix (combined signature + ML)
     true_positives: usize,   // Attack correctly detected
     false_positives: usize,  // Benign incorrectly flagged
@@ -403,6 +414,8 @@ struct PcapBenchmark {
 
     // Components
     flow_tracker: Option<FlowTracker>,
+    scan_detect_engine: ScanDetectEngine,
+    brute_force_tracker: BruteForceTracker,
     #[cfg(feature = "signatures")]
     signature_engine: Option<SignatureEngine>,
     #[cfg(feature = "threat-intel")]
@@ -512,6 +525,8 @@ impl PcapBenchmark {
             label_stats: LabelStats::new(),
             detection_stats: DetectionStats::new(),
             flow_tracker,
+            scan_detect_engine: ScanDetectEngine::new(ScanDetectConfig::default()),
+            brute_force_tracker: BruteForceTracker::new(),
             #[cfg(feature = "signatures")]
             signature_engine,
             #[cfg(feature = "threat-intel")]
@@ -846,6 +861,32 @@ impl PcapBenchmark {
             ml_score_time = score_start.elapsed();
         }
 
+        // Port scan tracking - detect when a source touches many different destination ports
+        let is_syn = pkt.tcp_flags.as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
+        let is_syn_ack = pkt.tcp_flags.as_ref().map(|f| f.syn && f.ack).unwrap_or(false);
+        let is_ack = pkt.tcp_flags.as_ref().map(|f| f.ack && !f.syn).unwrap_or(false);
+        let is_rst = pkt.tcp_flags.as_ref().map(|f| f.rst).unwrap_or(false);
+        let scan_alert = self.scan_detect_engine.process_packet(
+            pkt.src_ip, pkt.dst_port, is_syn, is_syn_ack, is_ack, is_rst,
+            pkt.payload.len(), None, None
+        );
+
+        // Brute force tracking - detect repeated failed login attempts
+        let is_fin = pkt.tcp_flags.as_ref().map(|f| f.fin).unwrap_or(false);
+        let is_rst = pkt.tcp_flags.as_ref().map(|f| f.rst).unwrap_or(false);
+        let brute_force_alert = if is_syn {
+            // Session start
+            self.brute_force_tracker.session_start(pkt.src_ip, pkt.dst_ip, pkt.dst_port);
+            None
+        } else if is_fin || is_rst {
+            // Session end - check for brute force pattern
+            self.brute_force_tracker.session_end(pkt.src_ip, pkt.dst_ip, pkt.dst_port, is_rst)
+        } else {
+            // Track packet in session
+            self.brute_force_tracker.session_packet(pkt.src_ip, pkt.dst_ip, pkt.dst_port, pkt.payload.len());
+            None
+        };
+
         let total_time = total_start.elapsed();
 
         // Record timings and detection stats (skip warmup)
@@ -867,6 +908,20 @@ impl PcapBenchmark {
                 self.detection_stats.ml_anomalies += 1;
             }
             self.detection_stats.ml_scores_sum += ml_anomaly_score as f64;
+
+            // Track port scan alerts
+            if let Some(ref alert) = scan_alert {
+                self.detection_stats.scan_alerts += 1;
+                // Consider ConfirmedScan or LikelyAttack as targeted
+                if matches!(alert.classification, Classification::ConfirmedScan | Classification::LikelyAttack) {
+                    self.detection_stats.targeted_scan_alerts += 1;
+                }
+            }
+
+            // Track brute force alerts
+            if brute_force_alert.is_some() {
+                self.detection_stats.brute_force_alerts += 1;
+            }
 
             // Track payload stats
             if !pkt.payload.is_empty() {
@@ -1199,6 +1254,34 @@ impl PcapBenchmark {
             d.signature_matches as f64 / self.packets_processed as f64 * 100.0);
         println!("ML anomalies:       {:>10} (score >= 0.5)", d.ml_anomalies);
         println!("Avg ML score:       {:>10.4}", d.avg_ml_score(self.packets_processed));
+        println!();
+        println!("Port Scan Detection:");
+        println!("  Scan alerts:          {:>8} (sources touching 10+ ports)", d.scan_alerts);
+        println!("  Targeted scans:       {:>8} (>50% commonly targeted ports)", d.targeted_scan_alerts);
+        // Show top scanners
+        let top_scanners = self.scan_detect_engine.top_scanners(5);
+        if !top_scanners.is_empty() {
+            println!("  Top suspicious sources:");
+            for (ip, score, classification) in top_scanners.iter().take(5) {
+                if *score >= 3.0 {
+                    println!("    {} -> score={:.1} ({:?})", ip, score, classification);
+                }
+            }
+        }
+        println!();
+        println!("Brute Force Detection:");
+        println!("  Brute force alerts:   {:>8} (5+ failed attempts in 60s)", d.brute_force_alerts);
+        // Show top brute force targets
+        let top_targets = self.brute_force_tracker.top_targets(5);
+        if !top_targets.is_empty() {
+            println!("  Top targets:");
+            for (src, dst, port, count) in top_targets.iter().take(5) {
+                if *count >= 3 {
+                    let service = self.brute_force_tracker.get_service_name(*port).unwrap_or("Unknown");
+                    println!("    {} -> {}:{} ({}) - {} attempts", src, dst, port, service, count);
+                }
+            }
+        }
         println!();
         println!("Payload Stats:");
         println!("  Packets with payload: {:>8} ({:.2}% of packets)",

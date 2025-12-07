@@ -18,9 +18,9 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{error, warn};
 
-use crate::models::{AttackEvent, AttackEventType, Ban, BanSource};
+use crate::models::{AttackEvent, AttackEventType, Ban};
 
 /// SIEM export format
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -579,7 +579,7 @@ impl SiemExporter {
     async fn write_to_syslog(
         &self,
         socket: &str,
-        event: &SiemEvent,
+        _event: &SiemEvent,
         formatted: &str,
     ) -> std::io::Result<()> {
         use tokio::net::UnixDatagram;

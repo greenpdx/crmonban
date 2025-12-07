@@ -1,14 +1,18 @@
+pub mod brute_force;
 pub mod config;
 pub mod database;
+#[cfg(feature = "dbus")]
 pub mod dbus;
 pub mod dpi;
 pub mod ebpf;
 pub mod firewall;
 pub mod intel;
+pub mod ipc;
 pub mod malware_detect;
 pub mod models;
 pub mod monitor;
 pub mod port_scan_monitor;
+pub mod scan_detect;
 pub mod shared_whitelist;
 pub mod siem;
 #[cfg(feature = "signatures")]
@@ -51,16 +55,23 @@ pub mod network;
 use anyhow::Result;
 use chrono::Utc;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
 use config::Config;
 use database::Database;
+#[cfg(feature = "dbus")]
 use dbus::DbusServer;
 use firewall::Firewall;
 use intel::IntelGatherer;
+use ipc::{
+    ActionResponse, ActionType, BanEvent, BanInfo, BansResponse, ConfigResponse,
+    DisplayProcess, ErrorResponse, EventInfo, EventsResponse, GeoInfo, GetBansRequest,
+    GetEventsRequest, GetIntelRequest, IntelResponse, IpcMessage, IpcRequest, IpcServer,
+    SecurityEvent, ServiceSummary, StatsResponse, StatusResponse, SystemEvent, WhoisInfo,
+};
 use models::{ActivityAction, Ban, BanSource, DaemonStatus, WhitelistEntry};
 use monitor::{start_monitoring, MonitorEvent};
 
@@ -364,7 +375,10 @@ pub struct Daemon {
     crmonban: Arc<RwLock<Crmonban>>,
     shutdown_tx: Option<mpsc::Sender<()>>,
     events_processed: Arc<RwLock<u64>>,
+    #[cfg(feature = "dbus")]
     dbus_server: Option<DbusServer>,
+    ipc_server: Option<Arc<IpcServer>>,
+    display_process: Option<DisplayProcess>,
 }
 
 impl Daemon {
@@ -374,7 +388,10 @@ impl Daemon {
             crmonban: Arc::new(RwLock::new(crmonban)),
             shutdown_tx: None,
             events_processed: Arc::new(RwLock::new(0)),
+            #[cfg(feature = "dbus")]
             dbus_server: None,
+            ipc_server: None,
+            display_process: None,
         }
     }
 
@@ -394,12 +411,73 @@ impl Daemon {
             .log_activity(ActivityAction::DaemonStart, None, "Daemon started")?;
 
         let services = crmonban.config.services.clone();
+        #[cfg(feature = "dbus")]
         let dbus_enabled = crmonban.config.dbus.enabled;
         let port_scan_config = crmonban.config.port_scan.clone();
         let dpi_config = crmonban.config.dpi.clone();
+        let display_config = crmonban.config.display.clone();
+        let db_path = crmonban.config.db_path().to_string_lossy().to_string();
         drop(crmonban);
 
+        // Start IPC server for display communication
+        if display_config.enabled {
+            let socket_path = display_config.socket_path.clone()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(ipc::DEFAULT_SOCKET_PATH));
+
+            let mut ipc_server = IpcServer::new(Some(socket_path.as_path()));
+            // Take request receiver BEFORE starting (and wrapping in Arc)
+            let request_rx = ipc_server.take_request_receiver();
+
+            match ipc_server.start().await {
+                Ok(()) => {
+                    let server = Arc::new(ipc_server);
+                    self.ipc_server = Some(server.clone());
+                    info!("IPC server started");
+
+                    // Spawn request handler task
+                    if let Some(rx) = request_rx {
+                        let crmonban_for_requests = self.crmonban.clone();
+                        let events_for_requests = self.events_processed.clone();
+                        tokio::spawn(async move {
+                            handle_ipc_requests(rx, crmonban_for_requests, events_for_requests).await;
+                        });
+                        info!("IPC request handler started");
+                    }
+
+                    // Start display subprocess
+                    let display_binary = display_config.binary_path.clone()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| {
+                            DisplayProcess::find_binary()
+                                .unwrap_or_else(|| PathBuf::from("crmonban-display"))
+                        });
+
+                    let mut display_proc = DisplayProcess::new(
+                        display_binary,
+                        socket_path.clone(),
+                        PathBuf::from(&db_path),
+                        display_config.port,
+                    );
+
+                    match display_proc.spawn().await {
+                        Ok(()) => {
+                            info!("Display server started on port {}", display_config.port);
+                            self.display_process = Some(display_proc);
+                        }
+                        Err(e) => {
+                            warn!("Failed to start display server: {}. Dashboard will not be available.", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to start IPC server: {}. Display server will not be available.", e);
+                }
+            }
+        }
+
         // Start D-Bus server if enabled
+        #[cfg(feature = "dbus")]
         if dbus_enabled {
             match DbusServer::start(self.crmonban.clone(), self.events_processed.clone()).await {
                 Ok(server) => {
@@ -492,12 +570,29 @@ impl Daemon {
                             }
 
                             // Emit D-Bus signal
+                            #[cfg(feature = "dbus")]
                             if let Some(ref dbus) = self.dbus_server {
                                 let _ = dbus.emit_attack_detected(
                                     &attack_event.ip.to_string(),
                                     &attack_event.service,
                                     &attack_event.event_type.to_string(),
                                 ).await;
+                            }
+
+                            // Broadcast to display via IPC
+                            if let Some(ref ipc) = self.ipc_server {
+                                let ipc_event = SecurityEvent {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    timestamp: Utc::now().timestamp_millis(),
+                                    src_ip: attack_event.ip,
+                                    dst_port: None,
+                                    service: attack_event.service.clone(),
+                                    event_type: attack_event.event_type.to_string(),
+                                    severity: 5, // Default severity
+                                    description: format!("Attack detected from {}", attack_event.ip),
+                                    banned: false,
+                                };
+                                ipc.broadcast(IpcMessage::Event(ipc_event));
                             }
                         }
                         MonitorEvent::Ban { ip, service, reason, duration_secs } => {
@@ -534,6 +629,7 @@ impl Daemon {
                                 error!("Failed to ban {}: {}", ip, e);
                             } else {
                                 // Emit D-Bus signal
+                                #[cfg(feature = "dbus")]
                                 if let Some(ref dbus) = self.dbus_server {
                                     let _ = dbus.emit_ban_added(
                                         &ip.to_string(),
@@ -541,6 +637,23 @@ impl Daemon {
                                         &format!("monitor:{}", ban_service),
                                         duration_for_signal as u32,
                                     ).await;
+                                }
+
+                                // Broadcast to display via IPC
+                                if let Some(ref ipc) = self.ipc_server {
+                                    let ban_event = BanEvent {
+                                        action: "add".to_string(),
+                                        ip,
+                                        reason: Some(ban_reason.clone()),
+                                        source: Some(format!("monitor:{}", ban_service)),
+                                        duration_secs: if duration_for_signal > 0 {
+                                            Some(duration_for_signal as u32)
+                                        } else {
+                                            None
+                                        },
+                                        timestamp: Utc::now().timestamp_millis(),
+                                    };
+                                    ipc.broadcast(IpcMessage::Ban(ban_event));
                                 }
                             }
 
@@ -570,8 +683,19 @@ impl Daemon {
         }
 
         // Emit D-Bus stopping signal
+        #[cfg(feature = "dbus")]
         if let Some(ref dbus) = self.dbus_server {
             let _ = dbus.emit_daemon_stopping().await;
+        }
+
+        // Broadcast shutdown via IPC
+        if let Some(ref ipc) = self.ipc_server {
+            let system_event = SystemEvent {
+                event_type: "stopping".to_string(),
+                details: Some("Daemon shutting down".to_string()),
+                timestamp: Utc::now().timestamp_millis(),
+            };
+            ipc.broadcast(IpcMessage::System(system_event));
         }
 
         // Cleanup
@@ -583,6 +707,13 @@ impl Daemon {
             handle.abort();
         }
         cleanup_handle.abort();
+
+        // Stop display subprocess
+        if let Some(ref mut display) = self.display_process {
+            if let Err(e) = display.stop().await {
+                warn!("Failed to stop display server: {}", e);
+            }
+        }
 
         let crmonban = self.crmonban.read().await;
         crmonban
@@ -620,6 +751,383 @@ impl Daemon {
             events_processed: 0, // Would need counter
             monitored_files,
         })
+    }
+}
+
+/// Handle IPC requests from display clients
+async fn handle_ipc_requests(
+    mut rx: mpsc::Receiver<IpcRequest>,
+    crmonban: Arc<RwLock<Crmonban>>,
+    events_processed: Arc<RwLock<u64>>,
+) {
+    use std::time::Instant;
+
+    let start_time = Instant::now();
+
+    while let Some(request) = rx.recv().await {
+        let response = match request.message {
+            IpcMessage::GetBans(req) => handle_get_bans(&crmonban, req).await,
+            IpcMessage::GetStats => handle_get_stats(&crmonban).await,
+            IpcMessage::GetIntel(req) => handle_get_intel(&crmonban, req).await,
+            IpcMessage::GetEvents(req) => handle_get_events(&crmonban, req).await,
+            IpcMessage::GetStatus => {
+                handle_get_status(&crmonban, &events_processed, start_time).await
+            }
+            IpcMessage::GetConfig => handle_get_config(&crmonban).await,
+            IpcMessage::Action(req) => handle_action(&crmonban, req).await,
+            _ => IpcMessage::Error(ErrorResponse {
+                request_id: None,
+                code: "INVALID_REQUEST".to_string(),
+                message: "Unknown request type".to_string(),
+            }),
+        };
+
+        // Send response back to client (ignore errors if client disconnected)
+        let _ = request.response_tx.send(response);
+    }
+}
+
+async fn handle_get_bans(crmonban: &Arc<RwLock<Crmonban>>, req: GetBansRequest) -> IpcMessage {
+    let crmonban = crmonban.read().await;
+
+    match crmonban.list_bans() {
+        Ok(bans) => {
+            let mut ban_infos: Vec<BanInfo> = bans
+                .iter()
+                .filter(|b| {
+                    // Apply IP filter if specified
+                    if let Some(ref filter) = req.ip_filter {
+                        b.ip.to_string().contains(filter)
+                    } else {
+                        true
+                    }
+                })
+                .map(|b| {
+                    // Get cached intel for country/ASN
+                    let (country, asn) = crmonban
+                        .get_cached_intel(&b.ip.to_string())
+                        .ok()
+                        .flatten()
+                        .map(|intel| {
+                            (
+                                intel.country.clone(),
+                                intel.asn.map(|a| a.to_string()),
+                            )
+                        })
+                        .unwrap_or((None, None));
+
+                    BanInfo {
+                        ip: b.ip,
+                        reason: b.reason.clone(),
+                        source: b.source.to_string(),
+                        created_at: b.created_at.timestamp_millis(),
+                        expires_at: b.expires_at.map(|e| e.timestamp_millis()),
+                        ban_count: b.ban_count,
+                        country,
+                        asn,
+                    }
+                })
+                .collect();
+
+            let total = ban_infos.len() as u64;
+
+            // Apply limit
+            if let Some(limit) = req.limit {
+                ban_infos.truncate(limit as usize);
+            }
+
+            IpcMessage::BansResponse(BansResponse {
+                request_id: req.request_id,
+                bans: ban_infos,
+                total,
+            })
+        }
+        Err(e) => IpcMessage::Error(ErrorResponse {
+            request_id: Some(req.request_id),
+            code: "DATABASE_ERROR".to_string(),
+            message: format!("Failed to get bans: {}", e),
+        }),
+    }
+}
+
+async fn handle_get_stats(crmonban: &Arc<RwLock<Crmonban>>) -> IpcMessage {
+    let crmonban = crmonban.read().await;
+
+    match crmonban.get_stats() {
+        Ok(stats) => IpcMessage::StatsResponse(StatsResponse {
+            request_id: None,
+            total_bans: stats.total_bans,
+            active_bans: stats.active_bans,
+            total_events: stats.total_events,
+            events_today: stats.events_today,
+            events_this_hour: stats.events_this_hour,
+            events_by_service: stats.events_by_service,
+            top_countries: stats.top_countries,
+            top_asns: stats.top_asns,
+        }),
+        Err(e) => IpcMessage::Error(ErrorResponse {
+            request_id: None,
+            code: "DATABASE_ERROR".to_string(),
+            message: format!("Failed to get stats: {}", e),
+        }),
+    }
+}
+
+async fn handle_get_intel(crmonban: &Arc<RwLock<Crmonban>>, req: GetIntelRequest) -> IpcMessage {
+    let crmonban = crmonban.read().await;
+
+    // Try cached intel first
+    let intel_result = if req.refresh {
+        // Force refresh - gather new intel
+        crmonban.gather_and_save_intel(&req.ip).await
+    } else {
+        // Try cache first
+        match crmonban.get_cached_intel(&req.ip) {
+            Ok(Some(cached)) => Ok(cached),
+            Ok(None) => {
+                // No cache, gather fresh
+                crmonban.gather_and_save_intel(&req.ip).await
+            }
+            Err(e) => Err(e),
+        }
+    };
+
+    match intel_result {
+        Ok(intel) => {
+            // Build GeoInfo if any geo fields are present
+            let geo = if intel.country.is_some()
+                || intel.city.is_some()
+                || intel.latitude.is_some()
+            {
+                Some(GeoInfo {
+                    country: intel.country.clone(),
+                    country_code: intel.country_code.clone(),
+                    region: intel.region.clone(),
+                    city: intel.city.clone(),
+                    latitude: intel.latitude,
+                    longitude: intel.longitude,
+                    timezone: intel.timezone.clone(),
+                })
+            } else {
+                None
+            };
+
+            // Build WhoisInfo if any whois fields are present
+            let whois = if intel.asn.is_some() || intel.as_org.is_some() || intel.isp.is_some() {
+                Some(WhoisInfo {
+                    asn: intel.asn.map(|a| a.to_string()),
+                    org: intel.as_org.clone(),
+                    isp: intel.isp.clone(),
+                    cidr: None, // Not in AttackerIntel
+                    abuse_email: intel.whois_abuse_contact.clone(),
+                })
+            } else {
+                None
+            };
+
+            IpcMessage::IntelResponse(IntelResponse {
+                request_id: req.request_id,
+                ip: req.ip,
+                geo,
+                whois,
+                rdns: intel.reverse_dns.clone(),
+                threat_score: intel.threat_score.map(|s| s as u8),
+                abuse_reports: None, // Not in AttackerIntel
+                open_ports: intel.open_ports.clone().unwrap_or_default(),
+                tags: intel.shodan_tags.clone().unwrap_or_default(),
+                last_updated: intel.gathered_at.map(|t| t.timestamp_millis()),
+            })
+        }
+        Err(e) => IpcMessage::Error(ErrorResponse {
+            request_id: Some(req.request_id),
+            code: "INTEL_ERROR".to_string(),
+            message: format!("Failed to get intel: {}", e),
+        }),
+    }
+}
+
+async fn handle_get_events(crmonban: &Arc<RwLock<Crmonban>>, req: GetEventsRequest) -> IpcMessage {
+    let crmonban = crmonban.read().await;
+
+    // Get recent activity (events are stored as activity logs)
+    match crmonban.get_activity(req.limit + req.offset) {
+        Ok(activities) => {
+            let events: Vec<EventInfo> = activities
+                .into_iter()
+                .skip(req.offset as usize)
+                .take(req.limit as usize)
+                .filter_map(|a| {
+                    // Filter by service if specified
+                    if let Some(ref service) = req.service {
+                        if !a.details.contains(service) {
+                            return None;
+                        }
+                    }
+                    // Filter by IP if specified
+                    if let Some(ref ip_filter) = req.ip {
+                        if let Some(ref ip) = a.ip {
+                            if !ip.to_string().contains(ip_filter) {
+                                return None;
+                            }
+                        } else {
+                            return None;
+                        }
+                    }
+                    // Filter by since timestamp
+                    if let Some(since) = req.since {
+                        if a.timestamp.timestamp_millis() < since {
+                            return None;
+                        }
+                    }
+
+                    Some(EventInfo {
+                        id: a.id.map(|i| i.to_string()).unwrap_or_else(|| "0".to_string()),
+                        timestamp: a.timestamp.timestamp_millis(),
+                        ip: a.ip.unwrap_or_else(|| "0.0.0.0".parse().unwrap()),
+                        service: "system".to_string(),
+                        event_type: a.action.to_string(),
+                        details: Some(a.details),
+                        banned: matches!(a.action, ActivityAction::Ban),
+                    })
+                })
+                .collect();
+
+            let total = events.len() as u64;
+            let has_more = (req.offset + req.limit) < total as u32;
+
+            IpcMessage::EventsResponse(EventsResponse {
+                request_id: req.request_id,
+                events,
+                total,
+                has_more,
+            })
+        }
+        Err(e) => IpcMessage::Error(ErrorResponse {
+            request_id: Some(req.request_id),
+            code: "DATABASE_ERROR".to_string(),
+            message: format!("Failed to get events: {}", e),
+        }),
+    }
+}
+
+async fn handle_get_status(
+    crmonban: &Arc<RwLock<Crmonban>>,
+    events_processed: &Arc<RwLock<u64>>,
+    start_time: std::time::Instant,
+) -> IpcMessage {
+    let crmonban = crmonban.read().await;
+    let events = *events_processed.read().await;
+
+    let active_bans = crmonban.list_bans().map(|b| b.len() as u64).unwrap_or(0);
+
+    let monitored_services: Vec<String> = crmonban
+        .config
+        .services
+        .iter()
+        .filter(|(_, s)| s.enabled)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    // Get system resource usage
+    let memory_bytes = {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/proc/self/statm")
+                .ok()
+                .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+                .map(|pages| pages * 4096) // Page size is typically 4KB
+                .unwrap_or(0)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0
+        }
+    };
+
+    IpcMessage::StatusResponse(StatusResponse {
+        request_id: None,
+        running: true,
+        pid: std::process::id(),
+        uptime_secs: start_time.elapsed().as_secs(),
+        active_bans,
+        events_processed: events,
+        monitored_services,
+        ipc_clients: 0, // Would need access to IpcServer to get this
+        memory_bytes,
+        cpu_usage: 0.0, // Would need to track CPU usage
+    })
+}
+
+async fn handle_get_config(crmonban: &Arc<RwLock<Crmonban>>) -> IpcMessage {
+    let crmonban = crmonban.read().await;
+    let config = crmonban.config();
+
+    let services: Vec<ServiceSummary> = config
+        .services
+        .iter()
+        .map(|(name, s)| ServiceSummary {
+            name: name.clone(),
+            enabled: s.enabled,
+            log_path: s.log_path.clone(),
+            max_failures: s.max_failures,
+            find_time: s.find_time,
+            ban_time: s.ban_time,
+        })
+        .collect();
+
+    IpcMessage::ConfigResponse(ConfigResponse {
+        request_id: None,
+        services,
+        port_scan_enabled: config.port_scan.enabled,
+        dpi_enabled: config.dpi.enabled,
+        dbus_enabled: config.dbus.enabled,
+        default_ban_duration: config.general.default_ban_duration,
+        auto_intel: config.general.auto_intel,
+    })
+}
+
+async fn handle_action(
+    crmonban: &Arc<RwLock<Crmonban>>,
+    req: ipc::ActionRequest,
+) -> IpcMessage {
+    let result = match req.action {
+        ActionType::Ban {
+            ip,
+            reason,
+            duration_secs,
+        } => {
+            let guard = crmonban.read().await;
+            guard.ban(ip, reason, BanSource::Manual, duration_secs)
+        }
+        ActionType::Unban { ip } => {
+            let guard = crmonban.read().await;
+            guard.unban(&ip).map(|_| ())
+        }
+        ActionType::Whitelist { ip, comment } => {
+            let guard = crmonban.read().await;
+            guard.whitelist_add(ip, comment)
+        }
+        ActionType::UnWhitelist { ip } => {
+            let guard = crmonban.read().await;
+            guard.whitelist_remove(&ip).map(|_| ())
+        }
+        ActionType::RefreshIntel { ip } => {
+            let guard = crmonban.read().await;
+            guard.gather_and_save_intel(&ip).await.map(|_| ())
+        }
+    };
+
+    match result {
+        Ok(()) => IpcMessage::ActionResponse(ActionResponse {
+            request_id: req.request_id,
+            success: true,
+            message: "Action completed successfully".to_string(),
+        }),
+        Err(e) => IpcMessage::ActionResponse(ActionResponse {
+            request_id: req.request_id,
+            success: false,
+            message: format!("Action failed: {}", e),
+        }),
     }
 }
 

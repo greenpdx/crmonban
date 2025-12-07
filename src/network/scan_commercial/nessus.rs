@@ -5,7 +5,7 @@
 use std::net::IpAddr;
 use std::process::Command;
 use anyhow::{Result, Context};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::network::{ScanResult, Finding, FindingSeverity};
 use super::CommercialScanner;
@@ -13,6 +13,7 @@ use super::CommercialScanner;
 pub struct NessusScanner {
     cli_path: String,
     api_url: Option<String>,
+    #[allow(dead_code)]
     api_key: Option<String>,
 }
 

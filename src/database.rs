@@ -3,17 +3,47 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::models::{
     ActivityAction, ActivityLog, AttackEvent, AttackEventType, AttackStats, AttackerIntel, Ban,
     BanSource, WhitelistEntry,
 };
 
+/// Helper to parse IP from database string, returning rusqlite error on failure
+fn parse_ip(s: &str) -> std::result::Result<IpAddr, rusqlite::Error> {
+    s.parse()
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+}
+
+/// Helper to parse DateTime from RFC3339 string, returning rusqlite error on failure
+fn parse_datetime(s: &str) -> std::result::Result<DateTime<Utc>, rusqlite::Error> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+}
+
+/// Helper to parse optional DateTime from RFC3339 string
+fn parse_datetime_opt(s: Option<String>) -> std::result::Result<Option<DateTime<Utc>>, rusqlite::Error> {
+    match s {
+        Some(s) => parse_datetime(&s).map(Some),
+        None => Ok(None),
+    }
+}
+
 /// Thread-safe database wrapper
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
+}
+
+impl Database {
+    /// Safely acquire database lock, recovering from poisoned mutex
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|e| {
+            anyhow::anyhow!("Database mutex poisoned: {}", e)
+        })
+    }
 }
 
 impl Database {
@@ -47,7 +77,7 @@ impl Database {
 
     /// Initialize database schema
     fn init_schema(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         conn.execute_batch(
             r#"
@@ -135,7 +165,7 @@ impl Database {
 
     /// Add a new ban or update existing
     pub fn add_ban(&self, ban: &Ban) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         // Check if already banned
         let existing: Option<i64> = conn
@@ -177,14 +207,14 @@ impl Database {
 
     /// Remove a ban by IP
     pub fn remove_ban(&self, ip: &IpAddr) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
         let rows = conn.execute("DELETE FROM bans WHERE ip = ?", [ip.to_string()])?;
         Ok(rows > 0)
     }
 
     /// Get a ban by IP
     pub fn get_ban(&self, ip: &IpAddr) -> Result<Option<Ban>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         conn.query_row(
             "SELECT id, ip, reason, source, created_at, expires_at, ban_count FROM bans WHERE ip = ?",
@@ -192,17 +222,11 @@ impl Database {
             |row| {
                 Ok(Ban {
                     id: Some(row.get(0)?),
-                    ip: row.get::<_, String>(1)?.parse().unwrap(),
+                    ip: parse_ip(&row.get::<_, String>(1)?)?,
                     reason: row.get(2)?,
                     source: row.get::<_, String>(3)?.parse().unwrap_or(BanSource::Manual),
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    expires_at: row.get::<_, Option<String>>(5)?.map(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .unwrap()
-                            .with_timezone(&Utc)
-                    }),
+                    created_at: parse_datetime(&row.get::<_, String>(4)?)?,
+                    expires_at: parse_datetime_opt(row.get::<_, Option<String>>(5)?)?,
                     ban_count: row.get(6)?,
                 })
             },
@@ -213,7 +237,7 @@ impl Database {
 
     /// Get all active bans (not expired)
     pub fn get_active_bans(&self) -> Result<Vec<Ban>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
         let now = Utc::now().to_rfc3339();
 
         let mut stmt = conn.prepare(
@@ -225,17 +249,11 @@ impl Database {
             .query_map([now], |row| {
                 Ok(Ban {
                     id: Some(row.get(0)?),
-                    ip: row.get::<_, String>(1)?.parse().unwrap(),
+                    ip: parse_ip(&row.get::<_, String>(1)?)?,
                     reason: row.get(2)?,
                     source: row.get::<_, String>(3)?.parse().unwrap_or(BanSource::Manual),
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    expires_at: row.get::<_, Option<String>>(5)?.map(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .unwrap()
-                            .with_timezone(&Utc)
-                    }),
+                    created_at: parse_datetime(&row.get::<_, String>(4)?)?,
+                    expires_at: parse_datetime_opt(row.get::<_, Option<String>>(5)?)?,
                     ban_count: row.get(6)?,
                 })
             })?
@@ -246,7 +264,7 @@ impl Database {
 
     /// Get expired bans for cleanup
     pub fn get_expired_bans(&self) -> Result<Vec<Ban>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
         let now = Utc::now().to_rfc3339();
 
         let mut stmt = conn.prepare(
@@ -258,17 +276,11 @@ impl Database {
             .query_map([now], |row| {
                 Ok(Ban {
                     id: Some(row.get(0)?),
-                    ip: row.get::<_, String>(1)?.parse().unwrap(),
+                    ip: parse_ip(&row.get::<_, String>(1)?)?,
                     reason: row.get(2)?,
                     source: row.get::<_, String>(3)?.parse().unwrap_or(BanSource::Manual),
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(4)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
-                    expires_at: row.get::<_, Option<String>>(5)?.map(|s| {
-                        DateTime::parse_from_rfc3339(&s)
-                            .unwrap()
-                            .with_timezone(&Utc)
-                    }),
+                    created_at: parse_datetime(&row.get::<_, String>(4)?)?,
+                    expires_at: parse_datetime_opt(row.get::<_, Option<String>>(5)?)?,
                     ban_count: row.get(6)?,
                 })
             })?
@@ -281,7 +293,7 @@ impl Database {
 
     /// Record an attack event
     pub fn add_event(&self, event: &AttackEvent) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         conn.execute(
             "INSERT INTO events (ip, timestamp, service, event_type, details, log_line) VALUES (?, ?, ?, ?, ?, ?)",
@@ -305,7 +317,7 @@ impl Database {
         service: &str,
         window_secs: u64,
     ) -> Result<u32> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
         let since = (Utc::now() - chrono::Duration::seconds(window_secs as i64)).to_rfc3339();
 
         let count: u32 = conn.query_row(
@@ -319,7 +331,7 @@ impl Database {
 
     /// Get recent events
     pub fn get_recent_events(&self, limit: u32) -> Result<Vec<AttackEvent>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         let mut stmt = conn.prepare(
             "SELECT id, ip, timestamp, service, event_type, details, log_line
@@ -347,10 +359,8 @@ impl Database {
 
                 Ok(AttackEvent {
                     id: Some(row.get(0)?),
-                    ip: row.get::<_, String>(1)?.parse().unwrap(),
-                    timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(2)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
+                    ip: parse_ip(&row.get::<_, String>(1)?)?,
+                    timestamp: parse_datetime(&row.get::<_, String>(2)?)?,
                     service: row.get(3)?,
                     event_type,
                     details: row.get(5)?,
@@ -366,7 +376,7 @@ impl Database {
 
     /// Save attacker intelligence
     pub fn save_intel(&self, intel: &AttackerIntel) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         conn.execute(
             r#"INSERT OR REPLACE INTO intel (
@@ -410,7 +420,7 @@ impl Database {
 
     /// Get intelligence for an IP
     pub fn get_intel(&self, ip: &str) -> Result<Option<AttackerIntel>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         conn.query_row(
             r#"SELECT ip, gathered_at, country, country_code, city, region,
@@ -423,9 +433,7 @@ impl Database {
             |row| {
                 Ok(AttackerIntel {
                     ip: row.get(0)?,
-                    gathered_at: row
-                        .get::<_, Option<String>>(1)?
-                        .map(|s| DateTime::parse_from_rfc3339(&s).unwrap().with_timezone(&Utc)),
+                    gathered_at: parse_datetime_opt(row.get::<_, Option<String>>(1)?)?,
                     country: row.get(2)?,
                     country_code: row.get(3)?,
                     city: row.get(4)?,
@@ -466,7 +474,7 @@ impl Database {
 
     /// Add IP to whitelist
     pub fn add_whitelist(&self, entry: &WhitelistEntry) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         conn.execute(
             "INSERT OR REPLACE INTO whitelist (ip, comment, created_at) VALUES (?, ?, ?)",
@@ -482,14 +490,14 @@ impl Database {
 
     /// Remove IP from whitelist
     pub fn remove_whitelist(&self, ip: &IpAddr) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
         let rows = conn.execute("DELETE FROM whitelist WHERE ip = ?", [ip.to_string()])?;
         Ok(rows > 0)
     }
 
     /// Check if IP is whitelisted
     pub fn is_whitelisted(&self, ip: &IpAddr) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         let count: u32 = conn.query_row(
             "SELECT COUNT(*) FROM whitelist WHERE ip = ?",
@@ -502,7 +510,7 @@ impl Database {
 
     /// Get all whitelist entries
     pub fn get_whitelist(&self) -> Result<Vec<WhitelistEntry>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         let mut stmt = conn.prepare("SELECT id, ip, comment, created_at FROM whitelist")?;
 
@@ -510,11 +518,9 @@ impl Database {
             .query_map([], |row| {
                 Ok(WhitelistEntry {
                     id: Some(row.get(0)?),
-                    ip: row.get::<_, String>(1)?.parse().unwrap(),
+                    ip: parse_ip(&row.get::<_, String>(1)?)?,
                     comment: row.get(2)?,
-                    created_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
+                    created_at: parse_datetime(&row.get::<_, String>(3)?)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -526,7 +532,7 @@ impl Database {
 
     /// Log an activity
     pub fn log_activity(&self, action: ActivityAction, ip: Option<&IpAddr>, details: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         conn.execute(
             "INSERT INTO activity_log (timestamp, action, ip, details) VALUES (?, ?, ?, ?)",
@@ -543,7 +549,7 @@ impl Database {
 
     /// Get recent activity
     pub fn get_recent_activity(&self, limit: u32) -> Result<Vec<ActivityLog>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
 
         let mut stmt = conn.prepare(
             "SELECT id, timestamp, action, ip, details FROM activity_log ORDER BY timestamp DESC LIMIT ?",
@@ -566,9 +572,7 @@ impl Database {
 
                 Ok(ActivityLog {
                     id: Some(row.get(0)?),
-                    timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
-                        .unwrap()
-                        .with_timezone(&Utc),
+                    timestamp: parse_datetime(&row.get::<_, String>(1)?)?,
                     action,
                     ip: row
                         .get::<_, Option<String>>(3)?
@@ -585,7 +589,7 @@ impl Database {
 
     /// Get attack statistics
     pub fn get_stats(&self) -> Result<AttackStats> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.lock()?;
         let now = Utc::now();
         let today_start = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
         let hour_ago = (now - chrono::Duration::hours(1)).to_rfc3339();

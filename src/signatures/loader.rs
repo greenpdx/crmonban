@@ -125,6 +125,7 @@ pub struct RuleLoader {
     /// Enabled SIDs (from enable.conf)
     enabled_sids: Vec<u32>,
     /// SID modifications
+    #[allow(dead_code)]
     sid_modifications: HashMap<u32, Vec<String>>,
 }
 

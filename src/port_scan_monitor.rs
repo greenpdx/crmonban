@@ -223,7 +223,7 @@ impl PortScanMonitor {
         ip: IpAddr,
         port: u16,
         scan_type: Option<ScanType>,
-        log_line: &str,
+        _log_line: &str,
     ) -> Option<MonitorEvent> {
         let access = self.ip_port_access.entry(ip).or_insert_with(PortAccess::new);
         access.add_port(port);

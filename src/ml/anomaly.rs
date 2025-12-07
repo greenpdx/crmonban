@@ -98,6 +98,7 @@ pub struct AnomalyDetector {
     /// Weight for different detection methods
     zscore_weight: f32,
     iqr_weight: f32,
+    #[allow(dead_code)]
     mahalanobis_weight: f32,
     /// Quick check threshold (skip full analysis if below)
     quick_threshold: f32,
@@ -403,6 +404,7 @@ impl AnomalyDetector {
 
 /// Simple statistical anomaly methods
 pub mod statistical {
+    #[allow(unused_imports)]
     use super::*;
 
     /// Calculate z-score for a value

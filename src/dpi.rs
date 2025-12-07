@@ -687,8 +687,14 @@ pub async fn start_dpi(config: DpiConfig, event_tx: mpsc::Sender<MonitorEvent>) 
                     let data = msg.get_payload();
 
                     let (verdict, threat_info) = {
-                        let mut engine = engine_clone.lock().unwrap();
-                        engine.process_packet(data)
+                        match engine_clone.lock() {
+                            Ok(mut engine) => engine.process_packet(data),
+                            Err(poisoned) => {
+                                // Recover from poisoned mutex
+                                let mut engine = poisoned.into_inner();
+                                engine.process_packet(data)
+                            }
+                        }
                     };
 
                     // Handle detected threats
@@ -727,8 +733,14 @@ pub async fn start_dpi(config: DpiConfig, event_tx: mpsc::Sender<MonitorEvent>) 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            let mut engine = engine_cleanup.lock().unwrap();
-            engine.cleanup_connections();
+            match engine_cleanup.lock() {
+                Ok(mut engine) => engine.cleanup_connections(),
+                Err(poisoned) => {
+                    // Recover from poisoned mutex
+                    let mut engine = poisoned.into_inner();
+                    engine.cleanup_connections();
+                }
+            }
         }
     });
 

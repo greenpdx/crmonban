@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use tabled::{Table, Tabled};
 
 use crmonban::config::{Config, PortAction, PortRule};
+#[cfg(feature = "dbus")]
 use crmonban::dbus::DbusClient;
 use crmonban::intel::format_intel;
 use crmonban::models::BanSource;
@@ -350,6 +351,7 @@ async fn cmd_stop(config: Config) -> Result<()> {
 
 async fn cmd_status(config: Config) -> Result<()> {
     // Try D-Bus first for richer status information
+    #[cfg(feature = "dbus")]
     if config.dbus.enabled {
         if let Ok(client) = DbusClient::connect().await {
             if client.is_daemon_available().await {

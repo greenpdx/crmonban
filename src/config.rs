@@ -7,7 +7,6 @@ use crate::ebpf::EbpfConfig;
 use crate::shared_whitelist::SharedWhitelistConfig;
 use crate::siem::SiemConfig;
 use crate::zones::ZoneConfig;
-use std::net::IpAddr;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +22,9 @@ pub struct Config {
 
     #[serde(default)]
     pub dbus: DbusConfig,
+
+    #[serde(default)]
+    pub display: DisplayConfig,
 
     #[serde(default)]
     pub siem: SiemConfig,
@@ -118,6 +120,7 @@ impl Default for Config {
             nftables: NftablesConfig::default(),
             intel: IntelConfig::default(),
             dbus: DbusConfig::default(),
+            display: DisplayConfig::default(),
             siem: SiemConfig::default(),
             zones: ZoneConfig::default(),
             whitelist: SharedWhitelistConfig::default(),
@@ -309,6 +312,46 @@ impl Default for DbusConfig {
         Self {
             enabled: true,
             system_bus: true,
+        }
+    }
+}
+
+/// Display server (dashboard) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayConfig {
+    /// Enable the display server subprocess
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// HTTP port for the display server
+    #[serde(default = "default_display_port")]
+    pub port: u16,
+
+    /// Path to display server binary (default: auto-detect)
+    #[serde(default)]
+    pub binary_path: Option<String>,
+
+    /// Unix socket path for IPC (default: /run/crmonban/events.sock)
+    #[serde(default)]
+    pub socket_path: Option<String>,
+
+    /// Auto-restart display server on crash
+    #[serde(default = "default_true")]
+    pub auto_restart: bool,
+}
+
+fn default_display_port() -> u16 {
+    3001
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_display_port(),
+            binary_path: None,
+            socket_path: None,
+            auto_restart: true,
         }
     }
 }

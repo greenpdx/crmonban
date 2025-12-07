@@ -1,5 +1,7 @@
 //! Multi-dimensional benchmark matrix
 //!
+//! For packet generation only, all packet processing is in src/
+//!
 //! Tests all combinations affecting runtime flow:
 //! - Latency: Time from event to action
 //! - Throughput: Events/packets per second

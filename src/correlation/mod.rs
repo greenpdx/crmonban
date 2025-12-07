@@ -39,11 +39,9 @@ pub mod incident;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -186,12 +184,15 @@ impl CorrelationEngine {
         }
 
         // 3. Store the event
-        let event_id = event.id;
         self.store_event(event.clone());
 
         // 4. Try to correlate with existing incidents
         if let Some(incident_id) = self.find_matching_incident(&event) {
-            let incident = self.incidents.get_mut(&incident_id).unwrap();
+            // Safety: find_matching_incident only returns IDs that exist in incidents
+            let Some(incident) = self.incidents.get_mut(&incident_id) else {
+                // Should never happen, but handle gracefully
+                return CorrelationResult::Suppressed;
+            };
             incident.add_event(event.clone());
 
             // Check for attack chain progression
@@ -377,8 +378,6 @@ impl CorrelationEngine {
             DetectionType::CnC => "CnC",
             DetectionType::UnauthorizedAccess => "UnauthorizedAccess",
             DetectionType::Custom(_) => "Custom",
-            // Fallback: use format! for other types (rare in hot path)
-            _ => return type_strs.iter().any(|t| format!("{:?}", event_type).contains(t)),
         };
         type_strs.iter().any(|t| type_name.contains(t.as_str()))
     }

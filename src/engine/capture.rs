@@ -128,6 +128,7 @@ impl NfqueueCapture {
         })
     }
 
+    #[allow(dead_code)]
     fn parse_packet(&self, data: &[u8], id: u32) -> Option<Packet> {
         // Parse IP header
         if data.len() < 20 {

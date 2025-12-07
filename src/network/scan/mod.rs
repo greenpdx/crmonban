@@ -18,7 +18,7 @@ pub use burp::BurpScanner;
 pub use runner::ScanRunner;
 
 use std::net::IpAddr;
-use crate::network::{ScanRequest, ScanResult, ScanActions, ToolPaths};
+use crate::network::ScanResult;
 
 /// Trait for all scanners
 pub trait Scanner: Send + Sync {

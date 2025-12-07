@@ -78,7 +78,7 @@ impl ProtocolDetector {
     }
 
     /// Detect protocol from packet payload
-    fn detect_protocol(&self, packet: &Packet, flow: &Flow) -> AppProtocol {
+    fn detect_protocol(&self, packet: &Packet, _flow: &Flow) -> AppProtocol {
         let payload = &packet.payload;
         if payload.is_empty() {
             return AppProtocol::Unknown;
