@@ -1,3 +1,4 @@
+pub mod brute_force;
 pub mod config;
 pub mod database;
 pub mod dbus;
@@ -9,6 +10,7 @@ pub mod malware_detect;
 pub mod models;
 pub mod monitor;
 pub mod port_scan_monitor;
+pub mod scan_detect;
 pub mod shared_whitelist;
 pub mod siem;
 #[cfg(feature = "signatures")]

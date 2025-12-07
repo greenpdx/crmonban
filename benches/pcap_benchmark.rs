@@ -17,8 +17,8 @@ use pcap::Capture;
 use crmonban::core::flow::Flow;
 use crmonban::core::packet::{AppProtocol, IpProtocol, Packet, TcpFlags};
 use crmonban::flow::{FlowConfig, FlowTracker};
-
-use std::collections::{HashMap, HashSet};
+use crmonban::brute_force::BruteForceTracker;
+use crmonban::scan_detect::{PortScanTracker, ScanType};
 
 #[cfg(feature = "signatures")]
 use crmonban::signatures::{SignatureConfig, SignatureEngine, RuleLoader, matcher::PacketContext, ast::Protocol};
@@ -324,159 +324,6 @@ impl LabelStats {
     }
 }
 
-/// Port scan detection - tracks unique destination ports per source IP
-#[derive(Debug)]
-struct PortScanTracker {
-    /// Map of source IP to set of destination ports touched
-    ports_by_source: HashMap<IpAddr, HashSet<u16>>,
-    /// Threshold for number of unique ports to trigger alert
-    port_threshold: usize,
-    /// Commonly targeted ports (weight scans targeting these higher)
-    targeted_ports: HashSet<u16>,
-    /// Detected scans (source IP, port count, targeted port count)
-    detected_scans: Vec<(IpAddr, usize, usize)>,
-    /// Total scan alerts
-    scan_alerts: usize,
-}
-
-impl PortScanTracker {
-    fn new() -> Self {
-        // 40+ commonly targeted ports by hackers/scanners
-        let targeted_ports: HashSet<u16> = [
-            21,    // FTP
-            22,    // SSH
-            23,    // Telnet
-            25,    // SMTP
-            53,    // DNS
-            80,    // HTTP
-            110,   // POP3
-            111,   // RPC/Portmapper
-            135,   // MSRPC
-            139,   // NetBIOS Session
-            143,   // IMAP
-            161,   // SNMP
-            179,   // BGP
-            389,   // LDAP
-            443,   // HTTPS
-            445,   // SMB/CIFS
-            465,   // SMTPS
-            514,   // Syslog
-            587,   // SMTP Submission
-            636,   // LDAPS
-            993,   // IMAPS
-            995,   // POP3S
-            1080,  // SOCKS Proxy
-            1433,  // MSSQL
-            1521,  // Oracle DB
-            1723,  // PPTP VPN
-            2049,  // NFS
-            2082,  // cPanel
-            2083,  // cPanel SSL
-            2181,  // ZooKeeper
-            3306,  // MySQL
-            3389,  // RDP
-            5432,  // PostgreSQL
-            5900,  // VNC
-            5938,  // TeamViewer
-            6379,  // Redis
-            6667,  // IRC
-            8000,  // HTTP Alt
-            8080,  // HTTP Proxy
-            8443,  // HTTPS Alt
-            9200,  // Elasticsearch
-            9300,  // Elasticsearch
-            11211, // Memcached
-            27017, // MongoDB
-            27018, // MongoDB
-        ].into_iter().collect();
-
-        Self {
-            ports_by_source: HashMap::new(),
-            port_threshold: 10,
-            targeted_ports,
-            detected_scans: Vec::new(),
-            scan_alerts: 0,
-        }
-    }
-
-    /// Track a connection attempt and check for scanning
-    fn track(&mut self, src_ip: IpAddr, dst_port: u16, is_syn: bool) -> Option<ScanAlert> {
-        // Only track SYN packets or first connection attempts
-        if !is_syn && !self.ports_by_source.contains_key(&src_ip) {
-            return None;
-        }
-
-        let ports = self.ports_by_source.entry(src_ip).or_insert_with(HashSet::new);
-        ports.insert(dst_port);
-
-        // Check if threshold exceeded
-        if ports.len() >= self.port_threshold {
-            // Count how many are commonly targeted ports
-            let targeted_count = ports.iter()
-                .filter(|p| self.targeted_ports.contains(p))
-                .count();
-
-            // Only alert once per source (when first crossing threshold)
-            if ports.len() == self.port_threshold {
-                self.scan_alerts += 1;
-                self.detected_scans.push((src_ip, ports.len(), targeted_count));
-
-                let scan_type = if targeted_count > ports.len() / 2 {
-                    ScanType::Targeted
-                } else {
-                    ScanType::Horizontal
-                };
-
-                return Some(ScanAlert {
-                    src_ip,
-                    unique_ports: ports.len(),
-                    targeted_ports: targeted_count,
-                    scan_type,
-                });
-            }
-        }
-        None
-    }
-
-    /// Check if a port is commonly targeted
-    fn is_targeted_port(&self, port: u16) -> bool {
-        self.targeted_ports.contains(&port)
-    }
-
-    /// Get total scan alerts
-    fn total_alerts(&self) -> usize {
-        self.scan_alerts
-    }
-
-    /// Get top scanners by unique port count
-    fn top_scanners(&self, limit: usize) -> Vec<(IpAddr, usize)> {
-        let mut scanners: Vec<_> = self.ports_by_source.iter()
-            .map(|(ip, ports)| (*ip, ports.len()))
-            .collect();
-        scanners.sort_by(|a, b| b.1.cmp(&a.1));
-        scanners.truncate(limit);
-        scanners
-    }
-}
-
-/// Type of scan detected
-#[derive(Debug, Clone, Copy)]
-enum ScanType {
-    /// Scanning common/targeted ports specifically
-    Targeted,
-    /// Horizontal scan across many ports
-    Horizontal,
-}
-
-/// Port scan alert
-#[derive(Debug)]
-struct ScanAlert {
-    src_ip: IpAddr,
-    unique_ports: usize,
-    targeted_ports: usize,
-    scan_type: ScanType,
-}
-
 /// Detection statistics for accuracy metrics
 #[derive(Debug, Default)]
 struct DetectionStats {
@@ -490,6 +337,9 @@ struct DetectionStats {
     // Port scan detections
     scan_alerts: usize,
     targeted_scan_alerts: usize,
+
+    // Brute force detections
+    brute_force_alerts: usize,
 
     // Confusion matrix (combined signature + ML)
     true_positives: usize,   // Attack correctly detected
@@ -563,6 +413,7 @@ struct PcapBenchmark {
     // Components
     flow_tracker: Option<FlowTracker>,
     port_scan_tracker: PortScanTracker,
+    brute_force_tracker: BruteForceTracker,
     #[cfg(feature = "signatures")]
     signature_engine: Option<SignatureEngine>,
     #[cfg(feature = "threat-intel")]
@@ -673,6 +524,7 @@ impl PcapBenchmark {
             detection_stats: DetectionStats::new(),
             flow_tracker,
             port_scan_tracker: PortScanTracker::new(),
+            brute_force_tracker: BruteForceTracker::new(),
             #[cfg(feature = "signatures")]
             signature_engine,
             #[cfg(feature = "threat-intel")]
@@ -1011,6 +863,22 @@ impl PcapBenchmark {
         let is_syn = pkt.tcp_flags.as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
         let scan_alert = self.port_scan_tracker.track(pkt.src_ip, pkt.dst_port, is_syn);
 
+        // Brute force tracking - detect repeated failed login attempts
+        let is_fin = pkt.tcp_flags.as_ref().map(|f| f.fin).unwrap_or(false);
+        let is_rst = pkt.tcp_flags.as_ref().map(|f| f.rst).unwrap_or(false);
+        let brute_force_alert = if is_syn {
+            // Session start
+            self.brute_force_tracker.session_start(pkt.src_ip, pkt.dst_ip, pkt.dst_port);
+            None
+        } else if is_fin || is_rst {
+            // Session end - check for brute force pattern
+            self.brute_force_tracker.session_end(pkt.src_ip, pkt.dst_ip, pkt.dst_port, is_rst)
+        } else {
+            // Track packet in session
+            self.brute_force_tracker.session_packet(pkt.src_ip, pkt.dst_ip, pkt.dst_port, pkt.payload.len());
+            None
+        };
+
         let total_time = total_start.elapsed();
 
         // Record timings and detection stats (skip warmup)
@@ -1039,6 +907,11 @@ impl PcapBenchmark {
                 if matches!(alert.scan_type, ScanType::Targeted) {
                     self.detection_stats.targeted_scan_alerts += 1;
                 }
+            }
+
+            // Track brute force alerts
+            if brute_force_alert.is_some() {
+                self.detection_stats.brute_force_alerts += 1;
             }
 
             // Track payload stats
@@ -1383,6 +1256,20 @@ impl PcapBenchmark {
             for (ip, port_count) in top_scanners.iter().take(5) {
                 if *port_count >= 10 {
                     println!("    {} -> {} unique ports", ip, port_count);
+                }
+            }
+        }
+        println!();
+        println!("Brute Force Detection:");
+        println!("  Brute force alerts:   {:>8} (5+ failed attempts in 60s)", d.brute_force_alerts);
+        // Show top brute force targets
+        let top_targets = self.brute_force_tracker.top_targets(5);
+        if !top_targets.is_empty() {
+            println!("  Top targets:");
+            for (src, dst, port, count) in top_targets.iter().take(5) {
+                if *count >= 3 {
+                    let service = self.brute_force_tracker.get_service_name(*port).unwrap_or("Unknown");
+                    println!("    {} -> {}:{} ({}) - {} attempts", src, dst, port, service, count);
                 }
             }
         }

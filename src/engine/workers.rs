@@ -10,8 +10,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, trace};
 use uuid::Uuid;
 
+use crate::brute_force::{BruteForceTracker, BruteForceAlert};
 use crate::core::event::{DetectionEvent, DetectionType, DetectionAction, Severity};
 use crate::core::packet::Packet;
+use crate::scan_detect::{PortScanTracker, ScanAlert, ScanType};
 
 use super::pipeline::PipelineConfig;
 
@@ -61,6 +63,10 @@ pub struct WorkerPool {
     total_time_ns: Arc<AtomicU64>,
     /// Start time
     start_time: Instant,
+    /// Port scan tracker
+    port_scan_tracker: PortScanTracker,
+    /// Brute force tracker
+    brute_force_tracker: BruteForceTracker,
 }
 
 impl WorkerPool {
@@ -73,6 +79,8 @@ impl WorkerPool {
             busy_time_ns: Arc::new(AtomicU64::new(0)),
             total_time_ns: Arc::new(AtomicU64::new(0)),
             start_time: Instant::now(),
+            port_scan_tracker: PortScanTracker::new(),
+            brute_force_tracker: BruteForceTracker::new(),
         }
     }
 
@@ -112,6 +120,72 @@ impl WorkerPool {
         if config.enable_ml {
             // ML detection would go here on flow completion
             trace!("ML detection check");
+        }
+
+        // Port scan detection
+        if config.enable_scan_detect {
+            let is_syn = packet.tcp_flags.as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
+            if let Some(alert) = self.port_scan_tracker.track(packet.src_ip, packet.dst_port, is_syn) {
+                let severity = match alert.severity() {
+                    s if s >= 8 => Severity::Critical,
+                    s if s >= 6 => Severity::High,
+                    s if s >= 4 => Severity::Medium,
+                    _ => Severity::Low,
+                };
+                let scan_type_str = match alert.scan_type {
+                    ScanType::Targeted => "targeted",
+                    ScanType::Horizontal => "horizontal",
+                };
+                events.push(
+                    DetectionEvent::new(
+                        DetectionType::PortScan,
+                        severity,
+                        packet.src_ip,
+                        packet.dst_ip,
+                        format!("{} port scan: {} unique ports", scan_type_str, alert.unique_ports),
+                    )
+                    .with_detector("scan_detector")
+                    .with_ports(packet.src_port, packet.dst_port)
+                );
+            }
+        }
+
+        // Brute force detection
+        if config.enable_brute_force {
+            let is_syn = packet.tcp_flags.as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
+            let is_fin = packet.tcp_flags.as_ref().map(|f| f.fin).unwrap_or(false);
+            let is_rst = packet.tcp_flags.as_ref().map(|f| f.rst).unwrap_or(false);
+
+            let brute_force_alert = if is_syn {
+                self.brute_force_tracker.session_start(packet.src_ip, packet.dst_ip, packet.dst_port);
+                None
+            } else if is_fin || is_rst {
+                self.brute_force_tracker.session_end(packet.src_ip, packet.dst_ip, packet.dst_port, is_rst)
+            } else {
+                self.brute_force_tracker.session_packet(packet.src_ip, packet.dst_ip, packet.dst_port, packet.payload.len());
+                None
+            };
+
+            if let Some(alert) = brute_force_alert {
+                let severity = match alert.severity() {
+                    s if s >= 8 => Severity::Critical,
+                    s if s >= 6 => Severity::High,
+                    s if s >= 4 => Severity::Medium,
+                    _ => Severity::Low,
+                };
+                events.push(
+                    DetectionEvent::new(
+                        DetectionType::BruteForce,
+                        severity,
+                        alert.src_ip,
+                        alert.dst_ip,
+                        format!("Brute force attack on {} ({}): {} attempts",
+                            alert.service, alert.dst_port, alert.attempt_count),
+                    )
+                    .with_detector("brute_force_detector")
+                    .with_ports(packet.src_port, alert.dst_port)
+                );
+            }
         }
 
         // Update counters
@@ -173,6 +247,16 @@ impl WorkerPool {
     /// Get number of workers
     pub fn worker_count(&self) -> usize {
         self.config.actual_workers()
+    }
+
+    /// Get reference to port scan tracker
+    pub fn port_scan_tracker(&self) -> &PortScanTracker {
+        &self.port_scan_tracker
+    }
+
+    /// Get reference to brute force tracker
+    pub fn brute_force_tracker(&self) -> &BruteForceTracker {
+        &self.brute_force_tracker
     }
 }
 

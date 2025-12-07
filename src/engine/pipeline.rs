@@ -34,6 +34,10 @@ pub struct PipelineConfig {
     pub enable_intel: bool,
     /// Enable correlation
     pub enable_correlation: bool,
+    /// Enable port scan detection
+    pub enable_scan_detect: bool,
+    /// Enable brute force detection
+    pub enable_brute_force: bool,
     /// Stats update interval (seconds)
     pub stats_interval_secs: u64,
 }
@@ -48,6 +52,8 @@ impl Default for PipelineConfig {
             enable_ml: true,
             enable_intel: true,
             enable_correlation: true,
+            enable_scan_detect: true,
+            enable_brute_force: true,
             stats_interval_secs: 1,
         }
     }
@@ -153,6 +159,10 @@ pub enum PipelineStage {
     ThreatIntel,
     /// ML/Anomaly detection
     MLDetection,
+    /// Port scan detection
+    ScanDetection,
+    /// Brute force detection
+    BruteForceDetection,
     /// Correlation
     Correlation,
 }
@@ -166,6 +176,8 @@ impl PipelineStage {
             PipelineStage::SignatureMatching,
             PipelineStage::ThreatIntel,
             PipelineStage::MLDetection,
+            PipelineStage::ScanDetection,
+            PipelineStage::BruteForceDetection,
             PipelineStage::Correlation,
         ]
     }
@@ -178,6 +190,8 @@ impl PipelineStage {
             PipelineStage::SignatureMatching => "signature_matching",
             PipelineStage::ThreatIntel => "threat_intel",
             PipelineStage::MLDetection => "ml_detection",
+            PipelineStage::ScanDetection => "scan_detection",
+            PipelineStage::BruteForceDetection => "brute_force_detection",
             PipelineStage::Correlation => "correlation",
         }
     }
