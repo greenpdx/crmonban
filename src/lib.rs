@@ -11,7 +11,6 @@ pub mod models;
 pub mod monitor;
 pub mod port_scan_monitor;
 pub mod scan_detect;
-pub mod scan_detect_legacy;
 pub mod shared_whitelist;
 pub mod siem;
 #[cfg(feature = "signatures")]

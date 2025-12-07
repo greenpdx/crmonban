@@ -186,6 +186,9 @@ pub struct SourceBehavior {
 
     /// Tags applied by rules
     pub tags: HashSet<String>,
+
+    /// Stealth scan type counts (null, fin, xmas, maimon, ack_only)
+    pub stealth_scan_counts: HashMap<String, u32>,
 }
 
 /// Result of active verification (nmap probe)
@@ -220,7 +223,13 @@ impl SourceBehavior {
             verified: false,
             verification_result: None,
             tags: HashSet::new(),
+            stealth_scan_counts: HashMap::new(),
         }
+    }
+
+    /// Record a stealth scan packet type
+    pub fn record_stealth_scan(&mut self, scan_type: &str) {
+        *self.stealth_scan_counts.entry(scan_type.to_string()).or_insert(0) += 1;
     }
 
     /// Record a SYN packet

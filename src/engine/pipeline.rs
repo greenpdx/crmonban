@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn test_pipeline_stages() {
         let stages = PipelineStage::all();
-        assert_eq!(stages.len(), 6);
+        assert_eq!(stages.len(), 8); // FlowTracker, ProtocolAnalysis, SignatureMatching, ThreatIntel, MLDetection, ScanDetection, BruteForceDetection, Correlation
         assert_eq!(stages[0], PipelineStage::FlowTracker);
     }
 

@@ -6,6 +6,7 @@ pub mod connection;
 pub mod geographic;
 pub mod network_health;
 pub mod reputation;
+pub mod stealth;
 pub mod temporal;
 
 pub use geographic::GeoInfo;
@@ -101,8 +102,16 @@ pub struct EvaluationContext<'a> {
     pub is_ack: bool,
     /// Is this a RST packet?
     pub is_rst: bool,
+    /// Is this a FIN packet?
+    pub is_fin: bool,
+    /// Is this a PSH packet?
+    pub is_psh: bool,
+    /// Is this a URG packet?
+    pub is_urg: bool,
     /// Packet payload size
     pub payload_size: usize,
+    /// Destination port (alias for current_port for clarity)
+    pub dst_port: Option<u16>,
     /// TTL value (if available)
     pub ttl: Option<u8>,
     /// TCP options (if available)
@@ -137,7 +146,11 @@ impl<'a> EvaluationContext<'a> {
             is_syn_ack: false,
             is_ack: false,
             is_rst: false,
+            is_fin: false,
+            is_psh: false,
+            is_urg: false,
             payload_size: 0,
+            dst_port: None,
             ttl: None,
             tcp_options: None,
             geo_info: None,
@@ -151,6 +164,7 @@ impl<'a> EvaluationContext<'a> {
 
     pub fn with_port(mut self, port: u16) -> Self {
         self.current_port = Some(port);
+        self.dst_port = Some(port);
         self
     }
 
@@ -172,6 +186,33 @@ impl<'a> EvaluationContext<'a> {
     pub fn with_rst(mut self) -> Self {
         self.is_rst = true;
         self
+    }
+
+    pub fn with_fin(mut self) -> Self {
+        self.is_fin = true;
+        self
+    }
+
+    pub fn with_psh(mut self) -> Self {
+        self.is_psh = true;
+        self
+    }
+
+    pub fn with_urg(mut self) -> Self {
+        self.is_urg = true;
+        self
+    }
+
+    /// Get TCP flags as a TcpFlagSet for stealth scan detection
+    pub fn tcp_flags(&self) -> Option<stealth::TcpFlagSet> {
+        Some(stealth::TcpFlagSet {
+            syn: self.is_syn,
+            ack: self.is_ack,
+            fin: self.is_fin,
+            rst: self.is_rst,
+            psh: self.is_psh,
+            urg: self.is_urg,
+        })
     }
 
     pub fn with_payload(mut self, size: usize) -> Self {
@@ -243,6 +284,11 @@ impl RuleRegistry {
         registry.register(Box::new(connection::ClosedPortRstRule));
         registry.register(Box::new(connection::CompletedHandshakeRule));
         registry.register(Box::new(connection::DataExchangedRule));
+
+        // Add stealth scan detection rules
+        for rule in stealth::stealth_rules() {
+            registry.register(rule);
+        }
 
         registry
     }

@@ -169,6 +169,7 @@ impl ScanDetectEngine {
     }
 
     /// Process a packet with full details
+    #[allow(clippy::too_many_arguments)]
     pub fn process_packet(
         &mut self,
         src_ip: IpAddr,
@@ -177,6 +178,27 @@ impl ScanDetectEngine {
         is_syn_ack: bool,
         is_ack: bool,
         is_rst: bool,
+        payload_size: usize,
+        ttl: Option<u8>,
+        _tcp_options: Option<&[u8]>,
+    ) -> Option<ScanAlert> {
+        // Extended version with all flags
+        self.process_packet_full(src_ip, dst_port, is_syn, is_syn_ack, is_ack, is_rst, false, false, false, payload_size, ttl, _tcp_options)
+    }
+
+    /// Process a packet with all TCP flags for stealth scan detection
+    #[allow(clippy::too_many_arguments)]
+    pub fn process_packet_full(
+        &mut self,
+        src_ip: IpAddr,
+        dst_port: u16,
+        is_syn: bool,
+        is_syn_ack: bool,
+        is_ack: bool,
+        is_rst: bool,
+        is_fin: bool,
+        is_psh: bool,
+        is_urg: bool,
         payload_size: usize,
         ttl: Option<u8>,
         _tcp_options: Option<&[u8]>,
@@ -196,10 +218,31 @@ impl ScanDetectEngine {
             behavior.reset();
         }
 
+        // Detect stealth scan types
+        let is_null = !is_syn && !is_ack && !is_fin && !is_rst && !is_psh && !is_urg;
+        let is_fin_only = !is_syn && !is_ack && is_fin && !is_rst && !is_psh && !is_urg;
+        let is_xmas = !is_syn && !is_ack && is_fin && !is_rst && is_psh && is_urg;
+        let is_maimon = !is_syn && is_ack && is_fin && !is_rst && !is_psh && !is_urg;
+        let is_ack_only = !is_syn && is_ack && !is_fin && !is_rst && !is_psh && !is_urg;
+
+        // Record stealth scan types
+        if is_null {
+            behavior.record_stealth_scan("null");
+        } else if is_xmas {
+            behavior.record_stealth_scan("xmas");
+        } else if is_fin_only {
+            behavior.record_stealth_scan("fin");
+        } else if is_maimon {
+            behavior.record_stealth_scan("maimon");
+        } else if is_ack_only && !behavior.connections.contains_key(&dst_port) {
+            // ACK without prior connection
+            behavior.record_stealth_scan("ack_only");
+        }
+
         // Update behavior based on packet type
         if is_syn {
             behavior.record_syn(dst_port);
-        } else if is_ack && !is_syn_ack {
+        } else if is_ack && !is_syn_ack && !is_fin {
             behavior.record_established(dst_port);
             if payload_size > 0 {
                 behavior.record_data(dst_port, payload_size as u64);
@@ -219,6 +262,9 @@ impl ScanDetectEngine {
         let ctx = if is_syn_ack { ctx.with_syn_ack() } else { ctx };
         let ctx = if is_ack { ctx.with_ack() } else { ctx };
         let ctx = if is_rst { ctx.with_rst() } else { ctx };
+        let ctx = if is_fin { ctx.with_fin() } else { ctx };
+        let ctx = if is_psh { ctx.with_psh() } else { ctx };
+        let ctx = if is_urg { ctx.with_urg() } else { ctx };
         let ctx = ctx.with_payload(payload_size);
         let ctx = if let Some(t) = ttl { ctx.with_ttl(t) } else { ctx };
 
