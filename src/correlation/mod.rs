@@ -188,7 +188,11 @@ impl CorrelationEngine {
 
         // 4. Try to correlate with existing incidents
         if let Some(incident_id) = self.find_matching_incident(&event) {
-            let incident = self.incidents.get_mut(&incident_id).unwrap();
+            // Safety: find_matching_incident only returns IDs that exist in incidents
+            let Some(incident) = self.incidents.get_mut(&incident_id) else {
+                // Should never happen, but handle gracefully
+                return CorrelationResult::Suppressed;
+            };
             incident.add_event(event.clone());
 
             // Check for attack chain progression
