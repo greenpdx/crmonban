@@ -1,0 +1,56 @@
+# Local brute force detection rules
+# These use threshold tracking to detect repeated auth attempts
+
+# SSH Brute Force - detect SSH connections, threshold 5 in 60 seconds
+alert tcp any any -> any 22 (msg:"LOCAL SSH Brute Force Attempt"; flow:to_server; content:"SSH-"; depth:4; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000001; rev:1; priority:1;)
+
+# FTP Brute Force - detect USER commands, threshold 5 in 60 seconds
+alert tcp any any -> any 21 (msg:"LOCAL FTP Brute Force Attempt"; flow:to_server,established; content:"USER "; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000002; rev:1; priority:1;)
+
+# FTP PASS Brute Force - detect PASS commands
+alert tcp any any -> any 21 (msg:"LOCAL FTP Password Brute Force"; flow:to_server,established; content:"PASS "; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000003; rev:1; priority:1;)
+
+# Telnet Brute Force - detect telnet connections
+alert tcp any any -> any 23 (msg:"LOCAL Telnet Brute Force Attempt"; flow:to_server; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000004; rev:1; priority:1;)
+
+# HTTP Basic Auth Brute Force - detect Authorization header
+alert tcp any any -> any 80 (msg:"LOCAL HTTP Basic Auth Brute Force"; flow:to_server,established; content:"Authorization: Basic"; nocase; threshold:type both, track by_src, count 10, seconds 60; classtype:attempted-admin; sid:9000005; rev:1; priority:1;)
+
+# HTTP Form Login Brute Force - detect login form POSTs
+alert tcp any any -> any 80 (msg:"LOCAL HTTP Form Login Brute Force"; flow:to_server,established; content:"POST"; http_method; content:"password"; nocase; threshold:type both, track by_src, count 10, seconds 60; classtype:attempted-admin; sid:9000006; rev:1; priority:1;)
+
+# MySQL Brute Force - detect MySQL auth attempts
+alert tcp any any -> any 3306 (msg:"LOCAL MySQL Brute Force Attempt"; flow:to_server; content:"mysql_native_password"; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000007; rev:1; priority:1;)
+
+# PostgreSQL Brute Force - detect PostgreSQL startup messages
+alert tcp any any -> any 5432 (msg:"LOCAL PostgreSQL Brute Force Attempt"; flow:to_server; content:"user"; content:"database"; distance:0; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000008; rev:1; priority:1;)
+
+# SMTP Auth Brute Force
+alert tcp any any -> any 25 (msg:"LOCAL SMTP Auth Brute Force"; flow:to_server,established; content:"AUTH "; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000009; rev:1; priority:1;)
+
+# POP3 Brute Force
+alert tcp any any -> any 110 (msg:"LOCAL POP3 Brute Force Attempt"; flow:to_server,established; content:"USER "; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000010; rev:1; priority:1;)
+
+# IMAP Brute Force
+alert tcp any any -> any 143 (msg:"LOCAL IMAP Login Brute Force"; flow:to_server,established; content:" LOGIN "; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000011; rev:1; priority:1;)
+
+# RDP Brute Force - detect RDP cookie/auth
+alert tcp any any -> any 3389 (msg:"LOCAL RDP Brute Force Attempt"; flow:to_server; content:"Cookie: mstshash="; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000012; rev:1; priority:1;)
+
+# VNC Brute Force
+alert tcp any any -> any 5900 (msg:"LOCAL VNC Brute Force Attempt"; flow:to_server; content:"RFB "; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000013; rev:1; priority:1;)
+
+# Redis Auth Brute Force
+alert tcp any any -> any 6379 (msg:"LOCAL Redis Auth Brute Force"; flow:to_server,established; content:"AUTH"; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000014; rev:1; priority:1;)
+
+# MongoDB Brute Force
+alert tcp any any -> any 27017 (msg:"LOCAL MongoDB Auth Brute Force"; flow:to_server; content:"authenticate"; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000015; rev:1; priority:1;)
+
+# LDAP Bind Brute Force
+alert tcp any any -> any 389 (msg:"LOCAL LDAP Bind Brute Force"; flow:to_server; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000016; rev:1; priority:1;)
+
+# SMB Brute Force
+alert tcp any any -> any 445 (msg:"LOCAL SMB Auth Brute Force"; flow:to_server; content:"NTLMSSP"; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000017; rev:1; priority:1;)
+
+# Generic high port connection flood (port sweep)
+alert tcp any any -> any 1:65535 (msg:"LOCAL Port Sweep Detection"; flags:S; threshold:type both, track by_src, count 20, seconds 30; classtype:attempted-recon; sid:9000050; rev:1; priority:2;)
