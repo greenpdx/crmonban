@@ -1,3 +1,14 @@
+pub mod batched_writer;
+
+pub use batched_writer::{
+    BatchedWriter, BatchedWriterConfig, BatchedWriterHandle,
+    FlowRecord, IntervalStats,
+};
+
+// Re-export detection types from core when flow-tracking is enabled
+#[cfg(feature = "flow-tracking")]
+pub use batched_writer::{DetectionEvent, DetectionType, Severity};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
@@ -155,6 +166,70 @@ impl Database {
                 details TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_log(timestamp);
+
+            -- Detection events table (for audit trail)
+            CREATE TABLE IF NOT EXISTS detection_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                detection_type TEXT NOT NULL,
+                src_ip TEXT NOT NULL,
+                dst_ip TEXT,
+                src_port INTEGER,
+                dst_port INTEGER,
+                protocol TEXT,
+                severity TEXT NOT NULL,
+                rule_id TEXT,
+                rule_name TEXT,
+                score REAL,
+                details TEXT,
+                raw_packet_hash TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_detection_timestamp ON detection_events(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_detection_src_ip ON detection_events(src_ip);
+            CREATE INDEX IF NOT EXISTS idx_detection_type ON detection_events(detection_type);
+            CREATE INDEX IF NOT EXISTS idx_detection_severity ON detection_events(severity);
+
+            -- Detection stats table (aggregated per minute)
+            CREATE TABLE IF NOT EXISTS detection_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                interval_secs INTEGER NOT NULL DEFAULT 60,
+                packets_processed INTEGER NOT NULL DEFAULT 0,
+                bytes_processed INTEGER NOT NULL DEFAULT 0,
+                signature_matches INTEGER NOT NULL DEFAULT 0,
+                ml_anomalies INTEGER NOT NULL DEFAULT 0,
+                port_scan_alerts INTEGER NOT NULL DEFAULT 0,
+                brute_force_alerts INTEGER NOT NULL DEFAULT 0,
+                threat_intel_hits INTEGER NOT NULL DEFAULT 0,
+                flows_tracked INTEGER NOT NULL DEFAULT 0,
+                avg_latency_us REAL,
+                max_latency_us REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_stats_timestamp ON detection_stats(timestamp);
+
+            -- Flow records table (for network forensics)
+            CREATE TABLE IF NOT EXISTS flow_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                flow_id TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT,
+                src_ip TEXT NOT NULL,
+                dst_ip TEXT NOT NULL,
+                src_port INTEGER NOT NULL,
+                dst_port INTEGER NOT NULL,
+                protocol TEXT NOT NULL,
+                packets_fwd INTEGER NOT NULL DEFAULT 0,
+                packets_bwd INTEGER NOT NULL DEFAULT 0,
+                bytes_fwd INTEGER NOT NULL DEFAULT 0,
+                bytes_bwd INTEGER NOT NULL DEFAULT 0,
+                flags TEXT,
+                state TEXT,
+                app_protocol TEXT,
+                detection_flags TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_flow_start ON flow_records(start_time);
+            CREATE INDEX IF NOT EXISTS idx_flow_src ON flow_records(src_ip);
+            CREATE INDEX IF NOT EXISTS idx_flow_dst ON flow_records(dst_ip);
             "#,
         )?;
 

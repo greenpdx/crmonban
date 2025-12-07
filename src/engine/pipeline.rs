@@ -13,6 +13,7 @@ use tracing::debug;
 
 use crate::core::event::DetectionEvent;
 use crate::core::packet::Packet;
+use crate::database::{BatchedWriterHandle, IntervalStats};
 
 use super::workers::{WorkerPool, WorkerConfig};
 use super::EngineStats;
@@ -67,6 +68,8 @@ pub struct Pipeline {
     packet_rx: Receiver<Packet>,
     /// Event output channel
     event_tx: mpsc::Sender<DetectionEvent>,
+    /// Optional batched writer for database persistence
+    db_writer: Option<BatchedWriterHandle>,
 }
 
 impl Pipeline {
@@ -80,7 +83,14 @@ impl Pipeline {
             config,
             packet_rx,
             event_tx,
+            db_writer: None,
         }
+    }
+
+    /// Set the database writer for event persistence
+    pub fn with_db_writer(mut self, writer: BatchedWriterHandle) -> Self {
+        self.db_writer = Some(writer);
+        self
     }
 
     /// Run the pipeline
@@ -95,20 +105,38 @@ impl Pipeline {
         // Processing loop
         let mut last_stats = Instant::now();
         let mut packets_this_interval = 0u64;
+        let mut bytes_this_interval = 0u64;
         let mut events_this_interval = 0u64;
+        let mut latency_sum_us = 0u64;
+        let mut latency_max_us = 0u64;
 
         loop {
             // Try to receive a packet with timeout
             match self.packet_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(packet) => {
+                    let packet_start = Instant::now();
                     packets_this_interval += 1;
+                    bytes_this_interval += packet.raw_len as u64;
 
                     // Process packet through worker pool
                     let events = worker_pool.process(packet, &self.config);
 
-                    // Send events
+                    // Record latency
+                    let latency_us = packet_start.elapsed().as_micros() as u64;
+                    latency_sum_us += latency_us;
+                    if latency_us > latency_max_us {
+                        latency_max_us = latency_us;
+                    }
+
+                    // Send events and record to database
                     for event in events {
                         events_this_interval += 1;
+
+                        // Record to database if writer is available
+                        if let Some(ref writer) = self.db_writer {
+                            writer.record_event(event.clone());
+                        }
+
                         if self.event_tx.send(event).await.is_err() {
                             // Channel closed
                             return Ok(());
@@ -136,8 +164,23 @@ impl Pipeline {
                 s.events_per_second = events_this_interval as f64 / elapsed;
                 s.worker_utilization = worker_pool.utilization();
 
+                // Record interval stats to database
+                if let Some(ref writer) = self.db_writer {
+                    let mut interval_stats = IntervalStats::new(self.config.stats_interval_secs as u32);
+                    interval_stats.packets_processed = packets_this_interval;
+                    interval_stats.bytes_processed = bytes_this_interval;
+                    interval_stats.signature_matches = events_this_interval; // Simplified
+                    interval_stats.latency_sum_us = latency_sum_us;
+                    interval_stats.latency_count = packets_this_interval;
+                    interval_stats.latency_max_us = latency_max_us;
+                    writer.record_stats(interval_stats);
+                }
+
                 packets_this_interval = 0;
+                bytes_this_interval = 0;
                 events_this_interval = 0;
+                latency_sum_us = 0;
+                latency_max_us = 0;
                 last_stats = Instant::now();
             }
         }

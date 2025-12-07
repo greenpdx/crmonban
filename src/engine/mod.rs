@@ -53,6 +53,7 @@ use tracing::{error, info, warn};
 
 use crate::core::event::DetectionEvent;
 use crate::core::packet::Packet;
+use crate::database::BatchedWriterHandle;
 
 pub use capture::{PacketCapture, CaptureConfig, CaptureMethod};
 pub use pipeline::{Pipeline, PipelineConfig};
@@ -134,6 +135,8 @@ pub struct PacketEngine {
     event_tx: Option<mpsc::Sender<DetectionEvent>>,
     /// Shutdown signal
     shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
+    /// Optional database writer for event persistence
+    db_writer: Option<BatchedWriterHandle>,
 }
 
 impl PacketEngine {
@@ -145,12 +148,18 @@ impl PacketEngine {
             stats: Arc::new(RwLock::new(EngineStats::default())),
             event_tx: None,
             shutdown_tx: None,
+            db_writer: None,
         }
     }
 
     /// Set event output channel
     pub fn set_event_channel(&mut self, tx: mpsc::Sender<DetectionEvent>) {
         self.event_tx = Some(tx);
+    }
+
+    /// Set database writer for event persistence
+    pub fn set_db_writer(&mut self, writer: BatchedWriterHandle) {
+        self.db_writer = Some(writer);
     }
 
     /// Get current state
@@ -201,12 +210,15 @@ impl PacketEngine {
             tx
         });
 
-        // Create pipeline
-        let pipeline = Pipeline::new(
+        // Create pipeline with optional database writer
+        let mut pipeline = Pipeline::new(
             self.config.pipeline.clone(),
             packet_rx,
             event_tx.clone(),
         );
+        if let Some(ref writer) = self.db_writer {
+            pipeline = pipeline.with_db_writer(writer.clone());
+        }
 
         // Create action executor
         let _action_executor = ActionExecutor::new(self.config.action.clone());
