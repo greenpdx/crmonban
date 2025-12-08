@@ -582,8 +582,8 @@ impl IocCache {
     /// Save cache to disk
     pub fn save_to_disk(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::create(path)?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
+        let mut writer = BufWriter::new(file);
+        bincode::serde::encode_into_std_write(self, &mut writer, bincode::config::standard())?;
         info!("Saved {} IOCs to cache file", self.total_count());
         Ok(())
     }
@@ -591,8 +591,8 @@ impl IocCache {
     /// Load cache from disk
     pub fn load_from_disk(path: &Path) -> anyhow::Result<Self> {
         let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        let mut cache: Self = bincode::deserialize_from(reader)?;
+        let mut reader = BufReader::new(file);
+        let mut cache: Self = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())?;
 
         // Rebuild bloom filters (not serialized)
         cache.rebuild_bloom_filters();

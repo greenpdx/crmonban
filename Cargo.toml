@@ -35,7 +35,7 @@ parking_lot = { version = "*", optional = true }
 md5 = { version = "*", optional = true }
 
 # Threat intelligence dependencies (optional)
-bincode = { version = "1", optional = true }
+bincode = { version = "2", optional = true, features = ["serde"] }
 async-trait = { version = "*", optional = true }
 
 # ML/Anomaly detection dependencies (optional)
@@ -67,7 +67,7 @@ dirs-next = "*"
 
 # Unix utilities
 libc = "*"
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.30", features = ["signal"] }
 
 # Logging
 tracing = "*"
@@ -83,9 +83,6 @@ ipnetwork = { version = "*", features = ["serde"] }
 # DNS lookups
 trust-dns-resolver = "*"
 
-# Async utilities
-futures = "*"
-
 # PID file and daemon
 daemonize = "*"
 
@@ -95,9 +92,6 @@ zbus = { version = "*", optional = true }
 # SIEM export
 uuid = { version = "*", features = ["v4", "serde"] }
 hostname = "*"
-
-# Zone config parsing
-serde_yaml = "*"
 
 # Pretty tables for CLI output
 tabled = "*"

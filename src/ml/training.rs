@@ -80,16 +80,16 @@ impl TrainingData {
     /// Save to disk
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::create(path)?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
+        let mut writer = BufWriter::new(file);
+        bincode::serde::encode_into_std_write(self, &mut writer, bincode::config::standard())?;
         Ok(())
     }
 
     /// Load from disk
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        let data: Self = bincode::deserialize_from(reader)?;
+        let mut reader = BufReader::new(file);
+        let data: Self = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())?;
         Ok(data)
     }
 
@@ -134,16 +134,16 @@ impl TrainedModel {
     /// Save model to disk
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::create(path)?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
+        let mut writer = BufWriter::new(file);
+        bincode::serde::encode_into_std_write(self, &mut writer, bincode::config::standard())?;
         Ok(())
     }
 
     /// Load model from disk
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        let model: Self = bincode::deserialize_from(reader)?;
+        let mut reader = BufReader::new(file);
+        let model: Self = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())?;
         Ok(model)
     }
 }

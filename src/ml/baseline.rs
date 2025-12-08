@@ -361,16 +361,16 @@ impl Baseline {
     /// Save baseline to disk
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::create(path)?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, self)?;
+        let mut writer = BufWriter::new(file);
+        bincode::serde::encode_into_std_write(self, &mut writer, bincode::config::standard())?;
         Ok(())
     }
 
     /// Load baseline from disk
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let file = File::open(path)?;
-        let reader = BufReader::new(file);
-        let baseline: Self = bincode::deserialize_from(reader)?;
+        let mut reader = BufReader::new(file);
+        let baseline: Self = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())?;
         Ok(baseline)
     }
 

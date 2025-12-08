@@ -172,33 +172,17 @@ impl ZoneManager {
     pub fn load_from_file(&mut self, path: &PathBuf) -> anyhow::Result<()> {
         let content = std::fs::read_to_string(path)?;
 
-        // Try YAML first
-        if path.extension().map(|e| e == "yaml" || e == "yml").unwrap_or(false) {
-            #[derive(Deserialize)]
-            struct FirewallConfig {
-                zones: Option<Vec<Zone>>,
-            }
+        // Parse as TOML
+        #[derive(Deserialize)]
+        struct TomlConfig {
+            zones: Option<Vec<Zone>>,
+        }
 
-            let config: FirewallConfig = serde_yaml::from_str(&content)?;
-            if let Some(zones) = config.zones {
-                for zone in zones {
-                    info!("Loaded zone '{}' from {}", zone.name, path.display());
-                    self.zones_by_name.insert(zone.name.clone(), zone);
-                }
-            }
-        } else {
-            // Try TOML
-            #[derive(Deserialize)]
-            struct TomlConfig {
-                zones: Option<Vec<Zone>>,
-            }
-
-            let config: TomlConfig = toml::from_str(&content)?;
-            if let Some(zones) = config.zones {
-                for zone in zones {
-                    info!("Loaded zone '{}' from {}", zone.name, path.display());
-                    self.zones_by_name.insert(zone.name.clone(), zone);
-                }
+        let config: TomlConfig = toml::from_str(&content)?;
+        if let Some(zones) = config.zones {
+            for zone in zones {
+                info!("Loaded zone '{}' from {}", zone.name, path.display());
+                self.zones_by_name.insert(zone.name.clone(), zone);
             }
         }
 

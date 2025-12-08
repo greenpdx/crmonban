@@ -240,8 +240,8 @@ impl MLStorage {
         }
 
         let file = File::create(&path)?;
-        let writer = BufWriter::new(file);
-        bincode::serialize_into(writer, model)?;
+        let mut writer = BufWriter::new(file);
+        bincode::serde::encode_into_std_write(model, &mut writer, bincode::config::standard())?;
 
         info!("Saved model '{}' to {:?}", name, path);
         Ok(())
@@ -256,8 +256,8 @@ impl MLStorage {
         }
 
         let file = File::open(&path)?;
-        let reader = BufReader::new(file);
-        let model: IsolationForest = bincode::deserialize_from(reader)?;
+        let mut reader = BufReader::new(file);
+        let model: IsolationForest = bincode::serde::decode_from_std_read(&mut reader, bincode::config::standard())?;
 
         info!("Loaded model '{}' from {:?}", name, path);
         Ok(Some(model))

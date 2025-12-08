@@ -1257,8 +1257,37 @@ async fn start_packet_engine(
 
     // Create flow tracker if enabled
     #[cfg(feature = "flow-tracking")]
-    let _flow_tracker = if config.flow_tracking {
+    let mut flow_tracker = if config.flow_tracking {
+        info!("Flow tracking enabled");
         Some(flow::FlowTracker::new(flow::FlowConfig::default()))
+    } else {
+        None
+    };
+
+    // Create ML engine if enabled
+    #[cfg(feature = "ml-detection")]
+    let mut ml_engine = if config.ml_detection {
+        info!("ML anomaly detection enabled");
+        let mut engine = ml::MLEngine::default();
+        // Try to load existing model
+        if let Err(e) = engine.load_model() {
+            debug!("No existing ML model: {}", e);
+        }
+        Some(engine)
+    } else {
+        None
+    };
+
+    // Create threat intel engine if enabled
+    #[cfg(feature = "threat-intel")]
+    let intel_engine = if config.threat_intel {
+        info!("Threat intelligence enabled");
+        let engine = threat_intel::IntelEngineBuilder::new()
+            .with_default_feeds()
+            .build();
+        // Initial cache load
+        let _ = engine.load_cache();
+        Some(engine)
     } else {
         None
     };
@@ -1272,9 +1301,17 @@ async fn start_packet_engine(
     let mut timing_capture_us: u64 = 0;
     let mut timing_context_us: u64 = 0;
     let mut timing_match_us: u64 = 0;
+    let mut timing_flow_us: u64 = 0;
+    let mut timing_ml_us: u64 = 0;
+    let mut timing_intel_us: u64 = 0;
     let mut timing_event_us: u64 = 0;
     let mut timing_total_us: u64 = 0;
     let mut timing_samples: u64 = 0;
+
+    // Statistics counters
+    let mut ml_anomaly_count: u64 = 0;
+    let mut threat_intel_hits: u64 = 0;
+    let mut flows_tracked: u64 = 0;
 
     // Main capture loop
     loop {
@@ -1295,12 +1332,15 @@ async fn start_packet_engine(
                     let avg_capture = timing_capture_us / timing_samples.max(1);
                     let avg_context = timing_context_us / timing_samples.max(1);
                     let avg_match = timing_match_us / timing_samples.max(1);
+                    let avg_flow = timing_flow_us / timing_samples.max(1);
+                    let avg_ml = timing_ml_us / timing_samples.max(1);
+                    let avg_intel = timing_intel_us / timing_samples.max(1);
                     let avg_event = timing_event_us / timing_samples.max(1);
                     let avg_total = timing_total_us / timing_samples.max(1);
                     info!(
-                        "Packets: {} alerts: {} | Timing (us): capture={} ctx={} match={} event={} total={}",
-                        packet_count, alert_count,
-                        avg_capture, avg_context, avg_match, avg_event, avg_total
+                        "Packets: {} | alerts: {} ml: {} intel: {} flows: {} | Timing (us): cap={} ctx={} sig={} flow={} ml={} intel={} evt={} tot={}",
+                        packet_count, alert_count, ml_anomaly_count, threat_intel_hits, flows_tracked,
+                        avg_capture, avg_context, avg_match, avg_flow, avg_ml, avg_intel, avg_event, avg_total
                     );
                 }
 
@@ -1397,6 +1437,128 @@ async fn start_packet_engine(
                     }
                     let event_elapsed = event_start.elapsed().as_micros() as u64;
                     timing_event_us += event_elapsed;
+                }
+
+                // Flow Tracking - process packet through flow tracker
+                #[cfg(feature = "flow-tracking")]
+                let current_flow = if let Some(ref mut tracker) = flow_tracker {
+                    let flow_start = std::time::Instant::now();
+                    let mut pkt = packet.clone();
+                    let (flow, _direction) = tracker.process(&mut pkt);
+                    let flow_clone = flow.clone();
+                    let flow_elapsed = flow_start.elapsed().as_micros() as u64;
+                    timing_flow_us += flow_elapsed;
+                    flows_tracked = tracker.stats().active_flows as u64;
+                    Some(flow_clone)
+                } else {
+                    None
+                };
+
+                // ML Anomaly Detection - process flow through ML engine
+                #[cfg(feature = "ml-detection")]
+                if let Some(ref mut engine) = ml_engine {
+                    let ml_start = std::time::Instant::now();
+                    #[cfg(feature = "flow-tracking")]
+                    if let Some(ref flow) = current_flow {
+                        if let Some(anomaly_score) = engine.process_flow(flow) {
+                            ml_anomaly_count += 1;
+                            warn!(
+                                "ML Anomaly detected: {} -> {} score={:.3} category={:?} - {}",
+                                packet.src_ip, packet.dst_ip,
+                                anomaly_score.score,
+                                anomaly_score.category,
+                                anomaly_score.explanation.as_deref().unwrap_or("unknown")
+                            );
+
+                            // Send ML anomaly event
+                            let attack_event = models::AttackEvent {
+                                id: None,
+                                timestamp: chrono::Utc::now(),
+                                ip: packet.src_ip,
+                                service: "ml".to_string(),
+                                event_type: models::AttackEventType::Anomaly,
+                                details: Some(format!(
+                                    "Anomaly score: {:.3}, Category: {:?}",
+                                    anomaly_score.score,
+                                    anomaly_score.category
+                                )),
+                                log_line: String::new(),
+                            };
+
+                            if let Err(e) = event_tx.send(MonitorEvent::Attack(attack_event)).await {
+                                warn!("Failed to send ML anomaly event: {}", e);
+                            }
+
+                            // Auto-ban on high-confidence anomalies
+                            if config.auto_ban && anomaly_score.score > 0.9 {
+                                if let Err(e) = event_tx.send(MonitorEvent::Ban {
+                                    ip: packet.src_ip,
+                                    service: "ml".to_string(),
+                                    reason: format!("ML anomaly: score={:.3}", anomaly_score.score),
+                                    duration_secs: config.ban_duration,
+                                }).await {
+                                    warn!("Failed to send ML ban event: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    let ml_elapsed = ml_start.elapsed().as_micros() as u64;
+                    timing_ml_us += ml_elapsed;
+                }
+
+                // Threat Intelligence - check source IP against threat feeds
+                #[cfg(feature = "threat-intel")]
+                if let Some(ref engine) = intel_engine {
+                    let intel_start = std::time::Instant::now();
+                    if let Some(threat_match) = engine.check_ip(&packet.src_ip) {
+                        threat_intel_hits += 1;
+                        alert_count += 1;
+                        warn!(
+                            "Threat Intel match: {} - {} (category: {:?}, severity: {:?}, feed: {})",
+                            packet.src_ip,
+                            threat_match.ioc.value,
+                            threat_match.ioc.category,
+                            threat_match.ioc.severity,
+                            threat_match.ioc.source
+                        );
+
+                        // Send threat intel event
+                        let attack_event = models::AttackEvent {
+                            id: None,
+                            timestamp: chrono::Utc::now(),
+                            ip: packet.src_ip,
+                            service: "threat_intel".to_string(),
+                            event_type: models::AttackEventType::ThreatIntel,
+                            details: Some(format!(
+                                "Threat: {:?} from {} - {}",
+                                threat_match.ioc.category,
+                                threat_match.ioc.source,
+                                threat_match.ioc.description.as_deref().unwrap_or("known malicious")
+                            )),
+                            log_line: String::new(),
+                        };
+
+                        if let Err(e) = event_tx.send(MonitorEvent::Attack(attack_event)).await {
+                            warn!("Failed to send threat intel event: {}", e);
+                        }
+
+                        // Auto-ban critical/high severity threats
+                        if config.auto_ban {
+                            use threat_intel::Severity;
+                            if matches!(threat_match.ioc.severity, Severity::Critical | Severity::High) {
+                                if let Err(e) = event_tx.send(MonitorEvent::Ban {
+                                    ip: packet.src_ip,
+                                    service: "threat_intel".to_string(),
+                                    reason: format!("Threat intel: {:?} - {}", threat_match.ioc.category, threat_match.ioc.source),
+                                    duration_secs: config.ban_duration,
+                                }).await {
+                                    warn!("Failed to send threat intel ban event: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    let intel_elapsed = intel_start.elapsed().as_micros() as u64;
+                    timing_intel_us += intel_elapsed;
                 }
 
                 let total_elapsed = loop_start.elapsed().as_micros() as u64;
