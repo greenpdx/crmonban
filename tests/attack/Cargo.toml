@@ -1,0 +1,52 @@
+[package]
+name = "attack-generator"
+version = "0.1.0"
+edition = "2021"
+authors = ["svvs"]
+description = "Stateful attack generator for testing crmonban IPS"
+license = "MIT"
+
+[[bin]]
+name = "synth_attack"
+path = "src/main.rs"
+
+[dependencies]
+# Raw packet crafting
+pnet = "0.35"
+
+# Async runtime
+tokio = { version = "*", features = ["full"] }
+
+# CLI
+clap = { version = "*", features = ["derive"] }
+
+# Serialization for recording
+serde = { version = "*", features = ["derive"] }
+serde_json = "*"
+csv = "*"
+
+# Timestamps
+chrono = { version = "*", features = ["serde"] }
+
+# Random generation for fuzzing
+rand = "*"
+
+# Logging
+tracing = "*"
+tracing-subscriber = { version = "*", features = ["env-filter"] }
+
+# Error handling
+anyhow = "*"
+thiserror = "*"
+
+# IP handling
+ipnetwork = "*"
+
+# MD5 for payload hashing
+md5 = "*"
+
+# Pcap for actual packet injection
+pcap = "*"
+
+# Regex for rule parsing
+regex = "*"
