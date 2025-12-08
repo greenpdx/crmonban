@@ -450,7 +450,7 @@ sudo crmonban whitelist add 10.0.0.1 -c "Internal monitoring server"
 
 ## License
 
-MIT
+LGPL 2
 
 ## Contributing
 
