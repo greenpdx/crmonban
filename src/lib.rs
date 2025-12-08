@@ -75,6 +75,60 @@ use ipc::{
 use models::{ActivityAction, Ban, BanSource, DaemonStatus, WhitelistEntry};
 use monitor::{start_monitoring, MonitorEvent};
 
+/// Check rules freshness and warn if they are outdated
+#[cfg(feature = "signatures")]
+fn check_rules_freshness(rules_dir: &str) {
+    use std::time::SystemTime;
+
+    let rules_path = Path::new(rules_dir);
+    if !rules_path.exists() {
+        warn!("Rules directory does not exist: {}", rules_dir);
+        warn!("To download rules, run: crmonban rules update");
+        return;
+    }
+
+    // Check for any .rules files
+    let mut rules_found = false;
+    let mut newest_mtime: Option<SystemTime> = None;
+
+    if let Ok(entries) = std::fs::read_dir(rules_path) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |e| e == "rules") {
+                rules_found = true;
+                if let Ok(metadata) = path.metadata() {
+                    if let Ok(mtime) = metadata.modified() {
+                        if newest_mtime.is_none() || mtime > newest_mtime.unwrap() {
+                            newest_mtime = Some(mtime);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !rules_found {
+        warn!("No .rules files found in {}", rules_dir);
+        warn!("To download rules, run: crmonban rules update");
+        return;
+    }
+
+    // Check age of newest rules file
+    if let Some(mtime) = newest_mtime {
+        if let Ok(age) = SystemTime::now().duration_since(mtime) {
+            let days = age.as_secs() / 86400;
+            if days > 30 {
+                warn!("Rules are {} days old - consider updating", days);
+                warn!("To update rules, run: crmonban rules update");
+            } else if days > 7 {
+                info!("Rules are {} days old", days);
+            } else {
+                info!("Rules are up to date ({} days old)", days);
+            }
+        }
+    }
+}
+
 /// Core crmonban instance
 pub struct Crmonban {
     config: Config,
@@ -1214,6 +1268,9 @@ async fn start_packet_engine(
         // Override rules_dir from packet engine config
         if let Some(ref rules_dir) = config.rules_dir {
             sig_config.rule_dirs = vec![std::path::PathBuf::from(rules_dir)];
+
+            // Check rules freshness
+            check_rules_freshness(rules_dir);
         }
 
         let mut engine = signatures::SignatureEngine::new(sig_config.clone());

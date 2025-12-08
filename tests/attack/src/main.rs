@@ -93,9 +93,9 @@ struct Args {
     #[arg(long, default_value = "10000")]
     batch_size: usize,
 
-    /// Rules directory for signature-based payloads (optional)
-    /// When specified, uses actual content patterns from NIDS rules
-    #[arg(long)]
+    /// Rules directory for signature-based payloads
+    /// Uses actual content patterns from NIDS rules for realistic attacks
+    #[arg(long, default_value = "/var/lib/crmonban/data/rules")]
     rules_dir: Option<PathBuf>,
 
     /// Maximum number of rules to load from rules directory

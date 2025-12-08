@@ -1466,7 +1466,7 @@ impl Default for PacketEngineConfig {
             timeout_ms: 100,
             workers: 0,
             signatures_enabled: true,
-            rules_dir: Some("/var/lib/crmonban/data/signatures/suricata/rules".to_string()),
+            rules_dir: Some("/var/lib/crmonban/data/rules".to_string()),
             flow_tracking: true,
             ml_detection: false,
             threat_intel: false,

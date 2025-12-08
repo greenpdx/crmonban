@@ -370,7 +370,7 @@ workers = 0
 signatures_enabled = true
 
 # Path to rules directory
-rules_dir = "rules"
+rules_dir = "/var/lib/crmonban/data/rules"
 
 # Enable flow tracking
 flow_tracking = true
