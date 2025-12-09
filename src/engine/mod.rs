@@ -43,6 +43,9 @@ pub mod pipeline;
 pub mod workers;
 pub mod actions;
 
+#[cfg(feature = "profiling")]
+pub mod profiling;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,9 +59,12 @@ use crate::core::packet::Packet;
 use crate::database::BatchedWriterHandle;
 
 pub use capture::{PacketCapture, CaptureConfig, CaptureMethod};
-pub use pipeline::{Pipeline, PipelineConfig};
+pub use pipeline::{Pipeline, PipelineConfig, PipelineStage};
 pub use workers::{WorkerPool, WorkerConfig};
 pub use actions::{ActionExecutor, Action, ActionConfig};
+
+#[cfg(feature = "profiling")]
+pub use profiling::{PipelineProfiler, PipelineProfileSnapshot, StageProfile, StageProfileSnapshot};
 
 /// Packet engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

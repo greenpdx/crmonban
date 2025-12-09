@@ -104,8 +104,8 @@ nfq = "*"
 etherparse = "*"
 pcap = "*"
 
-# Benchmarking
-hdrhistogram = "*"
+# Profiling/Benchmarking (optional for profiling feature)
+hdrhistogram = { version = "*", optional = true }
 
 # TLS/SSL for MITM proxy
 tokio-rustls = "*"
@@ -125,7 +125,7 @@ path = "src/main.rs"
 [[bin]]
 name = "pcap_benchmark"
 path = "benches/pcap_benchmark.rs"
-required-features = ["flow-tracking"]
+required-features = ["flow-tracking", "profiling"]
 
 [[bin]]
 name = "pcap_replay"
@@ -157,8 +157,10 @@ correlation = ["dep:parking_lot", "flow-tracking"]
 packet-engine = ["dep:crossbeam-channel", "dep:num_cpus", "dep:parking_lot", "correlation"]
 # Parallel processing
 parallel = ["dep:rayon", "dep:num_cpus"]
+# Pipeline profiling with histograms (p50/p95/p99 latencies, throughput)
+profiling = ["dep:hdrhistogram", "dep:parking_lot"]
 # Full NIDS functionality (all stages)
-nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detection", "correlation", "packet-engine", "parallel"]
+nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detection", "correlation", "packet-engine", "parallel", "profiling"]
 
 # Network Scanning - Free/Open Source (Nmap, Ettercap, Metasploit, Burp)
 scan = []

@@ -40,6 +40,8 @@ use crate::threat_intel::{IntelEngine, ThreatCategory};
 use crate::wasm::{WasmEngine, WasmConfig, StageContext, ScanInfo, IntelInfo};
 
 use super::pipeline::{PipelineConfig, PipelineStage, PipelineMetrics};
+#[cfg(feature = "profiling")]
+use super::profiling::PipelineProfiler;
 
 /// Worker pool configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,10 +124,14 @@ pub struct WorkerPool {
     // Stage 9: Correlation
     correlation_engine: CorrelationEngine,
 
-    /// Per-stage metrics
+    /// Per-stage metrics (basic counters)
     stage_metrics: PipelineMetrics,
     /// Last metrics log time
     last_metrics_log: Instant,
+
+    /// Pipeline profiler with histogram-based latency tracking
+    #[cfg(feature = "profiling")]
+    profiler: PipelineProfiler,
 }
 
 impl WorkerPool {
@@ -172,6 +178,9 @@ impl WorkerPool {
 
             stage_metrics: PipelineMetrics::new(),
             last_metrics_log: Instant::now(),
+
+            #[cfg(feature = "profiling")]
+            profiler: PipelineProfiler::new(),
         }
     }
 
@@ -576,12 +585,22 @@ impl WorkerPool {
             };
 
             // Update stage metrics
+            let stage_latency_ns = stage_start.elapsed().as_nanos() as u64;
             if let Some(metrics) = self.stage_metrics.get(*stage) {
                 metrics.record_pass();
-                metrics.record_time(stage_start.elapsed().as_nanos() as u64);
+                metrics.record_time(stage_latency_ns);
                 if stage_marked {
                     metrics.record_marked();
                     is_marked = true;
+                }
+            }
+
+            // Record to profiler histogram (when profiling feature is enabled)
+            #[cfg(feature = "profiling")]
+            if let Some(profile) = self.profiler.stage(*stage) {
+                profile.record(stage_latency_ns);
+                if stage_marked {
+                    profile.record_marked();
                 }
             }
         }
@@ -597,9 +616,18 @@ impl WorkerPool {
             Ordering::Relaxed,
         );
 
+        // Record total pipeline latency to profiler
+        #[cfg(feature = "profiling")]
+        self.profiler.record_total(elapsed);
+
         // Log stage metrics periodically (every 10 seconds)
         if self.last_metrics_log.elapsed().as_secs() >= 10 {
+            #[cfg(feature = "profiling")]
+            self.profiler.log_summary();
+
+            #[cfg(not(feature = "profiling"))]
             self.stage_metrics.log_summary();
+
             self.last_metrics_log = Instant::now();
         }
 
@@ -670,7 +698,23 @@ impl WorkerPool {
 
     /// Log stage metrics summary
     pub fn log_metrics(&self) {
+        #[cfg(feature = "profiling")]
+        self.profiler.log_summary();
+
+        #[cfg(not(feature = "profiling"))]
         self.stage_metrics.log_summary();
+    }
+
+    /// Get reference to profiler (when profiling feature is enabled)
+    #[cfg(feature = "profiling")]
+    pub fn profiler(&self) -> &PipelineProfiler {
+        &self.profiler
+    }
+
+    /// Get profiler snapshot (when profiling feature is enabled)
+    #[cfg(feature = "profiling")]
+    pub fn profile_snapshot(&self) -> super::profiling::PipelineProfileSnapshot {
+        self.profiler.snapshot()
     }
 }
 
