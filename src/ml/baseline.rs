@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc, Timelike};
 use serde::{Deserialize, Serialize};
 
 use super::features::{FeatureVector, NUM_FEATURES, FEATURE_NAMES};
-use crate::core::packet::AppProtocol;
+use crate::protocols::AppProtocol;
 
 /// Statistics for a single feature
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

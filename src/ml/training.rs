@@ -308,7 +308,7 @@ impl TrainingProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::packet::AppProtocol;
+    use crate::protocols::AppProtocol;
 
     fn make_features(values: Vec<f32>) -> FeatureVector {
         FeatureVector {

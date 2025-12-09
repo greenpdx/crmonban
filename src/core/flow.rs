@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::packet::{AppProtocol, Direction, IpProtocol, Packet, TcpFlags};
+use super::packet::{Direction, IpProtocol, Packet, TcpFlags};
+use crate::protocols::AppProtocol;
 
 /// Streaming statistics accumulator (Welford's algorithm)
 /// Computes min, max, mean, variance in O(1) space
@@ -333,7 +334,7 @@ impl Flow {
             psh_count: 0,
             urg_count: 0,
             ack_count: 0,
-            app_protocol: pkt.app_protocol,
+            app_protocol: AppProtocol::Unknown,
             app_data: HashMap::new(),
             risk_score: 0.0,
             tags: Vec::new(),
@@ -395,11 +396,6 @@ impl Flow {
 
             // Update TCP state
             self.update_tcp_state(&flags, is_forward);
-        }
-
-        // Update app protocol if detected
-        if pkt.app_protocol != AppProtocol::Unknown {
-            self.app_protocol = pkt.app_protocol;
         }
 
         direction

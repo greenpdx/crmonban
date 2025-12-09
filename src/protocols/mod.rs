@@ -17,10 +17,13 @@
 //! }
 //! ```
 
+pub mod types;
 pub mod detector;
 pub mod http;
 pub mod dns;
 pub mod tls;
+
+pub use types::AppProtocol;
 
 pub use detector::ProtocolDetector;
 pub use http::{HttpAnalyzer, HttpRequest, HttpResponse, HttpTransaction};

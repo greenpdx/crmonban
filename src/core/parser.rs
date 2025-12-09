@@ -448,13 +448,4 @@ mod tests {
         assert!(transport.tcp_flags.unwrap().syn);
     }
 
-    #[test]
-    fn test_no_app_protocol_set() {
-        let data = make_tcp_syn_packet();
-        let packet = parse_ethernet_packet(&data, 1, String::new()).unwrap();
-
-        // app_protocol should be Unknown - not set by parser
-        use crate::core::packet::AppProtocol;
-        assert_eq!(packet.app_protocol, AppProtocol::Unknown);
-    }
 }

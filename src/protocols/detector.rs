@@ -3,7 +3,8 @@
 //! Automatically detects application protocol and routes to appropriate analyzer.
 
 use crate::core::flow::Flow;
-use crate::core::packet::{AppProtocol, Packet};
+use crate::core::packet::Packet;
+use super::AppProtocol;
 use super::{
     ProtocolAnalyzer, ProtocolConfig, ProtocolEvent,
     HttpAnalyzer, DnsAnalyzer, TlsAnalyzer,

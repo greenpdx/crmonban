@@ -17,7 +17,7 @@ use etherparse::SlicedPacket;
 use pcap::Capture;
 
 use crmonban::core::flow::Flow;
-use crmonban::core::packet::{AppProtocol, IpProtocol, Packet, TcpFlags};
+use crmonban::core::packet::{IpProtocol, Packet, TcpFlags};
 use crmonban::flow::{FlowConfig, FlowTracker};
 use crmonban::brute_force::BruteForceTracker;
 use crmonban::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
@@ -229,17 +229,6 @@ impl CsvFlowRecord {
             udp.dst_port = self.dst_port;
         }
         pkt.raw_len = (self.in_bytes / self.in_pkts.max(1)) as u32;
-
-        // Detect app protocol from port
-        pkt.app_protocol = match (self.src_port, self.dst_port) {
-            (80, _) | (_, 80) | (8080, _) | (_, 8080) => AppProtocol::Http,
-            (443, _) | (_, 443) | (8443, _) | (_, 8443) => AppProtocol::Https,
-            (22, _) | (_, 22) => AppProtocol::Ssh,
-            (21, _) | (_, 21) => AppProtocol::Ftp,
-            (25, _) | (_, 25) | (587, _) | (_, 587) => AppProtocol::Smtp,
-            (53, _) | (_, 53) => AppProtocol::Dns,
-            _ => AppProtocol::Unknown,
-        };
 
         pkt
     }
@@ -708,17 +697,6 @@ impl PcapBenchmark {
                             };
                             tcp_info.payload = tcp.payload().to_vec();
                         }
-
-                        // Detect app protocol from port
-                        pkt.app_protocol = match (pkt.src_port(), pkt.dst_port()) {
-                            (80, _) | (_, 80) | (8080, _) | (_, 8080) => AppProtocol::Http,
-                            (443, _) | (_, 443) | (8443, _) | (_, 8443) => AppProtocol::Https,
-                            (22, _) | (_, 22) => AppProtocol::Ssh,
-                            (21, _) | (_, 21) => AppProtocol::Ftp,
-                            (25, _) | (_, 25) | (587, _) | (_, 587) => AppProtocol::Smtp,
-                            (53, _) | (_, 53) => AppProtocol::Dns,
-                            _ => AppProtocol::Unknown,
-                        };
                     }
                     Some(etherparse::TransportSlice::Udp(udp)) => {
                         if let Some(udp_info) = pkt.udp_mut() {
@@ -726,12 +704,6 @@ impl PcapBenchmark {
                             udp_info.dst_port = udp.destination_port();
                             udp_info.payload = udp.payload().to_vec();
                         }
-
-                        pkt.app_protocol = match (pkt.src_port(), pkt.dst_port()) {
-                            (53, _) | (_, 53) => AppProtocol::Dns,
-                            (123, _) | (_, 123) => AppProtocol::Ntp,
-                            _ => AppProtocol::Unknown,
-                        };
                     }
                     _ => {}
                 }

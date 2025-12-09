@@ -18,7 +18,7 @@ pub use layers::{
     Ipv4Info, Ipv6Info,
     TcpInfo, UdpInfo, IcmpInfo, Icmpv6Info,
 };
-pub use packet::{Packet, TcpFlags, IpProtocol, AppProtocol, Direction};
+pub use packet::{Packet, TcpFlags, IpProtocol, Direction};
 pub use flow::{Flow, FlowState, FlowKey, FlowStats};
 pub use event::{DetectionEvent, DetectionType, DetectionAction, Severity};
 pub use parser::{parse_ethernet_packet, parse_ip_packet, IpInfo, TransportInfo};

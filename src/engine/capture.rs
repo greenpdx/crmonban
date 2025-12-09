@@ -12,7 +12,7 @@ use pcap::{Capture, Active, Offline};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::core::packet::{Packet, IpProtocol, AppProtocol};
+use crate::core::packet::{Packet, IpProtocol};
 use crate::core::parser::parse_ethernet_packet;
 
 /// Capture method
@@ -333,7 +333,6 @@ impl PacketCapture for DummyCapture {
                 tcp.dst_port = 80;
             }
             packet.raw_len = 100;
-            packet.app_protocol = AppProtocol::Http;
 
             return Ok(Some(packet));
         }

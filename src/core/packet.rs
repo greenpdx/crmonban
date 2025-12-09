@@ -133,97 +133,6 @@ impl std::fmt::Display for TcpFlags {
     }
 }
 
-/// Application layer protocol (auto-detected or by port)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum AppProtocol {
-    Unknown,
-    Http,
-    Https,
-    Dns,
-    Ssh,
-    Ftp,
-    FtpData,
-    Smtp,
-    Pop3,
-    Imap,
-    Smb,
-    Mysql,
-    Postgres,
-    Redis,
-    Mongodb,
-    Ldap,
-    Rdp,
-    Vnc,
-    Telnet,
-    Sip,
-    Ntp,
-    Dhcp,
-    Snmp,
-}
-
-impl AppProtocol {
-    /// Guess protocol from well-known port
-    pub fn from_port(port: u16, proto: IpProtocol) -> Self {
-        match (proto, port) {
-            (IpProtocol::Tcp, 80) => AppProtocol::Http,
-            (IpProtocol::Tcp, 443) => AppProtocol::Https,
-            (IpProtocol::Tcp, 8080) => AppProtocol::Http,
-            (IpProtocol::Tcp, 8443) => AppProtocol::Https,
-            (IpProtocol::Udp, 53) | (IpProtocol::Tcp, 53) => AppProtocol::Dns,
-            (IpProtocol::Tcp, 22) => AppProtocol::Ssh,
-            (IpProtocol::Tcp, 21) => AppProtocol::Ftp,
-            (IpProtocol::Tcp, 20) => AppProtocol::FtpData,
-            (IpProtocol::Tcp, 25) | (IpProtocol::Tcp, 587) | (IpProtocol::Tcp, 465) => AppProtocol::Smtp,
-            (IpProtocol::Tcp, 110) | (IpProtocol::Tcp, 995) => AppProtocol::Pop3,
-            (IpProtocol::Tcp, 143) | (IpProtocol::Tcp, 993) => AppProtocol::Imap,
-            (IpProtocol::Tcp, 445) | (IpProtocol::Tcp, 139) => AppProtocol::Smb,
-            (IpProtocol::Tcp, 3306) => AppProtocol::Mysql,
-            (IpProtocol::Tcp, 5432) => AppProtocol::Postgres,
-            (IpProtocol::Tcp, 6379) => AppProtocol::Redis,
-            (IpProtocol::Tcp, 27017) => AppProtocol::Mongodb,
-            (IpProtocol::Tcp, 389) | (IpProtocol::Tcp, 636) => AppProtocol::Ldap,
-            (IpProtocol::Tcp, 3389) => AppProtocol::Rdp,
-            (IpProtocol::Tcp, 5900..=5909) => AppProtocol::Vnc,
-            (IpProtocol::Tcp, 23) => AppProtocol::Telnet,
-            (IpProtocol::Udp, 5060) | (IpProtocol::Tcp, 5060) => AppProtocol::Sip,
-            (IpProtocol::Udp, 123) => AppProtocol::Ntp,
-            (IpProtocol::Udp, 67) | (IpProtocol::Udp, 68) => AppProtocol::Dhcp,
-            (IpProtocol::Udp, 161) | (IpProtocol::Udp, 162) => AppProtocol::Snmp,
-            _ => AppProtocol::Unknown,
-        }
-    }
-}
-
-impl std::fmt::Display for AppProtocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AppProtocol::Unknown => write!(f, "unknown"),
-            AppProtocol::Http => write!(f, "http"),
-            AppProtocol::Https => write!(f, "https"),
-            AppProtocol::Dns => write!(f, "dns"),
-            AppProtocol::Ssh => write!(f, "ssh"),
-            AppProtocol::Ftp => write!(f, "ftp"),
-            AppProtocol::FtpData => write!(f, "ftp-data"),
-            AppProtocol::Smtp => write!(f, "smtp"),
-            AppProtocol::Pop3 => write!(f, "pop3"),
-            AppProtocol::Imap => write!(f, "imap"),
-            AppProtocol::Smb => write!(f, "smb"),
-            AppProtocol::Mysql => write!(f, "mysql"),
-            AppProtocol::Postgres => write!(f, "postgres"),
-            AppProtocol::Redis => write!(f, "redis"),
-            AppProtocol::Mongodb => write!(f, "mongodb"),
-            AppProtocol::Ldap => write!(f, "ldap"),
-            AppProtocol::Rdp => write!(f, "rdp"),
-            AppProtocol::Vnc => write!(f, "vnc"),
-            AppProtocol::Telnet => write!(f, "telnet"),
-            AppProtocol::Sip => write!(f, "sip"),
-            AppProtocol::Ntp => write!(f, "ntp"),
-            AppProtocol::Dhcp => write!(f, "dhcp"),
-            AppProtocol::Snmp => write!(f, "snmp"),
-        }
-    }
-}
-
 /// Packet direction relative to connection initiator
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
@@ -268,10 +177,6 @@ pub struct Packet {
     /// Transport layer (TCP, UDP, ICMP, etc.)
     pub layer4: Layer4,
 
-    // Layer 7
-    /// Detected application protocol
-    pub app_protocol: AppProtocol,
-
     // Metadata
     /// Associated flow ID
     pub flow_id: Option<u64>,
@@ -292,7 +197,6 @@ impl Packet {
             ethernet: None,
             layer3,
             layer4,
-            app_protocol: AppProtocol::Unknown,
             flow_id: None,
             direction: Direction::Unknown,
             interface,
@@ -343,7 +247,6 @@ impl Packet {
             ethernet: None,
             layer3,
             layer4,
-            app_protocol: AppProtocol::Unknown,
             flow_id: None,
             direction: Direction::Unknown,
             interface: String::new(),
@@ -596,14 +499,6 @@ mod tests {
         assert!(!flags.fin);
         assert!(flags.is_syn_ack());
         assert_eq!(flags.to_u8(), 0x12);
-    }
-
-    #[test]
-    fn test_app_protocol_from_port() {
-        assert_eq!(AppProtocol::from_port(80, IpProtocol::Tcp), AppProtocol::Http);
-        assert_eq!(AppProtocol::from_port(443, IpProtocol::Tcp), AppProtocol::Https);
-        assert_eq!(AppProtocol::from_port(53, IpProtocol::Udp), AppProtocol::Dns);
-        assert_eq!(AppProtocol::from_port(22, IpProtocol::Tcp), AppProtocol::Ssh);
     }
 
     #[test]

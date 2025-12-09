@@ -10,7 +10,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::core::flow::Flow;
-use crate::core::packet::{AppProtocol, IpProtocol};
+use crate::core::packet::IpProtocol;
+use crate::protocols::AppProtocol;
 
 /// Standard feature names (subset of CICIDS2017 features applicable to flow data)
 pub const FEATURE_NAMES: &[&str] = &[
