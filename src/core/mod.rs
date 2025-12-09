@@ -4,14 +4,24 @@
 //! - `Packet`: Unified packet representation
 //! - `Flow`: Connection flow tracking
 //! - `DetectionEvent`: Detection/alert events
+//! - `layers`: Strongly-typed network layer structs
+//! - `parser`: Modular packet parsing functions
 
+pub mod layers;
 pub mod packet;
 pub mod flow;
 pub mod event;
+pub mod parser;
 
+pub use layers::{
+    Layer3, Layer4, EthernetInfo,
+    Ipv4Info, Ipv6Info,
+    TcpInfo, UdpInfo, IcmpInfo, Icmpv6Info,
+};
 pub use packet::{Packet, TcpFlags, IpProtocol, AppProtocol, Direction};
 pub use flow::{Flow, FlowState, FlowKey, FlowStats};
 pub use event::{DetectionEvent, DetectionType, DetectionAction, Severity};
+pub use parser::{parse_ethernet_packet, parse_ip_packet, IpInfo, TransportInfo};
 
 /// Common trait for protocol-specific metadata
 pub trait ProtocolMetadata: Send + Sync + std::fmt::Debug {

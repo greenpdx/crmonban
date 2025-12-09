@@ -518,12 +518,12 @@ impl ProtocolAnalyzer for TlsAnalyzer {
     }
 
     fn parse(&self, packet: &Packet, flow: &mut Flow) -> Option<ProtocolEvent> {
-        if !self.config.enabled || packet.payload.is_empty() {
+        if !self.config.enabled || packet.payload().is_empty() {
             return None;
         }
 
         // Parse TLS record
-        let (record_type, _version, record_data) = self.parse_record(&packet.payload)?;
+        let (record_type, _version, record_data) = self.parse_record(&packet.payload())?;
 
         if record_type != TlsRecordType::Handshake {
             return None;

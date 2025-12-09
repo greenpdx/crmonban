@@ -355,7 +355,7 @@ impl CorrelationEngine {
             DetectionType::MalformedPacket => "MalformedPacket",
             DetectionType::PortScan => "PortScan",
             DetectionType::NetworkScan => "NetworkScan",
-            DetectionType::DDoS => "DDoS",
+            DetectionType::DoS => "DoS",
             DetectionType::BruteForce => "BruteForce",
             DetectionType::DataExfiltration => "DataExfiltration",
             DetectionType::Beaconing => "Beaconing",

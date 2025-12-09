@@ -22,7 +22,6 @@ pub mod behavior;
 pub mod config;
 pub mod engine;
 pub mod rules;
-pub mod wasm;
 
 // Re-exports
 pub use behavior::{SourceBehavior, ConnectionState, Classification};

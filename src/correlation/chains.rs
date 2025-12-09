@@ -135,7 +135,7 @@ impl MitreTactic {
                 Some(MitreTactic::Exfiltration)
             }
             // Impact
-            DetectionType::DDoS => Some(MitreTactic::Impact),
+            DetectionType::DoS => Some(MitreTactic::Impact),
             // Lateral Movement
             DetectionType::LateralMovement => Some(MitreTactic::LateralMovement),
             // Policy / Access

@@ -8,12 +8,12 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use etherparse::SlicedPacket;
 use pcap::{Capture, Active, Offline};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
-use crate::core::packet::{Packet, IpProtocol, AppProtocol, TcpFlags};
+use crate::core::packet::{Packet, IpProtocol, AppProtocol};
+use crate::core::parser::parse_ethernet_packet;
 
 /// Capture method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,89 +133,8 @@ impl NfqueueCapture {
 
     #[allow(dead_code)]
     fn parse_packet(&self, data: &[u8], id: u32) -> Option<Packet> {
-        // Parse IP header
-        if data.len() < 20 {
-            return None;
-        }
-
-        let version = (data[0] >> 4) & 0x0f;
-        if version != 4 && version != 6 {
-            return None;
-        }
-
-        let (src_ip, dst_ip, protocol, header_len) = if version == 4 {
-            let src = IpAddr::from([data[12], data[13], data[14], data[15]]);
-            let dst = IpAddr::from([data[16], data[17], data[18], data[19]]);
-            let proto = data[9];
-            let ihl = ((data[0] & 0x0f) * 4) as usize;
-            (src, dst, proto, ihl)
-        } else {
-            // IPv6
-            if data.len() < 40 {
-                return None;
-            }
-            let mut src_bytes = [0u8; 16];
-            let mut dst_bytes = [0u8; 16];
-            src_bytes.copy_from_slice(&data[8..24]);
-            dst_bytes.copy_from_slice(&data[24..40]);
-            let src = IpAddr::from(src_bytes);
-            let dst = IpAddr::from(dst_bytes);
-            let proto = data[6];
-            (src, dst, proto, 40)
-        };
-
-        let ip_protocol = match protocol {
-            6 => IpProtocol::Tcp,
-            17 => IpProtocol::Udp,
-            1 => IpProtocol::Icmp,
-            58 => IpProtocol::Icmpv6,
-            _ => IpProtocol::Other(protocol),
-        };
-
-        let mut packet = Packet::new(src_ip, dst_ip, ip_protocol);
-        packet.raw_len = data.len() as u32;
-        packet.id = id as u64;
-
-        // Parse transport header
-        if data.len() > header_len {
-            let transport = &data[header_len..];
-            match ip_protocol {
-                IpProtocol::Tcp if transport.len() >= 20 => {
-                    packet.src_port = u16::from_be_bytes([transport[0], transport[1]]);
-                    packet.dst_port = u16::from_be_bytes([transport[2], transport[3]]);
-                    packet.seq = Some(u32::from_be_bytes([
-                        transport[4], transport[5], transport[6], transport[7],
-                    ]));
-                    packet.ack = Some(u32::from_be_bytes([
-                        transport[8], transport[9], transport[10], transport[11],
-                    ]));
-
-                    let flags = transport[13];
-                    packet.tcp_flags = Some(crate::core::packet::TcpFlags {
-                        fin: flags & 0x01 != 0,
-                        syn: flags & 0x02 != 0,
-                        rst: flags & 0x04 != 0,
-                        psh: flags & 0x08 != 0,
-                        ack: flags & 0x10 != 0,
-                        urg: flags & 0x20 != 0,
-                        ece: flags & 0x40 != 0,
-                        cwr: flags & 0x80 != 0,
-                    });
-                }
-                IpProtocol::Udp if transport.len() >= 8 => {
-                    packet.src_port = u16::from_be_bytes([transport[0], transport[1]]);
-                    packet.dst_port = u16::from_be_bytes([transport[2], transport[3]]);
-                }
-                _ => {}
-            }
-        }
-
-        // Store raw payload for DPI
-        if data.len() > header_len + 20 {
-            packet.payload = data[header_len..].to_vec();
-        }
-
-        Some(packet)
+        // Use the parser module for consistent packet parsing
+        crate::core::parser::parse_ip_packet(data, id as u64, String::new())
     }
 }
 
@@ -271,95 +190,6 @@ impl AfPacketCapture {
             packet_id: 0,
         })
     }
-
-    fn parse_raw_packet(&mut self, data: &[u8]) -> Option<Packet> {
-        self.packet_id += 1;
-
-        // Parse with etherparse
-        match SlicedPacket::from_ethernet(data) {
-            Ok(sliced) => {
-                // Extract IP layer
-                let (src_ip, dst_ip, protocol) = match &sliced.net {
-                    Some(etherparse::NetSlice::Ipv4(ipv4)) => {
-                        let src = IpAddr::from(ipv4.header().source_addr());
-                        let dst = IpAddr::from(ipv4.header().destination_addr());
-                        let proto = match ipv4.header().protocol() {
-                            etherparse::IpNumber::TCP => IpProtocol::Tcp,
-                            etherparse::IpNumber::UDP => IpProtocol::Udp,
-                            etherparse::IpNumber::ICMP => IpProtocol::Icmp,
-                            other => IpProtocol::Other(other.0),
-                        };
-                        (src, dst, proto)
-                    }
-                    Some(etherparse::NetSlice::Ipv6(ipv6)) => {
-                        let src = IpAddr::from(ipv6.header().source_addr());
-                        let dst = IpAddr::from(ipv6.header().destination_addr());
-                        let proto = match ipv6.header().next_header() {
-                            etherparse::IpNumber::TCP => IpProtocol::Tcp,
-                            etherparse::IpNumber::UDP => IpProtocol::Udp,
-                            etherparse::IpNumber::IPV6_ICMP => IpProtocol::Icmpv6,
-                            other => IpProtocol::Other(other.0),
-                        };
-                        (src, dst, proto)
-                    }
-                    _ => return None, // ARP, etc.
-                };
-
-                let mut packet = Packet::new(src_ip, dst_ip, protocol);
-                packet.id = self.packet_id;
-                packet.raw_len = data.len() as u32;
-
-                // Extract transport layer
-                match &sliced.transport {
-                    Some(etherparse::TransportSlice::Tcp(tcp)) => {
-                        packet.src_port = tcp.source_port();
-                        packet.dst_port = tcp.destination_port();
-                        packet.seq = Some(tcp.sequence_number());
-                        packet.ack = Some(tcp.acknowledgment_number());
-                        packet.tcp_flags = Some(TcpFlags {
-                            syn: tcp.syn(),
-                            ack: tcp.ack(),
-                            fin: tcp.fin(),
-                            rst: tcp.rst(),
-                            psh: tcp.psh(),
-                            urg: tcp.urg(),
-                            ece: tcp.ece(),
-                            cwr: tcp.cwr(),
-                        });
-                        packet.payload = tcp.payload().to_vec();
-
-                        // Detect app protocol
-                        packet.app_protocol = match (packet.src_port, packet.dst_port) {
-                            (80, _) | (_, 80) | (8080, _) | (_, 8080) => AppProtocol::Http,
-                            (443, _) | (_, 443) | (8443, _) | (_, 8443) => AppProtocol::Https,
-                            (22, _) | (_, 22) => AppProtocol::Ssh,
-                            (21, _) | (_, 21) => AppProtocol::Ftp,
-                            (25, _) | (_, 25) | (587, _) | (_, 587) => AppProtocol::Smtp,
-                            (53, _) | (_, 53) => AppProtocol::Dns,
-                            _ => AppProtocol::Unknown,
-                        };
-                    }
-                    Some(etherparse::TransportSlice::Udp(udp)) => {
-                        packet.src_port = udp.source_port();
-                        packet.dst_port = udp.destination_port();
-                        packet.payload = udp.payload().to_vec();
-
-                        packet.app_protocol = match (packet.src_port, packet.dst_port) {
-                            (53, _) | (_, 53) => AppProtocol::Dns,
-                            _ => AppProtocol::Unknown,
-                        };
-                    }
-                    _ => {}
-                }
-
-                Some(packet)
-            }
-            Err(e) => {
-                debug!("Failed to parse packet: {:?}", e);
-                None
-            }
-        }
-    }
 }
 
 impl PacketCapture for AfPacketCapture {
@@ -367,8 +197,12 @@ impl PacketCapture for AfPacketCapture {
         match self.capture.next_packet() {
             Ok(packet) => {
                 self.stats.received += 1;
+                self.packet_id += 1;
+                let packet_id = self.packet_id;
+                let interface = self.interface.clone();
+                // Copy data before the borrow ends
                 let data = packet.data.to_vec();
-                Ok(self.parse_raw_packet(&data))
+                Ok(parse_ethernet_packet(&data, packet_id, interface))
             }
             Err(pcap::Error::TimeoutExpired) => {
                 // No packet available within timeout
@@ -428,88 +262,6 @@ impl PcapCapture {
             packet_id: 0,
         })
     }
-
-    fn parse_raw_packet(&mut self, data: &[u8]) -> Option<Packet> {
-        self.packet_id += 1;
-
-        match SlicedPacket::from_ethernet(data) {
-            Ok(sliced) => {
-                let (src_ip, dst_ip, protocol) = match &sliced.net {
-                    Some(etherparse::NetSlice::Ipv4(ipv4)) => {
-                        let src = IpAddr::from(ipv4.header().source_addr());
-                        let dst = IpAddr::from(ipv4.header().destination_addr());
-                        let proto = match ipv4.header().protocol() {
-                            etherparse::IpNumber::TCP => IpProtocol::Tcp,
-                            etherparse::IpNumber::UDP => IpProtocol::Udp,
-                            etherparse::IpNumber::ICMP => IpProtocol::Icmp,
-                            other => IpProtocol::Other(other.0),
-                        };
-                        (src, dst, proto)
-                    }
-                    Some(etherparse::NetSlice::Ipv6(ipv6)) => {
-                        let src = IpAddr::from(ipv6.header().source_addr());
-                        let dst = IpAddr::from(ipv6.header().destination_addr());
-                        let proto = match ipv6.header().next_header() {
-                            etherparse::IpNumber::TCP => IpProtocol::Tcp,
-                            etherparse::IpNumber::UDP => IpProtocol::Udp,
-                            etherparse::IpNumber::IPV6_ICMP => IpProtocol::Icmpv6,
-                            other => IpProtocol::Other(other.0),
-                        };
-                        (src, dst, proto)
-                    }
-                    _ => return None, // ARP, etc.
-                };
-
-                let mut packet = Packet::new(src_ip, dst_ip, protocol);
-                packet.id = self.packet_id;
-                packet.raw_len = data.len() as u32;
-
-                match &sliced.transport {
-                    Some(etherparse::TransportSlice::Tcp(tcp)) => {
-                        packet.src_port = tcp.source_port();
-                        packet.dst_port = tcp.destination_port();
-                        packet.seq = Some(tcp.sequence_number());
-                        packet.ack = Some(tcp.acknowledgment_number());
-                        packet.tcp_flags = Some(TcpFlags {
-                            syn: tcp.syn(),
-                            ack: tcp.ack(),
-                            fin: tcp.fin(),
-                            rst: tcp.rst(),
-                            psh: tcp.psh(),
-                            urg: tcp.urg(),
-                            ece: tcp.ece(),
-                            cwr: tcp.cwr(),
-                        });
-                        packet.payload = tcp.payload().to_vec();
-
-                        packet.app_protocol = match (packet.src_port, packet.dst_port) {
-                            (80, _) | (_, 80) | (8080, _) | (_, 8080) => AppProtocol::Http,
-                            (443, _) | (_, 443) | (8443, _) | (_, 8443) => AppProtocol::Https,
-                            (22, _) | (_, 22) => AppProtocol::Ssh,
-                            (21, _) | (_, 21) => AppProtocol::Ftp,
-                            (25, _) | (_, 25) | (587, _) | (_, 587) => AppProtocol::Smtp,
-                            (53, _) | (_, 53) => AppProtocol::Dns,
-                            _ => AppProtocol::Unknown,
-                        };
-                    }
-                    Some(etherparse::TransportSlice::Udp(udp)) => {
-                        packet.src_port = udp.source_port();
-                        packet.dst_port = udp.destination_port();
-                        packet.payload = udp.payload().to_vec();
-
-                        packet.app_protocol = match (packet.src_port, packet.dst_port) {
-                            (53, _) | (_, 53) => AppProtocol::Dns,
-                            _ => AppProtocol::Unknown,
-                        };
-                    }
-                    _ => {}
-                }
-
-                Some(packet)
-            }
-            Err(_) => None,
-        }
-    }
 }
 
 impl PacketCapture for PcapCapture {
@@ -517,8 +269,11 @@ impl PacketCapture for PcapCapture {
         match self.capture.next_packet() {
             Ok(pkt) => {
                 self.stats.received += 1;
+                self.packet_id += 1;
+                let packet_id = self.packet_id;
+                // Copy data before the borrow ends
                 let data = pkt.data.to_vec();
-                Ok(self.parse_raw_packet(&data))
+                Ok(parse_ethernet_packet(&data, packet_id, self.file_path.clone()))
             }
             Err(pcap::Error::NoMorePackets) => {
                 Ok(None)
@@ -572,8 +327,11 @@ impl PacketCapture for DummyCapture {
             let dst_ip: IpAddr = "10.0.0.1".parse().unwrap();
 
             let mut packet = Packet::new(src_ip, dst_ip, IpProtocol::Tcp);
-            packet.src_port = 12345;
-            packet.dst_port = 80;
+            // Set ports via the TCP layer
+            if let Some(tcp) = packet.tcp_mut() {
+                tcp.src_port = 12345;
+                tcp.dst_port = 80;
+            }
             packet.raw_len = 100;
             packet.app_protocol = AppProtocol::Http;
 

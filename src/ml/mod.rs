@@ -448,8 +448,10 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
         );
-        pkt.src_port = 54321;
-        pkt.dst_port = 80;
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = 54321;
+            tcp.dst_port = 80;
+        }
         pkt.raw_len = 100;
 
         let mut flow = Flow::new(id, &pkt);

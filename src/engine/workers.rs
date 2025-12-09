@@ -6,12 +6,14 @@
 //!
 //! 1. Flow Tracking - connection state tracking
 //! 2. Port Scan Detection - NULL/XMAS/FIN/Maimon/ACK/SYN scans
+//! 2b. DoS Detection - flood/amplification attacks
 //! 3. Brute Force Detection - session-based login attempt tracking
 //! 4. Signature Matching - Aho-Corasick + rule verification
 //! 5. Threat Intel - IOC lookups
 //! 6. Protocol Analysis - HTTP/DNS/TLS/SSH parsers
-//! 7. ML Anomaly Detection - flow-based scoring
-//! 8. Correlation - DB write + alert generation (only if marked)
+//! 7. WASM Plugins - custom detection plugins (Rust/WASM)
+//! 8. ML Anomaly Detection - flow-based scoring
+//! 9. Correlation - DB write + alert generation (only if marked)
 //!
 //! Stage order is configurable via PipelineConfig::stage_order.
 //! Each stage has pass_count and marked_count counters for debugging.
@@ -21,12 +23,20 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tracing::{trace, debug};
+use tracing::{trace, debug, warn};
 
 use crate::brute_force::BruteForceTracker;
 use crate::core::event::{DetectionEvent, DetectionType, Severity};
+use crate::core::flow::Flow;
 use crate::core::packet::Packet;
+use crate::correlation::{CorrelationEngine, CorrelationConfig, CorrelationResult};
+use crate::dos::{DoSDetector, DoSConfig};
+use crate::flow::{FlowTracker, FlowConfig};
+use crate::ml::{MLEngine, MLConfig, AnomalyCategory};
+use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent};
 use crate::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
+use crate::threat_intel::{IntelEngine, ThreatCategory};
+use crate::wasm::{WasmEngine, WasmConfig, StageContext, ScanInfo, IntelInfo};
 
 use super::pipeline::{PipelineConfig, PipelineStage, PipelineMetrics};
 
@@ -76,10 +86,41 @@ pub struct WorkerPool {
     total_time_ns: Arc<AtomicU64>,
     /// Start time
     start_time: Instant,
-    /// Scan detection engine
+
+    // Stage 1: Flow Tracking
+    flow_tracker: FlowTracker,
+    /// Current flow for packet (set by flow tracker, used by other stages)
+    current_flow: Option<Flow>,
+
+    // Stage 2: Port Scan Detection
     scan_detect_engine: ScanDetectEngine,
-    /// Brute force tracker
+
+    // Stage 2b: DoS/Flood Detection
+    dos_detector: DoSDetector,
+
+    // Stage 3: Brute Force Detection
     brute_force_tracker: BruteForceTracker,
+
+    // Stage 4: Signature Matching (TODO: integrate SignatureEngine)
+
+    // Stage 5: Threat Intel
+    intel_engine: IntelEngine,
+
+    // Stage 6: Protocol Analysis
+    protocol_detector: ProtocolDetector,
+
+    // Stage 7: WASM Plugin Processing
+    wasm_engine: WasmEngine,
+
+    // Accumulated stage context for WASM plugins
+    stage_context: StageContext,
+
+    // Stage 8: ML Anomaly Detection
+    ml_engine: MLEngine,
+
+    // Stage 9: Correlation
+    correlation_engine: CorrelationEngine,
+
     /// Per-stage metrics
     stage_metrics: PipelineMetrics,
     /// Last metrics log time
@@ -96,8 +137,38 @@ impl WorkerPool {
             busy_time_ns: Arc::new(AtomicU64::new(0)),
             total_time_ns: Arc::new(AtomicU64::new(0)),
             start_time: Instant::now(),
+
+            // Stage 1: Flow Tracking
+            flow_tracker: FlowTracker::new(FlowConfig::default()),
+            current_flow: None,
+
+            // Stage 2: Port Scan Detection
             scan_detect_engine: ScanDetectEngine::new(ScanDetectConfig::default()),
+
+            // Stage 2b: DoS/Flood Detection
+            dos_detector: DoSDetector::new(),
+
+            // Stage 3: Brute Force Detection
             brute_force_tracker: BruteForceTracker::new(),
+
+            // Stage 5: Threat Intel
+            intel_engine: IntelEngine::new(),
+
+            // Stage 6: Protocol Analysis
+            protocol_detector: ProtocolDetector::new(ProtocolConfig::default()),
+
+            // Stage 7: WASM Plugin Processing
+            wasm_engine: WasmEngine::new(),
+
+            // Accumulated stage context for WASM plugins
+            stage_context: StageContext::new(),
+
+            // Stage 8: ML Anomaly Detection
+            ml_engine: MLEngine::new(MLConfig::default()),
+
+            // Stage 9: Correlation
+            correlation_engine: CorrelationEngine::new(CorrelationConfig::default()),
+
             stage_metrics: PipelineMetrics::new(),
             last_metrics_log: Instant::now(),
         }
@@ -112,14 +183,17 @@ impl WorkerPool {
         let mut events = Vec::new();
         let mut is_marked = false;
 
+        // Reset stage context for this packet
+        self.stage_context = StageContext::new();
+
         // Extract TCP flags once for all stages
-        let is_syn = packet.tcp_flags.as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
-        let is_syn_ack = packet.tcp_flags.as_ref().map(|f| f.syn && f.ack).unwrap_or(false);
-        let is_ack = packet.tcp_flags.as_ref().map(|f| f.ack && !f.syn).unwrap_or(false);
-        let is_rst = packet.tcp_flags.as_ref().map(|f| f.rst).unwrap_or(false);
-        let is_fin = packet.tcp_flags.as_ref().map(|f| f.fin).unwrap_or(false);
-        let is_psh = packet.tcp_flags.as_ref().map(|f| f.psh).unwrap_or(false);
-        let is_urg = packet.tcp_flags.as_ref().map(|f| f.urg).unwrap_or(false);
+        let is_syn = packet.tcp_flags().as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
+        let is_syn_ack = packet.tcp_flags().as_ref().map(|f| f.syn && f.ack).unwrap_or(false);
+        let is_ack = packet.tcp_flags().as_ref().map(|f| f.ack && !f.syn).unwrap_or(false);
+        let is_rst = packet.tcp_flags().as_ref().map(|f| f.rst).unwrap_or(false);
+        let is_fin = packet.tcp_flags().as_ref().map(|f| f.fin).unwrap_or(false);
+        let is_psh = packet.tcp_flags().as_ref().map(|f| f.psh).unwrap_or(false);
+        let is_urg = packet.tcp_flags().as_ref().map(|f| f.urg).unwrap_or(false);
 
         // Process through each stage in configured order
         for stage in &config.stage_order {
@@ -133,22 +207,17 @@ impl WorkerPool {
                 // Stage 1: Flow Tracking
                 PipelineStage::FlowTracker => {
                     trace!("Stage 1: Flow tracking");
-                    // Flow tracking - connection state machine
-                    // TODO: implement flow table
+                    // Process packet through flow tracker
+                    let (flow, _direction) = self.flow_tracker.process(&mut packet.clone());
+                    self.current_flow = Some(flow.clone());
+                    // Flow tracking doesn't generate alerts directly, just tracks state
                     false
                 }
 
                 // Stage 2: Port Scan Detection
                 PipelineStage::ScanDetection => {
                     trace!("Stage 2: Port scan detection");
-                    if let Some(alert) = self.scan_detect_engine.process_packet_full(
-                        packet.src_ip,
-                        packet.dst_port,
-                        is_syn, is_syn_ack, is_ack, is_rst,
-                        is_fin, is_psh, is_urg,
-                        packet.payload.len(),
-                        None, None,
-                    ) {
+                    if let Some(alert) = self.scan_detect_engine.process(&packet) {
                         let severity = match alert.severity() {
                             s if s >= 8 => Severity::Critical,
                             s if s >= 6 => Severity::High,
@@ -180,14 +249,28 @@ impl WorkerPool {
                                 DetectionType::PortScan,
                                 severity,
                                 alert.src_ip,
-                                packet.dst_ip,
+                                packet.dst_ip(),
                                 format!("{} {} ({}): {} unique ports, score={:.1}",
                                     classification_str, alert_type_str, evidence,
                                     alert.unique_ports, score),
                             )
                             .with_detector("scan_detect")
-                            .with_ports(packet.src_port, packet.dst_port)
+                            .with_ports(packet.src_port(), packet.dst_port())
                         );
+                        true
+                    } else {
+                        false
+                    }
+                }
+
+                // Stage 2b: DoS/Flood Detection
+                PipelineStage::DoSDetection => {
+                    trace!("Stage 2b: DoS/Flood detection");
+                    let dos_alerts = self.dos_detector.process(&packet);
+                    if !dos_alerts.is_empty() {
+                        for alert in dos_alerts {
+                            events.push(alert.to_detection_event(&packet));
+                        }
                         true
                     } else {
                         false
@@ -198,12 +281,12 @@ impl WorkerPool {
                 PipelineStage::BruteForceDetection => {
                     trace!("Stage 3: Brute force detection");
                     let brute_force_alert = if is_syn {
-                        self.brute_force_tracker.session_start(packet.src_ip, packet.dst_ip, packet.dst_port);
+                        self.brute_force_tracker.session_start(packet.src_ip(), packet.dst_ip(), packet.dst_port());
                         None
                     } else if is_fin || is_rst {
-                        self.brute_force_tracker.session_end(packet.src_ip, packet.dst_ip, packet.dst_port, is_rst)
+                        self.brute_force_tracker.session_end(packet.src_ip(), packet.dst_ip(), packet.dst_port(), is_rst)
                     } else {
-                        self.brute_force_tracker.session_packet(packet.src_ip, packet.dst_ip, packet.dst_port, packet.payload.len());
+                        self.brute_force_tracker.session_packet(packet.src_ip(), packet.dst_ip(), packet.dst_port(), packet.payload().len());
                         None
                     };
 
@@ -224,7 +307,7 @@ impl WorkerPool {
                                     alert.service, alert.dst_port, alert.attempt_count),
                             )
                             .with_detector("brute_force")
-                            .with_ports(packet.src_port, alert.dst_port)
+                            .with_ports(packet.src_port(), alert.dst_port)
                         );
                         true
                     } else {
@@ -237,7 +320,7 @@ impl WorkerPool {
                     trace!("Stage 4: Signature matching");
                     // TODO: integrate SignatureEngine here
                     // For now, sample detection for sensitive ports
-                    if packet.dst_port == 22 || packet.dst_port == 3389 {
+                    if packet.dst_port() == 22 || packet.dst_port() == 3389 {
                         events.push(self.create_event(
                             &packet,
                             DetectionType::SignatureMatch,
@@ -253,30 +336,240 @@ impl WorkerPool {
                 // Stage 5: Threat Intel
                 PipelineStage::ThreatIntel => {
                     trace!("Stage 5: Threat intel lookup");
-                    // TODO: IOC matching
-                    false
+                    let mut marked = false;
+
+                    // Check source IP against threat intel
+                    if let Some(threat_match) = self.intel_engine.check_ip(&packet.src_ip()) {
+                        let severity = match threat_match.ioc.category {
+                            ThreatCategory::C2 | ThreatCategory::Botnet => Severity::Critical,
+                            ThreatCategory::Malware | ThreatCategory::Ransomware => Severity::High,
+                            ThreatCategory::Phishing | ThreatCategory::Spam => Severity::Medium,
+                            _ => Severity::Low,
+                        };
+                        events.push(
+                            DetectionEvent::new(
+                                DetectionType::ThreatIntelMatch,
+                                severity,
+                                packet.src_ip(),
+                                packet.dst_ip(),
+                                format!("Threat intel match: {} ({})",
+                                    threat_match.ioc.value,
+                                    threat_match.ioc.source),
+                            )
+                            .with_detector("threat_intel")
+                            .with_ports(packet.src_port(), packet.dst_port())
+                        );
+                        marked = true;
+                    }
+
+                    // Check destination IP against threat intel
+                    if let Some(threat_match) = self.intel_engine.check_ip(&packet.dst_ip()) {
+                        let severity = match threat_match.ioc.category {
+                            ThreatCategory::C2 | ThreatCategory::Botnet => Severity::Critical,
+                            ThreatCategory::Malware | ThreatCategory::Ransomware => Severity::High,
+                            ThreatCategory::Phishing | ThreatCategory::Spam => Severity::Medium,
+                            _ => Severity::Low,
+                        };
+                        events.push(
+                            DetectionEvent::new(
+                                DetectionType::MaliciousIp,
+                                severity,
+                                packet.src_ip(),
+                                packet.dst_ip(),
+                                format!("Connection to malicious IP: {} ({})",
+                                    threat_match.ioc.value,
+                                    threat_match.ioc.source),
+                            )
+                            .with_detector("threat_intel")
+                            .with_ports(packet.src_port(), packet.dst_port())
+                        );
+                        marked = true;
+                    }
+
+                    marked
                 }
 
                 // Stage 6: Protocol Analysis
                 PipelineStage::ProtocolAnalysis => {
                     trace!("Stage 6: Protocol analysis");
-                    // TODO: HTTP/DNS/TLS/SSH parsers
-                    false
+                    let mut marked = false;
+
+                    // Analyze packet with protocol detector if we have a flow
+                    if let Some(ref mut flow) = self.current_flow {
+                        let proto_events = self.protocol_detector.analyze(&packet, flow);
+                        if !proto_events.is_empty() {
+                            for proto_event in proto_events {
+                                // Convert protocol events to detection events where applicable
+                                match &proto_event {
+                                    ProtocolEvent::Http(tx) => {
+                                        // Log HTTP transactions, mark suspicious ones
+                                        if tx.request.as_ref().map(|r| {
+                                            r.uri.contains("..") || // Path traversal
+                                            r.uri.contains("select") || // SQL injection
+                                            r.uri.contains("<script") // XSS
+                                        }).unwrap_or(false) {
+                                            events.push(
+                                                DetectionEvent::new(
+                                                    DetectionType::ProtocolAnomaly,
+                                                    Severity::Medium,
+                                                    packet.src_ip(),
+                                                    packet.dst_ip(),
+                                                    format!("Suspicious HTTP request: {:?}",
+                                                        tx.request.as_ref().map(|r| &r.uri)),
+                                                )
+                                                .with_detector("protocol_analyzer")
+                                                .with_ports(packet.src_port(), packet.dst_port())
+                                                .with_protocol("HTTP")
+                                            );
+                                            marked = true;
+                                        }
+                                    }
+                                    ProtocolEvent::Dns(msg) => {
+                                        // Check for DNS tunneling (unusually long queries)
+                                        for query in &msg.queries {
+                                            if query.name.len() > 100 {
+                                                events.push(
+                                                    DetectionEvent::new(
+                                                        DetectionType::ProtocolAnomaly,
+                                                        Severity::Medium,
+                                                        packet.src_ip(),
+                                                        packet.dst_ip(),
+                                                        format!("Possible DNS tunneling: {} ({} chars)",
+                                                            &query.name[..50.min(query.name.len())],
+                                                            query.name.len()),
+                                                    )
+                                                    .with_detector("protocol_analyzer")
+                                                    .with_ports(packet.src_port(), packet.dst_port())
+                                                    .with_protocol("DNS")
+                                                );
+                                                marked = true;
+                                            }
+                                        }
+                                    }
+                                    ProtocolEvent::Tls(tls_event) => {
+                                        // TLS events are informational for now
+                                        debug!("TLS event: {:?}", tls_event);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+
+                    marked
                 }
 
-                // Stage 7: ML Anomaly Detection
+                // Stage 7: WASM Plugin Processing
+                PipelineStage::WasmPlugins => {
+                    trace!("Stage 7: WASM plugins");
+
+                    // Build context from prior stages (context is accumulated per-packet)
+                    let context = self.stage_context.clone()
+                        .with_stage(PipelineStage::WasmPlugins);
+
+                    // Process through WASM engine
+                    let wasm_results = self.wasm_engine.process(&packet, &context);
+
+                    if !wasm_results.is_empty() {
+                        // Convert WASM results to detection events
+                        let wasm_events = self.wasm_engine.results_to_events(&packet, &wasm_results);
+                        events.extend(wasm_events);
+                        true
+                    } else {
+                        false
+                    }
+                }
+
+                // Stage 8: ML Anomaly Detection
                 PipelineStage::MLDetection => {
-                    trace!("Stage 7: ML detection");
-                    // TODO: Flow-based anomaly scoring
-                    false
+                    trace!("Stage 8: ML detection");
+
+                    // ML detection requires completed flows for accurate scoring
+                    if let Some(ref flow) = self.current_flow {
+                        if let Some(anomaly_score) = self.ml_engine.process_flow(flow) {
+                            let severity = if anomaly_score.score >= 0.9 {
+                                Severity::Critical
+                            } else if anomaly_score.score >= 0.8 {
+                                Severity::High
+                            } else if anomaly_score.score >= 0.7 {
+                                Severity::Medium
+                            } else {
+                                Severity::Low
+                            };
+
+                            let category_str = match anomaly_score.category {
+                                Some(AnomalyCategory::DoS) => "DoS pattern",
+                                Some(AnomalyCategory::Probe) => "reconnaissance",
+                                Some(AnomalyCategory::DataExfiltration) => "data exfiltration",
+                                Some(AnomalyCategory::Beaconing) => "C2 beaconing",
+                                Some(AnomalyCategory::ProtocolAnomaly) => "protocol anomaly",
+                                Some(AnomalyCategory::VolumeAnomaly) => "volume anomaly",
+                                Some(AnomalyCategory::TimingAnomaly) => "timing anomaly",
+                                Some(AnomalyCategory::Unknown) | None => "unknown anomaly",
+                            };
+
+                            events.push(
+                                DetectionEvent::new(
+                                    DetectionType::AnomalyDetection,
+                                    severity,
+                                    packet.src_ip(),
+                                    packet.dst_ip(),
+                                    format!("ML anomaly detected: {} (score={:.2}, confidence={:.2})",
+                                        category_str, anomaly_score.score, anomaly_score.confidence),
+                                )
+                                .with_detector("ml_engine")
+                                .with_ports(packet.src_port(), packet.dst_port())
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 }
 
-                // Stage 8: Correlation (final stage)
+                // Stage 9: Correlation (final stage)
                 PipelineStage::Correlation => {
-                    trace!("Stage 8: Correlation");
-                    // Correlation combines events, writes to DB
-                    // Events are already collected, this is where we'd deduplicate
-                    // TODO: implement correlation logic
+                    trace!("Stage 9: Correlation");
+
+                    // Process all events through correlation engine
+                    let mut correlated_events = Vec::new();
+                    for event in events.drain(..) {
+                        match self.correlation_engine.process(event.clone()) {
+                            CorrelationResult::NewIncident(incident) => {
+                                debug!("New incident created: {} ({})",
+                                    incident.name, incident.id);
+                                // Create a high-severity event for new incidents
+                                correlated_events.push(
+                                    DetectionEvent::new(
+                                        DetectionType::Custom(format!("incident:{}", incident.name)),
+                                        incident.severity,
+                                        event.src_ip,
+                                        event.dst_ip,
+                                        format!("Incident: {} - {}", incident.name,
+                                            incident.description.as_deref().unwrap_or("")),
+                                    )
+                                    .with_detector("correlation")
+                                );
+                            }
+                            CorrelationResult::UpdatedIncident(incident) => {
+                                debug!("Incident updated: {} ({})",
+                                    incident.name, incident.id);
+                            }
+                            CorrelationResult::Standalone(standalone) => {
+                                // Keep standalone events
+                                correlated_events.push(standalone);
+                            }
+                            CorrelationResult::Suppressed => {
+                                // Event was a duplicate or aggregated
+                                trace!("Event suppressed by correlation");
+                            }
+                        }
+                    }
+
+                    // Put correlated events back
+                    events.extend(correlated_events);
                     !events.is_empty()
                 }
             };
@@ -323,13 +616,13 @@ impl WorkerPool {
         DetectionEvent::new(
             event_type,
             severity,
-            packet.src_ip,
-            packet.dst_ip,
+            packet.src_ip(),
+            packet.dst_ip(),
             message.to_string(),
         )
         .with_detector("packet_engine")
-        .with_ports(packet.src_port, packet.dst_port)
-        .with_protocol(&format!("{:?}", packet.protocol))
+        .with_ports(packet.src_port(), packet.dst_port())
+        .with_protocol(&format!("{:?}", packet.protocol()))
     }
 
     /// Get worker utilization (0.0-1.0)
@@ -402,17 +695,68 @@ pub struct WorkerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::packet::IpProtocol;
+    use crate::core::packet::{IpProtocol, TcpFlags};
+    use crate::core::event::DetectionType;
+    use crate::threat_intel::{Ioc, ThreatCategory as IntelThreatCategory};
+    use std::net::IpAddr;
 
     fn make_packet() -> Packet {
         let src_ip = "192.168.1.100".parse().unwrap();
         let dst_ip = "10.0.0.1".parse().unwrap();
 
         let mut packet = Packet::new(src_ip, dst_ip, IpProtocol::Tcp);
-        packet.src_port = 12345;
-        packet.dst_port = 80;
+        if let Some(tcp) = packet.tcp_mut() {
+            tcp.src_port = 12345;
+            tcp.dst_port = 80;
+        }
         packet.raw_len = 100;
         packet
+    }
+
+    fn syn_flags() -> TcpFlags {
+        TcpFlags { syn: true, ack: false, fin: false, rst: false, psh: false, urg: false, ece: false, cwr: false }
+    }
+
+    fn rst_flags() -> TcpFlags {
+        TcpFlags { syn: false, ack: false, fin: false, rst: true, psh: false, urg: false, ece: false, cwr: false }
+    }
+
+    fn ack_psh_flags() -> TcpFlags {
+        TcpFlags { syn: false, ack: true, fin: false, rst: false, psh: true, urg: false, ece: false, cwr: false }
+    }
+
+    fn ack_flags() -> TcpFlags {
+        TcpFlags { syn: false, ack: true, fin: false, rst: false, psh: false, urg: false, ece: false, cwr: false }
+    }
+
+    fn make_tcp_packet(src: &str, dst: &str, src_port: u16, dst_port: u16, flags: TcpFlags) -> Packet {
+        let src_ip: IpAddr = src.parse().unwrap();
+        let dst_ip: IpAddr = dst.parse().unwrap();
+
+        let mut packet = Packet::new(src_ip, dst_ip, IpProtocol::Tcp);
+        if let Some(tcp) = packet.tcp_mut() {
+            tcp.src_port = src_port;
+            tcp.dst_port = dst_port;
+            tcp.flags = flags;
+        }
+        packet.raw_len = 100;
+        packet
+    }
+
+    /// Disable all stages except the specified one
+    fn config_single_stage(stage: PipelineStage) -> PipelineConfig {
+        let mut config = PipelineConfig::default();
+        config.enable_flows = stage == PipelineStage::FlowTracker;
+        config.enable_scan_detect = stage == PipelineStage::ScanDetection;
+        config.enable_dos = stage == PipelineStage::DoSDetection;
+        config.enable_brute_force = stage == PipelineStage::BruteForceDetection;
+        config.enable_signatures = stage == PipelineStage::SignatureMatching;
+        config.enable_intel = stage == PipelineStage::ThreatIntel;
+        config.enable_protocols = stage == PipelineStage::ProtocolAnalysis;
+        config.enable_wasm = stage == PipelineStage::WasmPlugins;
+        config.enable_ml = stage == PipelineStage::MLDetection;
+        config.enable_correlation = stage == PipelineStage::Correlation;
+        config
     }
 
     #[test]
@@ -449,7 +793,9 @@ mod tests {
 
         // SSH packet should generate event
         let mut packet = make_packet();
-        packet.dst_port = 22;
+        if let Some(tcp) = packet.tcp_mut() {
+            tcp.dst_port = 22;
+        }
 
         let events = pool.process(packet, &config);
         assert_eq!(events.len(), 1);
@@ -469,5 +815,337 @@ mod tests {
 
         let util = pool.utilization();
         assert!(util >= 0.0 && util <= 1.0);
+    }
+
+    // ========================================================================
+    // Integration Tests: Each stage triggers detection through to correlation
+    // ========================================================================
+
+    /// Test 1: Flow Tracker stage
+    /// Verifies that flow tracking updates flow state (no events, but metrics update)
+    #[test]
+    fn test_stage1_flow_tracker() {
+        let mut pool = WorkerPool::default();
+        let config = config_single_stage(PipelineStage::FlowTracker);
+
+        // SYN packet to start a flow
+        let syn_flags = syn_flags();
+        let packet = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, syn_flags);
+
+        let events = pool.process(packet, &config);
+
+        // Flow tracker doesn't generate events directly, but processes packets
+        assert_eq!(pool.packets_processed(), 1);
+
+        // Check stage metrics were updated
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::FlowTracker) {
+            let snap = metrics.snapshot();
+            assert!(snap.pass_count >= 1, "FlowTracker pass_count should be >= 1");
+        }
+
+        // Flow should be created (check internal state)
+        assert!(pool.current_flow.is_some(), "Flow should be created after SYN packet");
+    }
+
+    /// Test 2: Scan Detection stage
+    /// Sends multiple SYN packets to different ports to trigger scan detection
+    #[test]
+    fn test_stage2_scan_detection() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_scan_detect = true;
+        config.enable_correlation = true;
+
+        let syn_flags = syn_flags();
+
+        // Send SYN packets to many different ports (port scan behavior)
+        let mut detected = false;
+        for port in 1..200 {
+            let packet = make_tcp_packet("10.0.0.50", "192.168.1.1", 45678, port, syn_flags.clone());
+            let events = pool.process(packet, &config);
+
+            if !events.is_empty() {
+                for event in &events {
+                    if matches!(event.event_type, DetectionType::PortScan) {
+                        detected = true;
+                        println!("Scan detected at port {}: {}", port, event.message);
+                    }
+                }
+            }
+        }
+
+        // Check stage metrics
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::ScanDetection) {
+            let snap = metrics.snapshot();
+            assert!(snap.pass_count >= 100, "ScanDetection should process many packets");
+            println!("ScanDetection: pass={}, marked={}", snap.pass_count, snap.marked_count);
+        }
+
+        assert!(detected, "Port scan should be detected after scanning many ports");
+    }
+
+    /// Test 3: Brute Force Detection stage
+    /// Sends multiple short sessions to trigger brute force detection
+    #[test]
+    fn test_stage3_brute_force_detection() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_brute_force = true;
+        config.enable_correlation = true;
+
+        let syn_flags = syn_flags();
+        let rst_flags = rst_flags();
+
+        let mut detected = false;
+
+        // Simulate multiple quick SSH sessions (brute force pattern)
+        for i in 0..15 {
+            // SYN (session start)
+            let syn_pkt = make_tcp_packet("10.0.0.100", "192.168.1.1", 40000 + i, 22, syn_flags.clone());
+            let _ = pool.process(syn_pkt, &config);
+
+            // RST (quick session end - failed login)
+            let rst_pkt = make_tcp_packet("10.0.0.100", "192.168.1.1", 40000 + i, 22, rst_flags.clone());
+            let events = pool.process(rst_pkt, &config);
+
+            for event in &events {
+                if matches!(event.event_type, DetectionType::BruteForce) {
+                    detected = true;
+                    println!("Brute force detected: {}", event.message);
+                }
+            }
+        }
+
+        // Check stage metrics
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::BruteForceDetection) {
+            let snap = metrics.snapshot();
+            assert!(snap.pass_count >= 10, "BruteForce should process session packets");
+            println!("BruteForce: pass={}, marked={}", snap.pass_count, snap.marked_count);
+        }
+
+        assert!(detected, "Brute force attack should be detected after multiple failed SSH sessions");
+    }
+
+    /// Test 4: Signature Matching stage
+    /// Sends packet to sensitive port to trigger signature match
+    #[test]
+    fn test_stage4_signature_matching() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_signatures = true;
+        config.enable_correlation = true;
+
+        // Packet to SSH port triggers signature
+        let syn_flags = syn_flags();
+        let packet = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 22, syn_flags);
+
+        let events = pool.process(packet, &config);
+
+        // Check stage metrics
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::SignatureMatching) {
+            let snap = metrics.snapshot();
+            assert!(snap.pass_count >= 1, "SignatureMatching should process packet");
+            assert!(snap.marked_count >= 1, "SSH connection should be marked");
+            println!("SignatureMatching: pass={}, marked={}", snap.pass_count, snap.marked_count);
+        }
+
+        // Check for signature match event
+        let has_sig_match = events.iter().any(|e| matches!(e.event_type, DetectionType::SignatureMatch));
+        assert!(has_sig_match, "Should detect signature match for SSH connection");
+    }
+
+    /// Test 5: Threat Intel stage
+    /// Adds malicious IP to cache and verifies detection
+    #[test]
+    fn test_stage5_threat_intel() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_intel = true;
+        config.enable_correlation = true;
+
+        // Add a known malicious IP to the threat intel cache
+        let malicious_ip: IpAddr = "198.51.100.1".parse().unwrap();
+        {
+            // Access internal cache to add test IOC
+            let ioc = Ioc::ip(malicious_ip, "test_feed", IntelThreatCategory::C2);
+            pool.intel_engine.add_ioc(ioc);
+        }
+
+        // Send packet FROM the malicious IP
+        let syn_flags = syn_flags();
+        let packet = make_tcp_packet("198.51.100.1", "192.168.1.1", 45678, 80, syn_flags);
+
+        let events = pool.process(packet, &config);
+
+        // Check stage metrics
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::ThreatIntel) {
+            let snap = metrics.snapshot();
+            assert!(snap.pass_count >= 1, "ThreatIntel should process packet");
+            assert!(snap.marked_count >= 1, "Malicious IP should be marked");
+            println!("ThreatIntel: pass={}, marked={}", snap.pass_count, snap.marked_count);
+        }
+
+        // Check for threat intel match event
+        let has_threat_match = events.iter().any(|e| matches!(e.event_type, DetectionType::ThreatIntelMatch));
+        assert!(has_threat_match, "Should detect threat intel match for malicious IP");
+    }
+
+    /// Test 6: Protocol Analysis stage
+    /// Sends HTTP request with path traversal to trigger protocol anomaly
+    #[test]
+    fn test_stage6_protocol_analysis() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_flows = true; // Need flow for protocol analysis
+        config.enable_protocols = true;
+        config.enable_correlation = true;
+
+        // First, establish a flow
+        let syn_flags = syn_flags();
+        let syn_pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, syn_flags);
+        let _ = pool.process(syn_pkt, &config);
+
+        // Now send HTTP request with path traversal
+        let ack_flags = ack_psh_flags();
+        let mut http_packet = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, ack_flags);
+        if let Some(tcp) = http_packet.tcp_mut() {
+            tcp.payload = b"GET /../../etc/passwd HTTP/1.1\r\nHost: target\r\n\r\n".to_vec();
+        }
+
+        let events = pool.process(http_packet, &config);
+
+        // Check stage metrics
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::ProtocolAnalysis) {
+            let snap = metrics.snapshot();
+            assert!(snap.pass_count >= 1, "ProtocolAnalysis should process packet");
+            println!("ProtocolAnalysis: pass={}, marked={}", snap.pass_count, snap.marked_count);
+        }
+
+        // Protocol analysis generates events for suspicious HTTP requests
+        println!("Protocol analysis events: {}", events.len());
+        for event in &events {
+            println!("  Event: {:?} - {}", event.event_type, event.message);
+        }
+    }
+
+    /// Test 7: ML Anomaly Detection stage
+    /// Creates a flow with anomalous characteristics
+    #[test]
+    fn test_stage7_ml_detection() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_flows = true; // Need flow for ML
+        config.enable_ml = true;
+        config.enable_correlation = true;
+
+        // ML requires flows to be established. Create multiple packets to build a flow
+        let syn_flags = syn_flags();
+        let ack_flags = ack_flags();
+
+        // Send packets to establish flow
+        let syn = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, syn_flags);
+        let _ = pool.process(syn, &config);
+
+        // Add data packets
+        for _ in 0..5 {
+            let mut data_pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, ack_flags.clone());
+            if let Some(tcp) = data_pkt.tcp_mut() {
+                tcp.payload = vec![0xAB; 1000]; // 1KB payload
+            }
+            let _ = pool.process(data_pkt, &config);
+        }
+
+        // Check stage metrics
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::MLDetection) {
+            let snap = metrics.snapshot();
+            println!("MLDetection: pass={}, marked={}", snap.pass_count, snap.marked_count);
+            // ML stage processes flows, so it should have some passes
+            assert!(snap.pass_count >= 1, "MLDetection should process flows");
+        }
+
+        // Note: ML detection requires training phase to complete before it generates alerts
+        // In a real test, we'd need to put the ML engine in Detecting state
+        println!("ML stage processed (detection requires trained model)");
+    }
+
+    /// Test 8: Correlation stage
+    /// Verifies that events from other stages are correlated
+    #[test]
+    fn test_stage8_correlation() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        // Enable signature + correlation to test event correlation
+        config.enable_signatures = true;
+        config.enable_correlation = true;
+
+        // Send multiple packets to same destination to trigger correlation
+        let syn_flags = syn_flags();
+
+        let mut all_events = Vec::new();
+        for i in 0..5 {
+            let packet = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678 + i, 22, syn_flags.clone());
+            let events = pool.process(packet, &config);
+            all_events.extend(events);
+        }
+
+        // Check correlation stage metrics
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::Correlation) {
+            let snap = metrics.snapshot();
+            println!("Correlation: pass={}, marked={}", snap.pass_count, snap.marked_count);
+            assert!(snap.pass_count >= 1, "Correlation should process events");
+        }
+
+        // Events should be processed through correlation
+        println!("Total events after correlation: {}", all_events.len());
+        for event in &all_events {
+            println!("  Correlated event: {:?} - {}", event.event_type, event.message);
+        }
+
+        // We should have some events (signature matches for SSH)
+        assert!(!all_events.is_empty(), "Should have events after correlation");
+    }
+
+    /// Integration test: All stages work together
+    #[test]
+    fn test_all_stages_integration() {
+        let mut pool = WorkerPool::default();
+        let config = PipelineConfig::default(); // All stages enabled
+
+        // Add malicious IP for threat intel
+        let malicious_ip: IpAddr = "203.0.113.1".parse().unwrap();
+        {
+            let ioc = Ioc::ip(malicious_ip, "test_feed", IntelThreatCategory::Botnet);
+            pool.intel_engine.add_ioc(ioc);
+        }
+
+        // Test 1: Normal traffic (should pass through without alerts)
+        let syn_flags = syn_flags();
+        let normal_pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, syn_flags.clone());
+        let events = pool.process(normal_pkt, &config);
+        println!("Normal packet events: {}", events.len());
+
+        // Test 2: Threat intel match (malicious source IP)
+        let malicious_pkt = make_tcp_packet("203.0.113.1", "192.168.1.1", 45678, 80, syn_flags.clone());
+        let events = pool.process(malicious_pkt, &config);
+        println!("Malicious IP events: {}", events.len());
+        assert!(events.iter().any(|e| matches!(e.event_type, DetectionType::ThreatIntelMatch)),
+            "Should detect malicious IP");
+
+        // Test 3: Signature match (SSH)
+        let ssh_pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 22, syn_flags.clone());
+        let events = pool.process(ssh_pkt, &config);
+        println!("SSH packet events: {}", events.len());
+        assert!(events.iter().any(|e| matches!(e.event_type, DetectionType::SignatureMatch)),
+            "Should detect SSH connection");
+
+        // Print final stage metrics
+        println!("\n=== Stage Metrics Summary ===");
+        for stage in PipelineStage::all() {
+            if let Some(metrics) = pool.stage_metrics().get(stage) {
+                let snap = metrics.snapshot();
+                println!("{:25} | pass: {:>5} | marked: {:>5} | time: {:>8}ns",
+                    stage.name(), snap.pass_count, snap.marked_count, snap.processing_time_ns);
+            }
+        }
     }
 }

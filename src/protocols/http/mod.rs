@@ -265,11 +265,11 @@ impl ProtocolAnalyzer for HttpAnalyzer {
     }
 
     fn parse(&self, packet: &Packet, flow: &mut Flow) -> Option<ProtocolEvent> {
-        if !self.config.enabled || packet.payload.is_empty() {
+        if !self.config.enabled || packet.payload().is_empty() {
             return None;
         }
 
-        let payload = &packet.payload;
+        let payload = &packet.payload();
 
         // Determine if request or response based on direction and content
         let transaction = match packet.direction {

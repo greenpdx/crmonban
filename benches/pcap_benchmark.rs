@@ -206,23 +206,27 @@ impl CsvFlowRecord {
         };
 
         let mut pkt = Packet::new(self.src_ip, self.dst_ip, protocol);
-        pkt.src_port = self.src_port;
-        pkt.dst_port = self.dst_port;
-        pkt.raw_len = (self.in_bytes / self.in_pkts.max(1)) as u32;
-
-        // Set TCP flags if TCP
-        if self.protocol == 6 {
-            pkt.tcp_flags = Some(TcpFlags {
-                syn: (self.tcp_flags & 0x02) != 0,
-                ack: (self.tcp_flags & 0x10) != 0,
-                fin: (self.tcp_flags & 0x01) != 0,
-                rst: (self.tcp_flags & 0x04) != 0,
-                psh: (self.tcp_flags & 0x08) != 0,
-                urg: (self.tcp_flags & 0x20) != 0,
-                ece: false,
-                cwr: false,
-            });
+        // Set ports and flags via layer access
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = self.src_port;
+            tcp.dst_port = self.dst_port;
+            if self.protocol == 6 {
+                tcp.flags = TcpFlags {
+                    syn: (self.tcp_flags & 0x02) != 0,
+                    ack: (self.tcp_flags & 0x10) != 0,
+                    fin: (self.tcp_flags & 0x01) != 0,
+                    rst: (self.tcp_flags & 0x04) != 0,
+                    psh: (self.tcp_flags & 0x08) != 0,
+                    urg: (self.tcp_flags & 0x20) != 0,
+                    ece: false,
+                    cwr: false,
+                };
+            }
+        } else if let Some(udp) = pkt.udp_mut() {
+            udp.src_port = self.src_port;
+            udp.dst_port = self.dst_port;
         }
+        pkt.raw_len = (self.in_bytes / self.in_pkts.max(1)) as u32;
 
         // Detect app protocol from port
         pkt.app_protocol = match (self.src_port, self.dst_port) {
@@ -685,26 +689,26 @@ impl PcapBenchmark {
                 // Extract transport layer info
                 match &sliced.transport {
                     Some(etherparse::TransportSlice::Tcp(tcp)) => {
-                        pkt.src_port = tcp.source_port();
-                        pkt.dst_port = tcp.destination_port();
-                        pkt.seq = Some(tcp.sequence_number());
-                        pkt.ack = if tcp.ack() { Some(tcp.acknowledgment_number()) } else { None };
-                        pkt.tcp_flags = Some(TcpFlags {
-                            syn: tcp.syn(),
-                            ack: tcp.ack(),
-                            fin: tcp.fin(),
-                            rst: tcp.rst(),
-                            psh: tcp.psh(),
-                            urg: tcp.urg(),
-                            ece: tcp.ece(),
-                            cwr: tcp.cwr(),
-                        });
-
-                        // Extract payload for signature matching
-                        pkt.payload = tcp.payload().to_vec();
+                        if let Some(tcp_info) = pkt.tcp_mut() {
+                            tcp_info.src_port = tcp.source_port();
+                            tcp_info.dst_port = tcp.destination_port();
+                            tcp_info.seq = tcp.sequence_number();
+                            tcp_info.ack = tcp.acknowledgment_number();
+                            tcp_info.flags = TcpFlags {
+                                syn: tcp.syn(),
+                                ack: tcp.ack(),
+                                fin: tcp.fin(),
+                                rst: tcp.rst(),
+                                psh: tcp.psh(),
+                                urg: tcp.urg(),
+                                ece: tcp.ece(),
+                                cwr: tcp.cwr(),
+                            };
+                            tcp_info.payload = tcp.payload().to_vec();
+                        }
 
                         // Detect app protocol from port
-                        pkt.app_protocol = match (pkt.src_port, pkt.dst_port) {
+                        pkt.app_protocol = match (pkt.src_port(), pkt.dst_port()) {
                             (80, _) | (_, 80) | (8080, _) | (_, 8080) => AppProtocol::Http,
                             (443, _) | (_, 443) | (8443, _) | (_, 8443) => AppProtocol::Https,
                             (22, _) | (_, 22) => AppProtocol::Ssh,
@@ -715,11 +719,13 @@ impl PcapBenchmark {
                         };
                     }
                     Some(etherparse::TransportSlice::Udp(udp)) => {
-                        pkt.src_port = udp.source_port();
-                        pkt.dst_port = udp.destination_port();
-                        pkt.payload = udp.payload().to_vec();
+                        if let Some(udp_info) = pkt.udp_mut() {
+                            udp_info.src_port = udp.source_port();
+                            udp_info.dst_port = udp.destination_port();
+                            udp_info.payload = udp.payload().to_vec();
+                        }
 
-                        pkt.app_protocol = match (pkt.src_port, pkt.dst_port) {
+                        pkt.app_protocol = match (pkt.src_port(), pkt.dst_port()) {
                             (53, _) | (_, 53) => AppProtocol::Dns,
                             (123, _) | (_, 123) => AppProtocol::Ntp,
                             _ => AppProtocol::Unknown,
@@ -751,8 +757,8 @@ impl PcapBenchmark {
         // Parse HTTP/TLS before flow tracking to avoid borrow conflicts
         #[cfg(feature = "protocols")]
         let (http_method, http_uri, http_host, http_user_agent, http_headers) =
-            if !pkt.payload.is_empty() && (pkt.dst_port == 80 || pkt.dst_port == 8080 || pkt.src_port == 80 || pkt.src_port == 8080) {
-                self.parse_http(&pkt.payload).unwrap_or((None, None, None, None, None))
+            if !pkt.payload().is_empty() && (pkt.dst_port() == 80 || pkt.dst_port() == 8080 || pkt.src_port() == 80 || pkt.src_port() == 8080) {
+                self.parse_http(&pkt.payload()).unwrap_or((None, None, None, None, None))
             } else {
                 (None, None, None, None, None)
             };
@@ -761,8 +767,8 @@ impl PcapBenchmark {
 
         #[cfg(feature = "protocols")]
         let (tls_sni, ja3_hash) =
-            if !pkt.payload.is_empty() && (pkt.dst_port == 443 || pkt.dst_port == 8443 || pkt.src_port == 443 || pkt.src_port == 8443) {
-                self.parse_tls(&pkt.payload).unwrap_or((None, None))
+            if !pkt.payload().is_empty() && (pkt.dst_port() == 443 || pkt.dst_port() == 8443 || pkt.src_port() == 443 || pkt.src_port() == 8443) {
+                self.parse_tls(&pkt.payload()).unwrap_or((None, None))
             } else {
                 (None, None)
             };
@@ -790,17 +796,17 @@ impl PcapBenchmark {
             let start = Instant::now();
 
             let ctx = PacketContext {
-                src_ip: Some(pkt.src_ip),
-                dst_ip: Some(pkt.dst_ip),
-                src_port: Some(pkt.src_port),
-                dst_port: Some(pkt.dst_port),
-                protocol: match pkt.protocol {
+                src_ip: Some(pkt.src_ip()),
+                dst_ip: Some(pkt.dst_ip()),
+                src_port: Some(pkt.src_port()),
+                dst_port: Some(pkt.dst_port()),
+                protocol: match pkt.protocol() {
                     IpProtocol::Tcp => Protocol::Tcp,
                     IpProtocol::Udp => Protocol::Udp,
                     IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
                     _ => Protocol::Ip,
                 },
-                tcp_flags: pkt.tcp_flags.as_ref().map(|f| {
+                tcp_flags: pkt.tcp_flags().as_ref().map(|f| {
                     let mut flags = 0u8;
                     if f.syn { flags |= 0x02; }
                     if f.ack { flags |= 0x10; }
@@ -811,7 +817,7 @@ impl PcapBenchmark {
                     flags
                 }).unwrap_or(0),
                 ttl: 64,
-                payload: pkt.payload.clone(),
+                payload: pkt.payload().to_vec(),
                 established: false,
                 to_server: true,
                 http_uri,
@@ -834,8 +840,8 @@ impl PcapBenchmark {
         #[cfg(feature = "threat-intel")]
         if let Some(ref cache) = self.ioc_cache {
             let start = Instant::now();
-            let _src_match = cache.check_ip(&pkt.src_ip);
-            let _dst_match = cache.check_ip(&pkt.dst_ip);
+            let _src_match = cache.check_ip(&pkt.src_ip());
+            let _dst_match = cache.check_ip(&pkt.dst_ip());
             intel_time = start.elapsed();
         }
 
@@ -862,28 +868,22 @@ impl PcapBenchmark {
         }
 
         // Port scan tracking - detect when a source touches many different destination ports
-        let is_syn = pkt.tcp_flags.as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
-        let is_syn_ack = pkt.tcp_flags.as_ref().map(|f| f.syn && f.ack).unwrap_or(false);
-        let is_ack = pkt.tcp_flags.as_ref().map(|f| f.ack && !f.syn).unwrap_or(false);
-        let is_rst = pkt.tcp_flags.as_ref().map(|f| f.rst).unwrap_or(false);
-        let scan_alert = self.scan_detect_engine.process_packet(
-            pkt.src_ip, pkt.dst_port, is_syn, is_syn_ack, is_ack, is_rst,
-            pkt.payload.len(), None, None
-        );
+        let scan_alert = self.scan_detect_engine.process(&pkt);
 
         // Brute force tracking - detect repeated failed login attempts
-        let is_fin = pkt.tcp_flags.as_ref().map(|f| f.fin).unwrap_or(false);
-        let is_rst = pkt.tcp_flags.as_ref().map(|f| f.rst).unwrap_or(false);
+        let is_syn = pkt.tcp_flags().as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
+        let is_fin = pkt.tcp_flags().as_ref().map(|f| f.fin).unwrap_or(false);
+        let is_rst = pkt.tcp_flags().as_ref().map(|f| f.rst).unwrap_or(false);
         let brute_force_alert = if is_syn {
             // Session start
-            self.brute_force_tracker.session_start(pkt.src_ip, pkt.dst_ip, pkt.dst_port);
+            self.brute_force_tracker.session_start(pkt.src_ip(), pkt.dst_ip(), pkt.dst_port());
             None
         } else if is_fin || is_rst {
             // Session end - check for brute force pattern
-            self.brute_force_tracker.session_end(pkt.src_ip, pkt.dst_ip, pkt.dst_port, is_rst)
+            self.brute_force_tracker.session_end(pkt.src_ip(), pkt.dst_ip(), pkt.dst_port(), is_rst)
         } else {
             // Track packet in session
-            self.brute_force_tracker.session_packet(pkt.src_ip, pkt.dst_ip, pkt.dst_port, pkt.payload.len());
+            self.brute_force_tracker.session_packet(pkt.src_ip(), pkt.dst_ip(), pkt.dst_port(), pkt.payload().len());
             None
         };
 
@@ -924,9 +924,9 @@ impl PcapBenchmark {
             }
 
             // Track payload stats
-            if !pkt.payload.is_empty() {
+            if !pkt.payload().is_empty() {
                 self.detection_stats.packets_with_payload += 1;
-                self.detection_stats.total_payload_bytes += pkt.payload.len();
+                self.detection_stats.total_payload_bytes += pkt.payload().len();
             }
         }
     }
@@ -1178,8 +1178,8 @@ impl PcapBenchmark {
         packets_processed.fetch_add(parsed.len() as u64, Ordering::Relaxed);
 
         // Count payload stats
-        let payload_count: u64 = parsed.iter().filter(|p| !p.payload.is_empty()).count() as u64;
-        let payload_bytes: u64 = parsed.iter().map(|p| p.payload.len() as u64).sum();
+        let payload_count: u64 = parsed.iter().filter(|p| !p.payload().is_empty()).count() as u64;
+        let payload_bytes: u64 = parsed.iter().map(|p| p.payload().len() as u64).sum();
         packets_with_payload.fetch_add(payload_count, Ordering::Relaxed);
         total_payload_bytes.fetch_add(payload_bytes, Ordering::Relaxed);
 
@@ -1189,17 +1189,17 @@ impl PcapBenchmark {
             // Build PacketContexts
             let contexts: Vec<_> = parsed.par_iter()
                 .map(|pkt| PacketContext {
-                    src_ip: Some(pkt.src_ip),
-                    dst_ip: Some(pkt.dst_ip),
-                    src_port: Some(pkt.src_port),
-                    dst_port: Some(pkt.dst_port),
-                    protocol: match pkt.protocol {
+                    src_ip: Some(pkt.src_ip()),
+                    dst_ip: Some(pkt.dst_ip()),
+                    src_port: Some(pkt.src_port()),
+                    dst_port: Some(pkt.dst_port()),
+                    protocol: match pkt.protocol() {
                         IpProtocol::Tcp => Protocol::Tcp,
                         IpProtocol::Udp => Protocol::Udp,
                         IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
                         _ => Protocol::Ip,
                     },
-                    tcp_flags: pkt.tcp_flags.as_ref().map(|f| {
+                    tcp_flags: pkt.tcp_flags().as_ref().map(|f| {
                         let mut flags = 0u8;
                         if f.syn { flags |= 0x02; }
                         if f.ack { flags |= 0x10; }
@@ -1210,7 +1210,7 @@ impl PcapBenchmark {
                         flags
                     }).unwrap_or(0),
                     ttl: 64,
-                    payload: pkt.payload.clone(),
+                    payload: pkt.payload().to_vec(),
                     established: false,
                     to_server: true,
                     http_uri: None,
@@ -1377,11 +1377,11 @@ impl PcapBenchmark {
         if let Some(ref engine) = self.signature_engine {
             let start = Instant::now();
             let ctx = PacketContext {
-                src_ip: Some(pkt.src_ip),
-                dst_ip: Some(pkt.dst_ip),
-                src_port: Some(pkt.src_port),
-                dst_port: Some(pkt.dst_port),
-                protocol: match pkt.protocol {
+                src_ip: Some(pkt.src_ip()),
+                dst_ip: Some(pkt.dst_ip()),
+                src_port: Some(pkt.src_port()),
+                dst_port: Some(pkt.dst_port()),
+                protocol: match pkt.protocol() {
                     IpProtocol::Tcp => Protocol::Tcp,
                     IpProtocol::Udp => Protocol::Udp,
                     IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
@@ -1412,8 +1412,8 @@ impl PcapBenchmark {
         #[cfg(feature = "threat-intel")]
         if let Some(ref cache) = self.ioc_cache {
             let start = Instant::now();
-            let _src_match = cache.check_ip(&pkt.src_ip);
-            let _dst_match = cache.check_ip(&pkt.dst_ip);
+            let _src_match = cache.check_ip(&pkt.src_ip());
+            let _dst_match = cache.check_ip(&pkt.dst_ip());
             intel_time = start.elapsed();
         }
 

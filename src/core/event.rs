@@ -63,7 +63,7 @@ pub enum DetectionType {
     // Network anomalies
     PortScan,
     NetworkScan,
-    DDoS,
+    DoS,
     BruteForce,
     DataExfiltration,
     Beaconing,
@@ -114,7 +114,7 @@ impl std::fmt::Display for DetectionType {
             DetectionType::MalformedPacket => write!(f, "malformed_packet"),
             DetectionType::PortScan => write!(f, "port_scan"),
             DetectionType::NetworkScan => write!(f, "network_scan"),
-            DetectionType::DDoS => write!(f, "ddos"),
+            DetectionType::DoS => write!(f, "dos"),
             DetectionType::BruteForce => write!(f, "brute_force"),
             DetectionType::DataExfiltration => write!(f, "data_exfiltration"),
             DetectionType::Beaconing => write!(f, "beaconing"),

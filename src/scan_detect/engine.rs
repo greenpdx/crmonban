@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
+use crate::core::packet::Packet;
 use super::behavior::{Classification, SourceBehavior};
 use super::config::ScanDetectConfig;
 use super::rules::{EvaluationContext, RuleRegistry};
@@ -148,47 +149,39 @@ impl ScanDetectEngine {
         }
     }
 
-    /// Process a SYN packet
-    pub fn process_syn(&mut self, src_ip: IpAddr, dst_port: u16) -> Option<ScanAlert> {
-        self.process_packet(src_ip, dst_port, true, false, false, false, 0, None, None)
+    /// Process a packet for scan detection
+    ///
+    /// This is the main entry point - extracts all needed info from the Packet.
+    /// Only processes TCP packets; returns None for non-TCP.
+    pub fn process(&mut self, packet: &Packet) -> Option<ScanAlert> {
+        // Only process TCP packets for scan detection
+        let flags = packet.tcp_flags()?;
+
+        let is_syn = flags.syn && !flags.ack;
+        let is_syn_ack = flags.syn && flags.ack;
+        let is_ack = flags.ack && !flags.syn;
+        let is_rst = flags.rst;
+        let is_fin = flags.fin;
+        let is_psh = flags.psh;
+        let is_urg = flags.urg;
+
+        self.process_internal(
+            packet.src_ip(),
+            packet.dst_port(),
+            is_syn,
+            is_syn_ack,
+            is_ack,
+            is_rst,
+            is_fin,
+            is_psh,
+            is_urg,
+            packet.payload().len(),
+            Some(packet.ttl()),
+        )
     }
 
-    /// Process a SYN-ACK packet (response to our SYN or their SYN)
-    pub fn process_syn_ack(&mut self, src_ip: IpAddr, dst_port: u16) -> Option<ScanAlert> {
-        self.process_packet(src_ip, dst_port, false, true, false, false, 0, None, None)
-    }
-
-    /// Process an ACK packet (handshake completion or data)
-    pub fn process_ack(&mut self, src_ip: IpAddr, dst_port: u16, payload_size: usize) -> Option<ScanAlert> {
-        self.process_packet(src_ip, dst_port, false, false, true, false, payload_size, None, None)
-    }
-
-    /// Process a RST packet
-    pub fn process_rst(&mut self, src_ip: IpAddr, dst_port: u16) -> Option<ScanAlert> {
-        self.process_packet(src_ip, dst_port, false, false, false, true, 0, None, None)
-    }
-
-    /// Process a packet with full details
-    #[allow(clippy::too_many_arguments)]
-    pub fn process_packet(
-        &mut self,
-        src_ip: IpAddr,
-        dst_port: u16,
-        is_syn: bool,
-        is_syn_ack: bool,
-        is_ack: bool,
-        is_rst: bool,
-        payload_size: usize,
-        ttl: Option<u8>,
-        _tcp_options: Option<&[u8]>,
-    ) -> Option<ScanAlert> {
-        // Extended version with all flags
-        self.process_packet_full(src_ip, dst_port, is_syn, is_syn_ack, is_ack, is_rst, false, false, false, payload_size, ttl, _tcp_options)
-    }
-
-    /// Process a packet with all TCP flags for stealth scan detection
-    #[allow(clippy::too_many_arguments)]
-    pub fn process_packet_full(
+    /// Internal implementation with all TCP flags for stealth scan detection
+    fn process_internal(
         &mut self,
         src_ip: IpAddr,
         dst_port: u16,
@@ -201,7 +194,6 @@ impl ScanDetectEngine {
         is_urg: bool,
         payload_size: usize,
         ttl: Option<u8>,
-        _tcp_options: Option<&[u8]>,
     ) -> Option<ScanAlert> {
         if !self.config.enabled {
             return None;
@@ -476,6 +468,37 @@ impl ScanDetectEngine {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+    use crate::core::packet::{IpProtocol, TcpFlags};
+
+    /// Create a TCP SYN packet for testing
+    fn make_syn_packet(src_ip: Ipv4Addr, dst_port: u16) -> Packet {
+        let mut pkt = Packet::new(
+            IpAddr::V4(src_ip),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpProtocol::Tcp,
+        );
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = 54321;
+            tcp.dst_port = dst_port;
+            tcp.flags = TcpFlags { syn: true, ..Default::default() };
+        }
+        pkt
+    }
+
+    /// Create a TCP ACK packet for testing
+    fn make_ack_packet(src_ip: Ipv4Addr, dst_port: u16) -> Packet {
+        let mut pkt = Packet::new(
+            IpAddr::V4(src_ip),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpProtocol::Tcp,
+        );
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = 54321;
+            tcp.dst_port = dst_port;
+            tcp.flags = TcpFlags { ack: true, ..Default::default() };
+        }
+        pkt
+    }
 
     #[test]
     fn test_engine_new() {
@@ -490,15 +513,17 @@ mod tests {
         let config = ScanDetectConfig::default();
         let mut engine = ScanDetectEngine::new(config);
 
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
 
         // Process multiple SYNs to different ports
         for port in 1..=5 {
-            engine.process_syn(ip, port);
+            let pkt = make_syn_packet(src_ip, port);
+            engine.process(&pkt);
         }
 
         assert_eq!(engine.tracked_sources(), 1);
 
+        let ip = IpAddr::V4(src_ip);
         let behavior = engine.get_behavior(&ip).unwrap();
         assert_eq!(behavior.half_open_count(), 5);
     }
@@ -508,13 +533,16 @@ mod tests {
         let config = ScanDetectConfig::default();
         let mut engine = ScanDetectEngine::new(config);
 
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
 
         // SYN
-        engine.process_syn(ip, 80);
+        let syn_pkt = make_syn_packet(src_ip, 80);
+        engine.process(&syn_pkt);
         // ACK (handshake complete)
-        engine.process_ack(ip, 80, 0);
+        let ack_pkt = make_ack_packet(src_ip, 80);
+        engine.process(&ack_pkt);
 
+        let ip = IpAddr::V4(src_ip);
         let behavior = engine.get_behavior(&ip).unwrap();
         // Score should be reduced due to completed handshake
         assert!(behavior.score < 0.0 || behavior.completed_count() > 0);
@@ -527,13 +555,15 @@ mod tests {
 
         let mut engine = ScanDetectEngine::new(config);
 
-        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let src_ip = Ipv4Addr::new(10, 0, 0, 1);
 
         // Process many SYNs to targeted ports without completing handshakes
         for port in [22, 23, 80, 443, 3389] {
-            engine.process_syn(ip, port);
+            let pkt = make_syn_packet(src_ip, port);
+            engine.process(&pkt);
         }
 
+        let ip = IpAddr::V4(src_ip);
         let behavior = engine.get_behavior(&ip).unwrap();
         assert!(behavior.score > 0.0);
         // Should be classified as at least suspicious
@@ -547,8 +577,9 @@ mod tests {
 
         // Simulate many sources with half-open connections
         for i in 0..20 {
-            let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, i as u8));
-            engine.process_syn(ip, 80);
+            let src_ip = Ipv4Addr::new(192, 168, 1, i as u8);
+            let pkt = make_syn_packet(src_ip, 80);
+            engine.process(&pkt);
         }
 
         engine.update_network_health();

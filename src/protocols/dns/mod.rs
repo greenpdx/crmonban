@@ -458,11 +458,11 @@ impl ProtocolAnalyzer for DnsAnalyzer {
     }
 
     fn parse(&self, packet: &Packet, flow: &mut Flow) -> Option<ProtocolEvent> {
-        if !self.config.enabled || packet.payload.is_empty() {
+        if !self.config.enabled || packet.payload().is_empty() {
             return None;
         }
 
-        let msg = self.parse_message(&packet.payload)?;
+        let msg = self.parse_message(&packet.payload())?;
 
         // Store query names in flow
         for query in &msg.queries {

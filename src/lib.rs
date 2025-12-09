@@ -1,6 +1,7 @@
 pub mod brute_force;
 pub mod config;
 pub mod database;
+pub mod dos;
 #[cfg(feature = "dbus")]
 pub mod dbus;
 pub mod dpi;
@@ -39,6 +40,10 @@ pub mod ml;
 // NIDS Stage 7: Alert Correlation
 #[cfg(feature = "correlation")]
 pub mod correlation;
+
+// NIDS Stage 7b: WASM Plugin Processing
+#[cfg(feature = "packet-engine")]
+pub mod wasm;
 
 // NIDS Stage 8: Packet Engine
 #[cfg(feature = "packet-engine")]
@@ -1410,17 +1415,17 @@ async fn start_packet_engine(
                     // Stage 2: Build context
                     let context_start = std::time::Instant::now();
                     let ctx = PacketContext {
-                        src_ip: Some(packet.src_ip),
-                        dst_ip: Some(packet.dst_ip),
-                        src_port: Some(packet.src_port),
-                        dst_port: Some(packet.dst_port),
-                        protocol: match packet.protocol {
+                        src_ip: Some(packet.src_ip()),
+                        dst_ip: Some(packet.dst_ip()),
+                        src_port: Some(packet.src_port()),
+                        dst_port: Some(packet.dst_port()),
+                        protocol: match packet.protocol() {
                             IpProtocol::Tcp => Protocol::Tcp,
                             IpProtocol::Udp => Protocol::Udp,
                             IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
                             _ => Protocol::Ip,
                         },
-                        tcp_flags: packet.tcp_flags.as_ref().map(|f| {
+                        tcp_flags: packet.tcp_flags().as_ref().map(|f| {
                             let mut flags = 0u8;
                             if f.syn { flags |= 0x02; }
                             if f.ack { flags |= 0x10; }
@@ -1431,7 +1436,7 @@ async fn start_packet_engine(
                             flags
                         }).unwrap_or(0),
                         ttl: 64,
-                        payload: packet.payload.clone(),
+                        payload: packet.payload().to_vec(),
                         established: false,
                         to_server: true,
                         http_uri: None,
@@ -1460,7 +1465,7 @@ async fn start_packet_engine(
                         info!(
                             "Signature match: [{}:{}] {} -> {}:{} - {}",
                             m.sid, priority,
-                            packet.src_ip, packet.dst_ip, packet.dst_port,
+                            packet.src_ip(), packet.dst_ip(), packet.dst_port(),
                             m.msg
                         );
 
@@ -1468,7 +1473,7 @@ async fn start_packet_engine(
                         let attack_event = models::AttackEvent {
                             id: None,
                             timestamp: chrono::Utc::now(),
-                            ip: packet.src_ip,
+                            ip: packet.src_ip(),
                             service: format!("nids:{}", m.classtype.as_deref().unwrap_or("unknown")),
                             event_type: models::AttackEventType::SignatureMatch,
                             details: Some(format!("[{}] {}", m.sid, m.msg)),
@@ -1483,7 +1488,7 @@ async fn start_packet_engine(
                         if config.auto_ban && priority <= 2 {
                             let ban_reason = format!("NIDS signature match: [{}] {}", m.sid, m.msg);
                             if let Err(e) = event_tx.send(MonitorEvent::Ban {
-                                ip: packet.src_ip,
+                                ip: packet.src_ip(),
                                 service: "nids".to_string(),
                                 reason: ban_reason,
                                 duration_secs: config.ban_duration,
@@ -1521,7 +1526,7 @@ async fn start_packet_engine(
                             ml_anomaly_count += 1;
                             warn!(
                                 "ML Anomaly detected: {} -> {} score={:.3} category={:?} - {}",
-                                packet.src_ip, packet.dst_ip,
+                                packet.src_ip(), packet.dst_ip(),
                                 anomaly_score.score,
                                 anomaly_score.category,
                                 anomaly_score.explanation.as_deref().unwrap_or("unknown")
@@ -1531,7 +1536,7 @@ async fn start_packet_engine(
                             let attack_event = models::AttackEvent {
                                 id: None,
                                 timestamp: chrono::Utc::now(),
-                                ip: packet.src_ip,
+                                ip: packet.src_ip(),
                                 service: "ml".to_string(),
                                 event_type: models::AttackEventType::Anomaly,
                                 details: Some(format!(
@@ -1549,7 +1554,7 @@ async fn start_packet_engine(
                             // Auto-ban on high-confidence anomalies
                             if config.auto_ban && anomaly_score.score > 0.9 {
                                 if let Err(e) = event_tx.send(MonitorEvent::Ban {
-                                    ip: packet.src_ip,
+                                    ip: packet.src_ip(),
                                     service: "ml".to_string(),
                                     reason: format!("ML anomaly: score={:.3}", anomaly_score.score),
                                     duration_secs: config.ban_duration,
@@ -1567,12 +1572,12 @@ async fn start_packet_engine(
                 #[cfg(feature = "threat-intel")]
                 if let Some(ref engine) = intel_engine {
                     let intel_start = std::time::Instant::now();
-                    if let Some(threat_match) = engine.check_ip(&packet.src_ip) {
+                    if let Some(threat_match) = engine.check_ip(&packet.src_ip()) {
                         threat_intel_hits += 1;
                         alert_count += 1;
                         warn!(
                             "Threat Intel match: {} - {} (category: {:?}, severity: {:?}, feed: {})",
-                            packet.src_ip,
+                            packet.src_ip(),
                             threat_match.ioc.value,
                             threat_match.ioc.category,
                             threat_match.ioc.severity,
@@ -1583,7 +1588,7 @@ async fn start_packet_engine(
                         let attack_event = models::AttackEvent {
                             id: None,
                             timestamp: chrono::Utc::now(),
-                            ip: packet.src_ip,
+                            ip: packet.src_ip(),
                             service: "threat_intel".to_string(),
                             event_type: models::AttackEventType::ThreatIntel,
                             details: Some(format!(
@@ -1604,7 +1609,7 @@ async fn start_packet_engine(
                             use threat_intel::Severity;
                             if matches!(threat_match.ioc.severity, Severity::Critical | Severity::High) {
                                 if let Err(e) = event_tx.send(MonitorEvent::Ban {
-                                    ip: packet.src_ip,
+                                    ip: packet.src_ip(),
                                     service: "threat_intel".to_string(),
                                     reason: format!("Threat intel: {:?} - {}", threat_match.ioc.category, threat_match.ioc.source),
                                     duration_secs: config.ban_duration,

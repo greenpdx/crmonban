@@ -1,4 +1,6 @@
 //! Plugin Registry with Hot-Reload Support
+//!
+//! Manages loading, registration, and hot-reloading of WASM and Rust plugins.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,8 +9,9 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn, error};
 
+use crate::core::packet::Packet;
 use super::plugin::{WasmPlugin, PluginConfig, PluginError, RustPlugin};
-use super::types::{PacketInfo, BehaviorInfo, WasmRuleResult};
+use super::types::{StageContext, WasmResult};
 
 /// Plugin registry that manages loading and hot-reloading of plugins
 pub struct PluginRegistry {
@@ -112,7 +115,7 @@ impl PluginRegistry {
             .collect();
 
         for id in to_reload {
-            if let Some(plugin) = self.wasm_plugins.get(&id) {
+            if let Some(_plugin) = self.wasm_plugins.get(&id) {
                 let config = PluginConfig::new(&format!("{}.wasm", id))
                     .with_id(&id);
 
@@ -151,24 +154,24 @@ impl PluginRegistry {
         }
     }
 
-    /// Evaluate all plugins
+    /// Evaluate all plugins against a packet with stage context
     pub fn evaluate_all(
         &self,
-        packet: &PacketInfo,
-        behavior: &BehaviorInfo,
-    ) -> Vec<WasmRuleResult> {
+        packet: &Packet,
+        context: &StageContext,
+    ) -> Vec<WasmResult> {
         let mut results = Vec::new();
 
         // Evaluate Rust plugins
         for plugin in self.rust_plugins.values() {
-            if let Some(result) = plugin.evaluate(packet, behavior) {
+            if let Some(result) = plugin.evaluate(packet, context) {
                 results.push(result);
             }
         }
 
         // Evaluate WASM plugins
         for plugin in self.wasm_plugins.values() {
-            match plugin.evaluate(packet, behavior) {
+            match plugin.evaluate(packet, context) {
                 Ok(Some(result)) => results.push(result),
                 Ok(None) => {}
                 Err(e) => {
@@ -191,6 +194,16 @@ impl PluginRegistry {
         ids.extend(self.rust_plugins.keys().cloned());
         ids
     }
+
+    /// Check if a specific plugin is loaded
+    pub fn has_plugin(&self, id: &str) -> bool {
+        self.wasm_plugins.contains_key(id) || self.rust_plugins.contains_key(id)
+    }
+
+    /// Remove a plugin by ID
+    pub fn remove_plugin(&mut self, id: &str) -> bool {
+        self.wasm_plugins.remove(id).is_some() || self.rust_plugins.remove(id).is_some()
+    }
 }
 
 impl Default for PluginRegistry {
@@ -207,6 +220,7 @@ pub struct HotReloader {
 }
 
 impl HotReloader {
+    /// Create a new hot-reloader
     pub fn new(registry: Arc<RwLock<PluginRegistry>>, interval: Duration) -> Self {
         Self {
             registry,
@@ -233,13 +247,27 @@ impl HotReloader {
     pub fn stop(&mut self) {
         self.running = false;
     }
+
+    /// Check if running
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::plugin::ExampleRustPlugin;
+    use super::super::plugin::PortDiversityPlugin;
     use std::net::{IpAddr, Ipv4Addr};
+    use crate::core::packet::IpProtocol;
+
+    fn make_test_packet() -> Packet {
+        Packet::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpProtocol::Tcp,
+        )
+    }
 
     #[test]
     fn test_registry_new() {
@@ -250,25 +278,40 @@ mod tests {
     #[test]
     fn test_register_rust_plugin() {
         let mut registry = PluginRegistry::new();
-        registry.register_rust_plugin(Arc::new(ExampleRustPlugin));
+        registry.register_rust_plugin(Arc::new(PortDiversityPlugin));
         assert_eq!(registry.plugin_count(), 1);
-        assert!(registry.plugin_ids().contains(&"RUST_EXAMPLE".to_string()));
+        assert!(registry.plugin_ids().contains(&"RUST_PORT_DIVERSITY".to_string()));
+        assert!(registry.has_plugin("RUST_PORT_DIVERSITY"));
     }
 
     #[test]
     fn test_evaluate_plugins() {
         let mut registry = PluginRegistry::new();
-        registry.register_rust_plugin(Arc::new(ExampleRustPlugin));
+        registry.register_rust_plugin(Arc::new(PortDiversityPlugin));
 
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
-        let packet = PacketInfo::from_ip(ip, 80);
-        let behavior = BehaviorInfo {
-            unique_ports: 150, // High enough to trigger example plugin
-            ..Default::default()
-        };
+        let packet = make_test_packet();
+        let context = StageContext::new()
+            .with_scan(super::super::types::ScanInfo {
+                scan_type: "syn_scan".to_string(),
+                confidence: 0.9,
+                ports_scanned: 150, // High enough to trigger
+                half_open: 50,
+                sequential_pattern: true,
+            });
 
-        let results = registry.evaluate_all(&packet, &behavior);
+        let results = registry.evaluate_all(&packet, &context);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].rule_id, "RUST_EXAMPLE");
+        assert_eq!(results[0].plugin_id, "RUST_PORT_DIVERSITY");
+    }
+
+    #[test]
+    fn test_remove_plugin() {
+        let mut registry = PluginRegistry::new();
+        registry.register_rust_plugin(Arc::new(PortDiversityPlugin));
+        assert!(registry.has_plugin("RUST_PORT_DIVERSITY"));
+
+        let removed = registry.remove_plugin("RUST_PORT_DIVERSITY");
+        assert!(removed);
+        assert!(!registry.has_plugin("RUST_PORT_DIVERSITY"));
     }
 }

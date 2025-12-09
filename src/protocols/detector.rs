@@ -30,7 +30,7 @@ impl ProtocolDetector {
 
     /// Analyze a packet and return protocol events
     pub fn analyze(&self, packet: &Packet, flow: &mut Flow) -> Vec<ProtocolEvent> {
-        if !self.config.enabled || packet.payload.is_empty() {
+        if !self.config.enabled || packet.payload().is_empty() {
             return Vec::new();
         }
 
@@ -63,8 +63,8 @@ impl ProtocolDetector {
             }
             _ => {
                 // Try TLS detection on common TLS ports
-                if self.config.tls.ports.contains(&packet.dst_port)
-                    || self.config.tls.ports.contains(&packet.src_port)
+                if self.config.tls.ports.contains(&packet.dst_port())
+                    || self.config.tls.ports.contains(&packet.src_port())
                 {
                     if let Some(event) = self.tls.parse(packet, flow) {
                         flow.app_protocol = AppProtocol::Https;
@@ -79,28 +79,28 @@ impl ProtocolDetector {
 
     /// Detect protocol from packet payload
     fn detect_protocol(&self, packet: &Packet, _flow: &Flow) -> AppProtocol {
-        let payload = &packet.payload;
+        let payload = &packet.payload();
         if payload.is_empty() {
             return AppProtocol::Unknown;
         }
 
         // Check HTTP
-        if self.config.http.enabled && self.http.detect(payload, packet.dst_port) {
+        if self.config.http.enabled && self.http.detect(payload, packet.dst_port()) {
             return AppProtocol::Http;
         }
 
         // Check DNS
-        if self.config.dns.enabled && self.dns.detect(payload, packet.dst_port) {
+        if self.config.dns.enabled && self.dns.detect(payload, packet.dst_port()) {
             return AppProtocol::Dns;
         }
 
         // Check TLS
-        if self.config.tls.enabled && self.tls.detect(payload, packet.dst_port) {
+        if self.config.tls.enabled && self.tls.detect(payload, packet.dst_port()) {
             return AppProtocol::Https;
         }
 
         // Fall back to port-based detection
-        AppProtocol::from_port(packet.dst_port, packet.protocol)
+        AppProtocol::from_port(packet.dst_port(), packet.protocol())
     }
 
     /// Get HTTP analyzer
@@ -131,9 +131,11 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
         );
-        pkt.src_port = 54321;
-        pkt.dst_port = dst_port;
-        pkt.payload = payload.to_vec();
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = 54321;
+            tcp.dst_port = dst_port;
+            tcp.payload = payload.to_vec();
+        }
         pkt
     }
 

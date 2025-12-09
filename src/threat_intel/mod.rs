@@ -235,6 +235,17 @@ impl IntelEngine {
     pub async fn needs_update(&self) -> bool {
         self.feed_manager.read().await.needs_update()
     }
+
+    /// Insert an IOC directly (for testing)
+    #[cfg(test)]
+    pub fn insert_ioc(&self, ioc: Ioc) {
+        self.cache.write().insert(ioc);
+    }
+
+    /// Insert an IOC directly (public for integration tests)
+    pub fn add_ioc(&self, ioc: Ioc) {
+        self.cache.write().insert(ioc);
+    }
 }
 
 impl Default for IntelEngine {

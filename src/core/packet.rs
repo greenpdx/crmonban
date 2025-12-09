@@ -1,10 +1,17 @@
 //! Unified packet representation
 //!
 //! Represents a network packet with all layers parsed for analysis.
+//! Uses strongly-typed layer structs from `layers.rs`.
 
 use std::net::IpAddr;
 use std::time::Instant;
 use serde::{Deserialize, Serialize};
+
+use super::layers::{
+    Layer3, Layer4, Ipv4Info, Ipv6Info,
+    TcpInfo, UdpInfo, IcmpInfo, Icmpv6Info,
+    EthernetInfo,
+};
 
 /// IP protocol numbers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -235,6 +242,13 @@ impl Default for Direction {
 }
 
 /// Unified packet representation for all analyzers
+///
+/// Uses strongly-typed layer structs:
+/// - Layer 2: Optional `ethernet` field (EthernetInfo)
+/// - Layer 3: `layer3` field (Layer3 enum: Ipv4/Ipv6)
+/// - Layer 4: `layer4` field (Layer4 enum: Tcp/Udp/Icmp/Icmpv6)
+///
+/// Provides backward-compatible accessor methods for common fields.
 #[derive(Debug, Clone)]
 pub struct Packet {
     /// Packet arrival timestamp
@@ -243,52 +257,20 @@ pub struct Packet {
     pub id: u64,
 
     // Layer 2 (optional)
-    /// Source MAC address
-    pub src_mac: Option<[u8; 6]>,
-    /// Destination MAC address
-    pub dst_mac: Option<[u8; 6]>,
-    /// VLAN tag
-    pub vlan: Option<u16>,
+    /// Ethernet frame info
+    pub ethernet: Option<EthernetInfo>,
 
     // Layer 3
-    /// Source IP address
-    pub src_ip: IpAddr,
-    /// Destination IP address
-    pub dst_ip: IpAddr,
-    /// IP protocol
-    pub protocol: IpProtocol,
-    /// Time to live
-    pub ttl: u8,
-    /// IP flags (fragmentation)
-    pub ip_flags: u8,
-    /// Fragment offset
-    pub frag_offset: u16,
-    /// IP ID
-    pub ip_id: u16,
+    /// IP layer (IPv4 or IPv6)
+    pub layer3: Layer3,
 
     // Layer 4
-    /// Source port (TCP/UDP)
-    pub src_port: u16,
-    /// Destination port (TCP/UDP)
-    pub dst_port: u16,
-    /// TCP flags
-    pub tcp_flags: Option<TcpFlags>,
-    /// TCP sequence number
-    pub seq: Option<u32>,
-    /// TCP acknowledgment number
-    pub ack: Option<u32>,
-    /// TCP window size
-    pub window: Option<u16>,
-    /// ICMP type
-    pub icmp_type: Option<u8>,
-    /// ICMP code
-    pub icmp_code: Option<u8>,
+    /// Transport layer (TCP, UDP, ICMP, etc.)
+    pub layer4: Layer4,
 
     // Layer 7
     /// Detected application protocol
     pub app_protocol: AppProtocol,
-    /// Payload data
-    pub payload: Vec<u8>,
 
     // Metadata
     /// Associated flow ID
@@ -296,147 +278,220 @@ pub struct Packet {
     /// Packet direction
     pub direction: Direction,
     /// Capture interface
-    pub interface: Option<String>,
+    pub interface: String,
     /// Raw packet length (including headers)
     pub raw_len: u32,
 }
 
 impl Packet {
-    /// Create a new packet with minimal info
-    pub fn new(src_ip: IpAddr, dst_ip: IpAddr, protocol: IpProtocol) -> Self {
+    /// Create a new packet from layer info
+    pub fn from_layers(packet_id: u64, layer3: Layer3, layer4: Layer4, interface: String) -> Self {
         Self {
             timestamp: Instant::now(),
-            id: 0,
-            src_mac: None,
-            dst_mac: None,
-            vlan: None,
-            src_ip,
-            dst_ip,
-            protocol,
-            ttl: 64,
-            ip_flags: 0,
-            frag_offset: 0,
-            ip_id: 0,
-            src_port: 0,
-            dst_port: 0,
-            tcp_flags: None,
-            seq: None,
-            ack: None,
-            window: None,
-            icmp_type: None,
-            icmp_code: None,
+            id: packet_id,
+            ethernet: None,
+            layer3,
+            layer4,
             app_protocol: AppProtocol::Unknown,
-            payload: Vec::new(),
             flow_id: None,
             direction: Direction::Unknown,
-            interface: None,
+            interface,
             raw_len: 0,
         }
     }
 
-    /// Parse packet from etherparse SlicedPacket
-    pub fn from_etherparse(data: &[u8], id: u64) -> Option<Self> {
-        use etherparse::SlicedPacket;
+    /// Create a new packet with minimal info (backward compatible)
+    pub fn new(src_ip: IpAddr, dst_ip: IpAddr, protocol: IpProtocol) -> Self {
+        use std::net::{Ipv4Addr, Ipv6Addr};
 
-        let sliced = SlicedPacket::from_ethernet(data).ok()?;
-
-        let (src_mac, dst_mac) = match &sliced.link {
-            Some(etherparse::LinkSlice::Ethernet2(eth)) => {
-                (Some(eth.source()), Some(eth.destination()))
-            }
-            _ => (None, None),
+        let layer3 = match (src_ip, dst_ip) {
+            (IpAddr::V4(src), IpAddr::V4(dst)) => Layer3::Ipv4(Ipv4Info {
+                src_addr: src,
+                dst_addr: dst,
+                protocol: protocol.into(),
+                ttl: 64,
+                ..Default::default()
+            }),
+            (IpAddr::V6(src), IpAddr::V6(dst)) => Layer3::Ipv6(Ipv6Info {
+                src_addr: src,
+                dst_addr: dst,
+                next_header: protocol.into(),
+                hop_limit: 64,
+                ..Default::default()
+            }),
+            // Mixed - default to IPv4 with unspecified
+            _ => Layer3::Ipv4(Ipv4Info {
+                src_addr: Ipv4Addr::UNSPECIFIED,
+                dst_addr: Ipv4Addr::UNSPECIFIED,
+                protocol: protocol.into(),
+                ttl: 64,
+                ..Default::default()
+            }),
         };
 
-        let (src_ip, dst_ip, protocol, ttl, ip_flags, ip_id, frag_offset) = match &sliced.net {
-            Some(etherparse::NetSlice::Ipv4(ipv4)) => {
-                let header = ipv4.header();
-                (
-                    IpAddr::V4(header.source_addr()),
-                    IpAddr::V4(header.destination_addr()),
-                    IpProtocol::from(header.protocol().0),
-                    header.ttl(),
-                    if header.dont_fragment() { 0x40 } else { 0 } |
-                        if header.more_fragments() { 0x20 } else { 0 },
-                    header.identification(),
-                    header.fragments_offset().value(),
-                )
-            }
-            Some(etherparse::NetSlice::Ipv6(ipv6)) => {
-                let header = ipv6.header();
-                (
-                    IpAddr::V6(header.source_addr()),
-                    IpAddr::V6(header.destination_addr()),
-                    IpProtocol::from(header.next_header().0),
-                    header.hop_limit(),
-                    0,
-                    0,
-                    0,
-                )
-            }
-            Some(etherparse::NetSlice::Arp(_)) | None => return None,
+        let layer4 = match protocol {
+            IpProtocol::Tcp => Layer4::Tcp(TcpInfo::default()),
+            IpProtocol::Udp => Layer4::Udp(UdpInfo::default()),
+            IpProtocol::Icmp => Layer4::Icmp(IcmpInfo::default()),
+            IpProtocol::Icmpv6 => Layer4::Icmpv6(Icmpv6Info::default()),
+            IpProtocol::Other(n) => Layer4::Unknown { protocol: n },
         };
 
-        let mut pkt = Packet::new(src_ip, dst_ip, protocol);
-        pkt.id = id;
-        pkt.src_mac = src_mac;
-        pkt.dst_mac = dst_mac;
-        pkt.ttl = ttl;
-        pkt.ip_flags = ip_flags;
-        pkt.ip_id = ip_id;
-        pkt.frag_offset = frag_offset;
-        pkt.raw_len = data.len() as u32;
-
-        match &sliced.transport {
-            Some(etherparse::TransportSlice::Tcp(tcp)) => {
-                pkt.src_port = tcp.source_port();
-                pkt.dst_port = tcp.destination_port();
-                pkt.tcp_flags = Some(TcpFlags {
-                    fin: tcp.fin(),
-                    syn: tcp.syn(),
-                    rst: tcp.rst(),
-                    psh: tcp.psh(),
-                    ack: tcp.ack(),
-                    urg: tcp.urg(),
-                    ece: tcp.ece(),
-                    cwr: tcp.cwr(),
-                });
-                pkt.seq = Some(tcp.sequence_number());
-                pkt.ack = Some(tcp.acknowledgment_number());
-                pkt.window = Some(tcp.window_size());
-            }
-            Some(etherparse::TransportSlice::Udp(udp)) => {
-                pkt.src_port = udp.source_port();
-                pkt.dst_port = udp.destination_port();
-            }
-            Some(etherparse::TransportSlice::Icmpv4(icmp)) => {
-                pkt.icmp_type = Some(icmp.type_u8());
-                pkt.icmp_code = Some(icmp.code_u8());
-            }
-            Some(etherparse::TransportSlice::Icmpv6(icmp)) => {
-                pkt.icmp_type = Some(icmp.type_u8());
-                pkt.icmp_code = Some(icmp.code_u8());
-            }
-            None => {}
+        Self {
+            timestamp: Instant::now(),
+            id: 0,
+            ethernet: None,
+            layer3,
+            layer4,
+            app_protocol: AppProtocol::Unknown,
+            flow_id: None,
+            direction: Direction::Unknown,
+            interface: String::new(),
+            raw_len: 0,
         }
-
-        if let Some(ip_payload) = sliced.ip_payload() {
-            pkt.payload = ip_payload.payload.to_vec();
-        }
-
-        // Guess app protocol from ports
-        let server_port = pkt.dst_port.min(pkt.src_port);
-        pkt.app_protocol = AppProtocol::from_port(server_port, pkt.protocol);
-
-        Some(pkt)
     }
+
+    // =========================================================================
+    // Backward-compatible accessors for Layer 3
+    // =========================================================================
+
+    /// Get source IP address
+    pub fn src_ip(&self) -> IpAddr {
+        self.layer3.src_ip()
+    }
+
+    /// Get destination IP address
+    pub fn dst_ip(&self) -> IpAddr {
+        self.layer3.dst_ip()
+    }
+
+    /// Get IP protocol
+    pub fn protocol(&self) -> IpProtocol {
+        IpProtocol::from(self.layer3.protocol())
+    }
+
+    /// Get TTL/hop limit
+    pub fn ttl(&self) -> u8 {
+        self.layer3.ttl()
+    }
+
+    /// Get IP flags (IPv4 only, returns 0 for IPv6)
+    pub fn ip_flags(&self) -> u8 {
+        match &self.layer3 {
+            Layer3::Ipv4(info) => info.flags,
+            Layer3::Ipv6(_) => 0,
+        }
+    }
+
+    /// Get fragment offset (IPv4 only, returns 0 for IPv6)
+    pub fn frag_offset(&self) -> u16 {
+        match &self.layer3 {
+            Layer3::Ipv4(info) => info.fragment_offset,
+            Layer3::Ipv6(_) => 0,
+        }
+    }
+
+    /// Get IP ID (IPv4 only, returns 0 for IPv6)
+    pub fn ip_id(&self) -> u16 {
+        match &self.layer3 {
+            Layer3::Ipv4(info) => info.identification,
+            Layer3::Ipv6(_) => 0,
+        }
+    }
+
+    // =========================================================================
+    // Backward-compatible accessors for Layer 4
+    // =========================================================================
+
+    /// Get source port (TCP/UDP only, returns 0 for ICMP)
+    pub fn src_port(&self) -> u16 {
+        self.layer4.src_port().unwrap_or(0)
+    }
+
+    /// Get destination port (TCP/UDP only, returns 0 for ICMP)
+    pub fn dst_port(&self) -> u16 {
+        self.layer4.dst_port().unwrap_or(0)
+    }
+
+    /// Get TCP flags (None for non-TCP)
+    pub fn tcp_flags(&self) -> Option<TcpFlags> {
+        self.layer4.as_tcp().map(|t| t.flags)
+    }
+
+    /// Get TCP sequence number (None for non-TCP)
+    pub fn seq(&self) -> Option<u32> {
+        self.layer4.as_tcp().map(|t| t.seq)
+    }
+
+    /// Get TCP acknowledgment number (None for non-TCP)
+    pub fn ack(&self) -> Option<u32> {
+        self.layer4.as_tcp().map(|t| t.ack)
+    }
+
+    /// Get TCP window size (None for non-TCP)
+    pub fn window(&self) -> Option<u16> {
+        self.layer4.as_tcp().map(|t| t.window)
+    }
+
+    /// Get ICMP type (None for non-ICMP)
+    pub fn icmp_type(&self) -> Option<u8> {
+        match &self.layer4 {
+            Layer4::Icmp(info) => Some(info.icmp_type),
+            Layer4::Icmpv6(info) => Some(info.icmp_type),
+            _ => None,
+        }
+    }
+
+    /// Get ICMP code (None for non-ICMP)
+    pub fn icmp_code(&self) -> Option<u8> {
+        match &self.layer4 {
+            Layer4::Icmp(info) => Some(info.code),
+            Layer4::Icmpv6(info) => Some(info.code),
+            _ => None,
+        }
+    }
+
+    /// Get payload reference
+    pub fn payload(&self) -> &[u8] {
+        self.layer4.payload()
+    }
+
+    // =========================================================================
+    // Backward-compatible accessors for Layer 2
+    // =========================================================================
+
+    /// Get source MAC address
+    pub fn src_mac(&self) -> Option<[u8; 6]> {
+        self.ethernet.as_ref().map(|e| e.src_mac)
+    }
+
+    /// Get destination MAC address
+    pub fn dst_mac(&self) -> Option<[u8; 6]> {
+        self.ethernet.as_ref().map(|e| e.dst_mac)
+    }
+
+    /// Get VLAN tag
+    pub fn vlan(&self) -> Option<u16> {
+        self.ethernet.as_ref().and_then(|e| e.vlan)
+    }
+
+    // =========================================================================
+    // Utility methods
+    // =========================================================================
 
     /// Get 5-tuple key for flow tracking
     pub fn flow_key(&self) -> (IpAddr, IpAddr, u16, u16, IpProtocol) {
+        let src_ip = self.src_ip();
+        let dst_ip = self.dst_ip();
+        let src_port = self.src_port();
+        let dst_port = self.dst_port();
+        let protocol = self.protocol();
+
         // Normalize so smaller IP/port is always first
-        if (self.src_ip, self.src_port) <= (self.dst_ip, self.dst_port) {
-            (self.src_ip, self.dst_ip, self.src_port, self.dst_port, self.protocol)
+        if (src_ip, src_port) <= (dst_ip, dst_port) {
+            (src_ip, dst_ip, src_port, dst_port, protocol)
         } else {
-            (self.dst_ip, self.src_ip, self.dst_port, self.src_port, self.protocol)
+            (dst_ip, src_ip, dst_port, src_port, protocol)
         }
     }
 
@@ -447,12 +502,84 @@ impl Packet {
 
     /// Check if packet is fragmented
     pub fn is_fragmented(&self) -> bool {
-        self.frag_offset > 0 || (self.ip_flags & 0x20) != 0
+        match &self.layer3 {
+            Layer3::Ipv4(info) => info.is_fragmented(),
+            Layer3::Ipv6(_) => false, // TODO: check IPv6 fragment header
+        }
     }
 
     /// Get payload as string (lossy UTF-8)
     pub fn payload_str(&self) -> String {
-        String::from_utf8_lossy(&self.payload).to_string()
+        String::from_utf8_lossy(self.payload()).to_string()
+    }
+
+    // =========================================================================
+    // Direct layer access
+    // =========================================================================
+
+    /// Get TCP info if this is a TCP packet
+    pub fn tcp(&self) -> Option<&TcpInfo> {
+        self.layer4.as_tcp()
+    }
+
+    /// Get mutable TCP info if this is a TCP packet
+    pub fn tcp_mut(&mut self) -> Option<&mut TcpInfo> {
+        self.layer4.as_tcp_mut()
+    }
+
+    /// Get UDP info if this is a UDP packet
+    pub fn udp(&self) -> Option<&UdpInfo> {
+        self.layer4.as_udp()
+    }
+
+    /// Get mutable UDP info if this is a UDP packet
+    pub fn udp_mut(&mut self) -> Option<&mut UdpInfo> {
+        self.layer4.as_udp_mut()
+    }
+
+    /// Get ICMP info if this is an ICMP packet
+    pub fn icmp(&self) -> Option<&IcmpInfo> {
+        self.layer4.as_icmp()
+    }
+
+    /// Get ICMPv6 info if this is an ICMPv6 packet
+    pub fn icmpv6(&self) -> Option<&Icmpv6Info> {
+        self.layer4.as_icmpv6()
+    }
+
+    /// Get IPv4 info if this is an IPv4 packet
+    pub fn ipv4(&self) -> Option<&Ipv4Info> {
+        self.layer3.as_ipv4()
+    }
+
+    /// Get IPv6 info if this is an IPv6 packet
+    pub fn ipv6(&self) -> Option<&Ipv6Info> {
+        self.layer3.as_ipv6()
+    }
+
+    /// Check if this is a TCP packet
+    pub fn is_tcp(&self) -> bool {
+        self.layer4.is_tcp()
+    }
+
+    /// Check if this is a UDP packet
+    pub fn is_udp(&self) -> bool {
+        self.layer4.is_udp()
+    }
+
+    /// Check if this is an ICMP packet (v4 or v6)
+    pub fn is_icmp(&self) -> bool {
+        self.layer4.is_icmp()
+    }
+
+    /// Check if this is an IPv4 packet
+    pub fn is_ipv4(&self) -> bool {
+        self.layer3.is_ipv4()
+    }
+
+    /// Check if this is an IPv6 packet
+    pub fn is_ipv6(&self) -> bool {
+        self.layer3.is_ipv6()
     }
 }
 
@@ -486,7 +613,65 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
             IpProtocol::Tcp,
         );
-        assert_eq!(pkt.protocol, IpProtocol::Tcp);
-        assert_eq!(pkt.ttl, 64);
+        assert_eq!(pkt.protocol(), IpProtocol::Tcp);
+        assert_eq!(pkt.ttl(), 64);
+        assert!(pkt.is_tcp());
+        assert!(pkt.is_ipv4());
+    }
+
+    #[test]
+    fn test_packet_from_layers() {
+        let layer3 = Layer3::Ipv4(Ipv4Info {
+            src_addr: Ipv4Addr::new(10, 0, 0, 1),
+            dst_addr: Ipv4Addr::new(10, 0, 0, 2),
+            protocol: 6,
+            ttl: 128,
+            ..Default::default()
+        });
+
+        let layer4 = Layer4::Tcp(TcpInfo {
+            src_port: 12345,
+            dst_port: 80,
+            flags: TcpFlags { syn: true, ..Default::default() },
+            ..Default::default()
+        });
+
+        let pkt = Packet::from_layers(42, layer3, layer4, "test0".to_string());
+
+        assert_eq!(pkt.id, 42);
+        assert_eq!(pkt.src_ip().to_string(), "10.0.0.1");
+        assert_eq!(pkt.interface, "test0");
+        assert_eq!(pkt.dst_ip().to_string(), "10.0.0.2");
+        assert_eq!(pkt.src_port(), 12345);
+        assert_eq!(pkt.dst_port(), 80);
+        assert!(pkt.tcp_flags().unwrap().syn);
+        assert!(pkt.tcp().unwrap().is_syn());
+    }
+
+    #[test]
+    fn test_backward_compat_accessors() {
+        let pkt = Packet::new(
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)),
+            IpProtocol::Udp,
+        );
+
+        // These should all work even though internally using layer structs
+        let _ = pkt.src_ip();
+        let _ = pkt.dst_ip();
+        let _ = pkt.protocol();
+        let _ = pkt.ttl();
+        let _ = pkt.ip_flags();
+        let _ = pkt.frag_offset();
+        let _ = pkt.ip_id();
+        let _ = pkt.src_port();
+        let _ = pkt.dst_port();
+        let _ = pkt.tcp_flags();
+        let _ = pkt.seq();
+        let _ = pkt.ack();
+        let _ = pkt.window();
+        let _ = pkt.icmp_type();
+        let _ = pkt.icmp_code();
+        let _ = pkt.payload();
     }
 }

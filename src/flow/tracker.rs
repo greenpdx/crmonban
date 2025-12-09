@@ -226,9 +226,11 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
         );
-        pkt.src_port = src_port;
-        pkt.dst_port = dst_port;
-        pkt.tcp_flags = Some(TcpFlags { syn: true, ..Default::default() });
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = src_port;
+            tcp.dst_port = dst_port;
+            tcp.flags = TcpFlags { syn: true, ..Default::default() };
+        }
         pkt.raw_len = 64;
         pkt
     }
@@ -239,9 +241,11 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             IpProtocol::Tcp,
         );
-        pkt.src_port = src_port;
-        pkt.dst_port = dst_port;
-        pkt.tcp_flags = Some(TcpFlags { syn: true, ack: true, ..Default::default() });
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = src_port;
+            tcp.dst_port = dst_port;
+            tcp.flags = TcpFlags { syn: true, ack: true, ..Default::default() };
+        }
         pkt.raw_len = 64;
         pkt
     }

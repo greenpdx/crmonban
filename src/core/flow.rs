@@ -112,21 +112,21 @@ impl FlowKey {
     /// Create from packet (normalized so smaller IP/port is always first)
     #[inline]
     pub fn from_packet(pkt: &Packet) -> Self {
-        if (pkt.src_ip, pkt.src_port) <= (pkt.dst_ip, pkt.dst_port) {
+        if (pkt.src_ip(), pkt.src_port()) <= (pkt.dst_ip(), pkt.dst_port()) {
             Self {
-                ip_a: pkt.src_ip,
-                ip_b: pkt.dst_ip,
-                port_a: pkt.src_port,
-                port_b: pkt.dst_port,
-                protocol: pkt.protocol,
+                ip_a: pkt.src_ip(),
+                ip_b: pkt.dst_ip(),
+                port_a: pkt.src_port(),
+                port_b: pkt.dst_port(),
+                protocol: pkt.protocol(),
             }
         } else {
             Self {
-                ip_a: pkt.dst_ip,
-                ip_b: pkt.src_ip,
-                port_a: pkt.dst_port,
-                port_b: pkt.src_port,
-                protocol: pkt.protocol,
+                ip_a: pkt.dst_ip(),
+                ip_b: pkt.src_ip(),
+                port_a: pkt.dst_port(),
+                port_b: pkt.src_port(),
+                protocol: pkt.protocol(),
             }
         }
     }
@@ -282,11 +282,11 @@ impl Flow {
 
         // First packet sender is the client
         let (client_ip, client_port, server_ip, server_port) =
-            (pkt.src_ip, pkt.src_port, pkt.dst_ip, pkt.dst_port);
+            (pkt.src_ip(), pkt.src_port(), pkt.dst_ip(), pkt.dst_port());
 
-        let initial_state = match pkt.protocol {
+        let initial_state = match pkt.protocol() {
             IpProtocol::Tcp => {
-                if pkt.tcp_flags.map(|f| f.is_syn()).unwrap_or(false) {
+                if pkt.tcp_flags().map(|f| f.is_syn()).unwrap_or(false) {
                     FlowState::SynSent
                 } else {
                     FlowState::New
@@ -310,7 +310,7 @@ impl Flow {
             client_port,
             server_ip,
             server_port,
-            protocol: pkt.protocol,
+            protocol: pkt.protocol(),
             state: initial_state,
             start_time: now,
             last_seen: now,
@@ -324,9 +324,9 @@ impl Flow {
             bwd_pkt_stats: StreamingStats::new(),
             bwd_iat_stats: StreamingStats::new(),
             bwd_last_time: None,
-            client_isn: pkt.seq,
+            client_isn: pkt.seq(),
             server_isn: None,
-            syn_count: if pkt.tcp_flags.map(|f| f.syn).unwrap_or(false) { 1 } else { 0 },
+            syn_count: if pkt.tcp_flags().map(|f| f.syn).unwrap_or(false) { 1 } else { 0 },
             syn_ack_count: 0,
             fin_count: 0,
             rst_count: 0,
@@ -348,7 +348,7 @@ impl Flow {
         self.last_seen = now;
 
         // Determine direction
-        let is_forward = pkt.src_ip == self.client_ip && pkt.src_port == self.client_port;
+        let is_forward = pkt.src_ip() == self.client_ip && pkt.src_port() == self.client_port;
         let direction = if is_forward {
             Direction::ToServer
         } else {
@@ -379,12 +379,12 @@ impl Flow {
 
             // Capture server ISN from SYN-ACK
             if self.server_isn.is_none() {
-                self.server_isn = pkt.seq;
+                self.server_isn = pkt.seq();
             }
         }
 
         // Update TCP flags
-        if let Some(flags) = pkt.tcp_flags {
+        if let Some(flags) = pkt.tcp_flags() {
             if flags.syn { self.syn_count += 1; }
             if flags.syn && flags.ack { self.syn_ack_count += 1; }
             if flags.fin { self.fin_count += 1; }
@@ -775,14 +775,16 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
         );
-        pkt.src_port = 54321;
-        pkt.dst_port = 80;
-        pkt.tcp_flags = Some(TcpFlags { syn: true, ..Default::default() });
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = 54321;
+            tcp.dst_port = 80;
+            tcp.flags = TcpFlags { syn: true, ..Default::default() };
+        }
         pkt.raw_len = 64;
 
         let flow = Flow::new(1, &pkt);
 
-        assert_eq!(flow.client_ip, pkt.src_ip);
+        assert_eq!(flow.client_ip, pkt.src_ip());
         assert_eq!(flow.server_port, 80);
         assert_eq!(flow.state, FlowState::SynSent);
         assert_eq!(flow.fwd_packets, 1);
@@ -795,9 +797,11 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
         );
-        pkt1.src_port = 54321;
-        pkt1.dst_port = 80;
-        pkt1.tcp_flags = Some(TcpFlags { syn: true, ..Default::default() });
+        if let Some(tcp) = pkt1.tcp_mut() {
+            tcp.src_port = 54321;
+            tcp.dst_port = 80;
+            tcp.flags = TcpFlags { syn: true, ..Default::default() };
+        }
         pkt1.raw_len = 64;
 
         let mut flow = Flow::new(1, &pkt1);
@@ -808,9 +812,11 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             IpProtocol::Tcp,
         );
-        pkt2.src_port = 80;
-        pkt2.dst_port = 54321;
-        pkt2.tcp_flags = Some(TcpFlags { syn: true, ack: true, ..Default::default() });
+        if let Some(tcp) = pkt2.tcp_mut() {
+            tcp.src_port = 80;
+            tcp.dst_port = 54321;
+            tcp.flags = TcpFlags { syn: true, ack: true, ..Default::default() };
+        }
         pkt2.raw_len = 64;
 
         let dir = flow.update(&pkt2);
@@ -827,8 +833,10 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
         );
-        pkt.src_port = 54321;
-        pkt.dst_port = 80;
+        if let Some(tcp) = pkt.tcp_mut() {
+            tcp.src_port = 54321;
+            tcp.dst_port = 80;
+        }
         pkt.raw_len = 100;
 
         let flow = Flow::new(1, &pkt);
