@@ -35,6 +35,7 @@ use crate::flow::{FlowTracker, FlowConfig};
 use crate::ml::{MLEngine, MLConfig, AnomalyCategory};
 use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent};
 use crate::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
+use crate::signatures::{SignatureEngine, SignatureConfig, PacketContext, MatchResult, Action};
 use crate::threat_intel::{IntelEngine, ThreatCategory};
 use crate::wasm::{WasmEngine, WasmConfig, StageContext, ScanInfo, IntelInfo};
 

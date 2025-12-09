@@ -16,6 +16,7 @@ use rayon::prelude::*;
 
 use super::ast::*;
 use super::{SignatureConfig, RuleStats};
+use crate::core::packet::Packet;
 
 /// Result of a signature match
 #[derive(Debug, Clone)]
@@ -40,30 +41,191 @@ pub struct MatchResult {
     pub content_matches: Vec<(usize, usize)>,
 }
 
-/// Packet context for matching
+/// Flow state for signature matching
+#[derive(Debug, Clone, Default)]
+pub struct FlowState {
+    /// Is established connection
+    pub established: bool,
+    /// Direction to server
+    pub to_server: bool,
+}
+
+/// HTTP protocol context
+#[derive(Debug, Clone, Default)]
+pub struct HttpContext {
+    /// HTTP URI
+    pub uri: Option<Vec<u8>>,
+    /// HTTP method
+    pub method: Option<Vec<u8>>,
+    /// HTTP headers
+    pub headers: Option<Vec<u8>>,
+    /// HTTP host
+    pub host: Option<Vec<u8>>,
+    /// HTTP user agent
+    pub user_agent: Option<Vec<u8>>,
+}
+
+/// DNS protocol context
+#[derive(Debug, Clone, Default)]
+pub struct DnsContext {
+    /// DNS query name
+    pub query: Option<Vec<u8>>,
+}
+
+/// TLS protocol context
+#[derive(Debug, Clone, Default)]
+pub struct TlsContext {
+    /// TLS SNI (Server Name Indication)
+    pub sni: Option<Vec<u8>>,
+    /// JA3 fingerprint hash
+    pub ja3_hash: Option<String>,
+}
+
+/// SSH protocol context
+#[derive(Debug, Clone, Default)]
+pub struct SshContext {
+    /// SSH version string
+    pub version: Option<String>,
+    /// HASSH fingerprint
+    pub hassh: Option<String>,
+}
+
+/// SMTP protocol context
+#[derive(Debug, Clone, Default)]
+pub struct SmtpContext {
+    /// MAIL FROM address
+    pub mail_from: Option<Vec<u8>>,
+    /// RCPT TO addresses
+    pub rcpt_to: Option<Vec<Vec<u8>>>,
+    /// HELO/EHLO hostname
+    pub helo: Option<Vec<u8>>,
+}
+
+/// Protocol-specific parsed context for signature matching
+#[derive(Debug, Clone)]
+pub enum ProtocolContext {
+    /// HTTP protocol data
+    Http(HttpContext),
+    /// DNS protocol data
+    Dns(DnsContext),
+    /// TLS protocol data
+    Tls(TlsContext),
+    /// SSH protocol data
+    Ssh(SshContext),
+    /// SMTP protocol data
+    Smtp(SmtpContext),
+    /// No protocol-specific data available
+    None,
+}
+
+impl Default for ProtocolContext {
+    fn default() -> Self {
+        ProtocolContext::None
+    }
+}
+
+impl ProtocolContext {
+    /// Get HTTP URI if available
+    pub fn http_uri(&self) -> Option<&[u8]> {
+        match self {
+            ProtocolContext::Http(h) => h.uri.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get HTTP method if available
+    pub fn http_method(&self) -> Option<&[u8]> {
+        match self {
+            ProtocolContext::Http(h) => h.method.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get HTTP headers if available
+    pub fn http_headers(&self) -> Option<&[u8]> {
+        match self {
+            ProtocolContext::Http(h) => h.headers.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get HTTP host if available
+    pub fn http_host(&self) -> Option<&[u8]> {
+        match self {
+            ProtocolContext::Http(h) => h.host.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get HTTP user agent if available
+    pub fn http_user_agent(&self) -> Option<&[u8]> {
+        match self {
+            ProtocolContext::Http(h) => h.user_agent.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get DNS query if available
+    pub fn dns_query(&self) -> Option<&[u8]> {
+        match self {
+            ProtocolContext::Dns(d) => d.query.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get TLS SNI if available
+    pub fn tls_sni(&self) -> Option<&[u8]> {
+        match self {
+            ProtocolContext::Tls(t) => t.sni.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get JA3 hash if available
+    pub fn ja3_hash(&self) -> Option<&str> {
+        match self {
+            ProtocolContext::Tls(t) => t.ja3_hash.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Convert IpProtocol to signature Protocol
+fn ip_protocol_to_sig_protocol(ip_proto: crate::core::packet::IpProtocol) -> Protocol {
+    use crate::core::packet::IpProtocol;
+    match ip_proto {
+        IpProtocol::Tcp => Protocol::Tcp,
+        IpProtocol::Udp => Protocol::Udp,
+        IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
+        IpProtocol::Other(_) => Protocol::Ip,
+    }
+}
+
+/// Legacy packet context for signature matching (kept for backward compatibility)
+/// TODO: Remove once all callers migrate to match_packet(&Packet, &ProtocolContext, &FlowState)
 #[derive(Debug, Clone, Default)]
 pub struct PacketContext {
-    /// Source IP
+    /// Protocol (TCP, UDP, etc.)
+    pub protocol: Protocol,
+    /// Source IP address
     pub src_ip: Option<IpAddr>,
-    /// Destination IP
+    /// Destination IP address
     pub dst_ip: Option<IpAddr>,
     /// Source port
     pub src_port: Option<u16>,
     /// Destination port
     pub dst_port: Option<u16>,
-    /// Protocol
-    pub protocol: Protocol,
-    /// TCP flags
-    pub tcp_flags: u8,
-    /// TTL
-    pub ttl: u8,
-    /// Payload data
+    /// Packet payload
     pub payload: Vec<u8>,
     /// Is established connection
     pub established: bool,
-    /// Direction to server
+    /// Direction: to server
     pub to_server: bool,
-    /// HTTP URI (if HTTP)
+    /// TCP flags as u8
+    pub tcp_flags: u8,
+    /// TTL value
+    pub ttl: u8,
+    /// HTTP URI (for http_uri sticky buffer)
     pub http_uri: Option<Vec<u8>>,
     /// HTTP method
     pub http_method: Option<Vec<u8>>,
@@ -73,11 +235,11 @@ pub struct PacketContext {
     pub http_host: Option<Vec<u8>>,
     /// HTTP user agent
     pub http_user_agent: Option<Vec<u8>>,
-    /// DNS query name
+    /// DNS query
     pub dns_query: Option<Vec<u8>>,
     /// TLS SNI
     pub tls_sni: Option<Vec<u8>>,
-    /// JA3 fingerprint
+    /// JA3 hash
     pub ja3_hash: Option<String>,
 }
 
@@ -309,7 +471,54 @@ impl FlowbitsState {
         }
     }
 
-    /// Generate flow key as u64 hash (much faster than String formatting)
+    /// Generate flow key from Packet (much faster than String formatting)
+    #[inline]
+    fn flow_key_from_packet(packet: &Packet) -> u64 {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+
+        let mut hasher = DefaultHasher::new();
+        packet.src_ip().hash(&mut hasher);
+        packet.src_port().hash(&mut hasher);
+        packet.dst_ip().hash(&mut hasher);
+        packet.dst_port().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[inline]
+    fn set_for_packet(&mut self, packet: &Packet, name: &str) {
+        let key = Self::flow_key_from_packet(packet);
+        self.bits.entry(key).or_default().insert(name.to_string());
+    }
+
+    #[inline]
+    fn unset_for_packet(&mut self, packet: &Packet, name: &str) {
+        let key = Self::flow_key_from_packet(packet);
+        if let Some(bits) = self.bits.get_mut(&key) {
+            bits.remove(name);
+        }
+    }
+
+    #[inline]
+    fn is_set_for_packet(&self, packet: &Packet, name: &str) -> bool {
+        let key = Self::flow_key_from_packet(packet);
+        self.bits.get(&key).map(|b| b.contains(name)).unwrap_or(false)
+    }
+
+    #[inline]
+    fn toggle_for_packet(&mut self, packet: &Packet, name: &str) {
+        let key = Self::flow_key_from_packet(packet);
+        let bits = self.bits.entry(key).or_default();
+        if bits.contains(name) {
+            bits.remove(name);
+        } else {
+            bits.insert(name.to_string());
+        }
+    }
+
+    // Legacy methods for PacketContext (kept for backward compatibility)
+
+    /// Generate flow key as u64 hash from PacketContext
     #[inline]
     fn flow_key(ctx: &PacketContext) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -430,28 +639,46 @@ impl SignatureEngine {
     }
 
     /// Match packet against all rules
+    ///
+    /// # Arguments
+    /// * `packet` - The packet to match against
+    /// * `proto_ctx` - Protocol-specific context (HTTP, DNS, TLS, etc.)
+    /// * `flow_state` - Connection flow state (established, direction)
     #[inline]
-    pub fn match_packet(&self, ctx: &PacketContext) -> Vec<MatchResult> {
+    pub fn match_packet(
+        &self,
+        packet: &Packet,
+        proto_ctx: &ProtocolContext,
+        flow_state: &FlowState,
+    ) -> Vec<MatchResult> {
         use tracing::debug;
         use std::time::Instant;
 
         let start = Instant::now();
         let mut results = Vec::new();
 
+        // Extract packet info once
+        let payload = packet.payload();
+        let protocol = ip_protocol_to_sig_protocol(packet.protocol());
+        let src_ip = Some(packet.src_ip());
+        let dst_ip = Some(packet.dst_ip());
+        let src_port = Some(packet.src_port());
+        let dst_port = Some(packet.dst_port());
+
         // Get candidate rules from prefilter
         let prefilter_start = Instant::now();
         let candidates = if let Some(ref prefilter) = self.prefilter {
-            let c = prefilter.find_candidates(&ctx.payload);
+            let c = prefilter.find_candidates(payload);
             // Debug: log candidate count for non-empty payloads
-            if !ctx.payload.is_empty() && c.len() > 0 {
+            if !payload.is_empty() && c.len() > 0 {
                 debug!("Prefilter found {} candidates for payload len {} in {:?}",
-                    c.len(), ctx.payload.len(), prefilter_start.elapsed());
+                    c.len(), payload.len(), prefilter_start.elapsed());
             }
             c
         } else {
             // No prefilter - check all rules for matching protocol
-            debug!("No prefilter, checking protocol rules for {:?}", ctx.protocol);
-            self.get_protocol_rules(ctx.protocol)
+            debug!("No prefilter, checking protocol rules for {:?}", protocol);
+            self.get_protocol_rules(protocol)
         };
 
         // Debug: periodically log candidate stats
@@ -460,7 +687,7 @@ impl SignatureEngine {
         if count % 10000 == 0 {
             debug!(
                 "match_packet #{}: payload_len={}, candidates={}, proto={:?}",
-                count, ctx.payload.len(), candidates.len(), ctx.protocol
+                count, payload.len(), candidates.len(), protocol
             );
         }
 
@@ -481,37 +708,37 @@ impl SignatureEngine {
                 verified_count += 1;
 
                 // Check each stage and count failures
-                if !self.check_protocol(rule, ctx) {
+                if !self.check_protocol_direct(rule, protocol) {
                     failed_protocol += 1;
                     continue;
                 }
-                if !self.check_addresses(rule, ctx) {
+                if !self.check_addresses_direct(rule, src_ip, dst_ip, src_port, dst_port, flow_state.to_server) {
                     failed_address += 1;
                     // Log first few address failures for debugging
                     if failed_address <= 3 && count % 10000 == 0 {
                         debug!(
                             "Addr fail SID {}: src_ip={:?} (rule: {:?}), dst_ip={:?} (rule: {:?}), src_port={:?} (rule: {:?}), dst_port={:?} (rule: {:?}), dir={:?}",
                             rule.sid,
-                            ctx.src_ip, rule.src_ip,
-                            ctx.dst_ip, rule.dst_ip,
-                            ctx.src_port, rule.src_port,
-                            ctx.dst_port, rule.dst_port,
+                            src_ip, rule.src_ip,
+                            dst_ip, rule.dst_ip,
+                            src_port, rule.src_port,
+                            dst_port, rule.dst_port,
                             rule.direction
                         );
                     }
                     continue;
                 }
-                if !self.check_flow(rule, ctx) {
+                if !self.check_flow_direct(rule, flow_state) {
                     failed_flow += 1;
                     continue;
                 }
-                if !self.check_flowbits_prereqs(rule, ctx) {
+                if !self.check_flowbits_prereqs_direct(rule, packet, flow_state) {
                     failed_flowbits += 1;
                     continue;
                 }
 
                 // Match content patterns
-                let content_matches = match self.match_contents(rule, ctx) {
+                let content_matches = match self.match_contents_direct(rule, payload, proto_ctx) {
                     Some(m) => m,
                     None => {
                         failed_content += 1;
@@ -525,7 +752,7 @@ impl SignatureEngine {
                                 .collect();
                             debug!(
                                 "Content fail SID {}: payload_len={}, patterns={:?}",
-                                rule.sid, ctx.payload.len(), patterns
+                                rule.sid, payload.len(), patterns
                             );
                         }
                         continue;
@@ -533,19 +760,19 @@ impl SignatureEngine {
                 };
 
                 // Match PCRE patterns
-                if !self.match_pcre(rule, ctx) {
+                if !self.match_pcre_direct(rule, payload, proto_ctx) {
                     failed_pcre += 1;
                     continue;
                 }
 
                 // Check threshold
-                if !self.check_threshold(rule, ctx) {
+                if !self.check_threshold_direct(rule, src_ip) {
                     failed_threshold += 1;
                     continue;
                 }
 
                 // Update flowbits state
-                self.update_flowbits(rule, ctx);
+                self.update_flowbits_direct(rule, packet, flow_state);
 
                 // Check for noalert
                 if rule.options.iter().any(|o| matches!(o, RuleOption::Noalert)) {
@@ -585,6 +812,44 @@ impl SignatureEngine {
         results
     }
 
+    /// Legacy match_packet using PacketContext (kept for backward compatibility)
+    /// TODO: Remove once all callers migrate to match_packet(&Packet, &ProtocolContext, &FlowState)
+    #[inline]
+    pub fn match_packet_ctx(&self, ctx: &PacketContext) -> Vec<MatchResult> {
+        // Convert PacketContext to ProtocolContext
+        let proto_ctx = if ctx.http_uri.is_some() || ctx.http_method.is_some() {
+            ProtocolContext::Http(HttpContext {
+                uri: ctx.http_uri.clone(),
+                method: ctx.http_method.clone(),
+                headers: ctx.http_headers.clone(),
+                host: ctx.http_host.clone(),
+                user_agent: ctx.http_user_agent.clone(),
+            })
+        } else if ctx.dns_query.is_some() {
+            ProtocolContext::Dns(DnsContext {
+                query: ctx.dns_query.clone(),
+            })
+        } else if ctx.tls_sni.is_some() {
+            ProtocolContext::Tls(TlsContext {
+                sni: ctx.tls_sni.clone(),
+                ja3_hash: None,
+            })
+        } else {
+            ProtocolContext::None
+        };
+
+        let flow_state = FlowState {
+            established: ctx.established,
+            to_server: ctx.to_server,
+        };
+
+        // Use verify_rule for the legacy path since it handles PacketContext
+        self.rules
+            .values()
+            .filter_map(|rule| self.verify_rule(rule, ctx))
+            .collect()
+    }
+
     /// Match multiple packets in parallel batches
     /// Returns a vector of (packet_index, matches) tuples
     #[cfg(feature = "parallel")]
@@ -592,7 +857,7 @@ impl SignatureEngine {
         contexts
             .par_iter()
             .enumerate()
-            .map(|(idx, ctx)| (idx, self.match_packet(ctx)))
+            .map(|(idx, ctx)| (idx, self.match_packet_ctx(ctx)))
             .collect()
     }
 
@@ -602,7 +867,7 @@ impl SignatureEngine {
         contexts
             .iter()
             .enumerate()
-            .map(|(idx, ctx)| (idx, self.match_packet(ctx)))
+            .map(|(idx, ctx)| (idx, self.match_packet_ctx(ctx)))
             .collect()
     }
 
@@ -612,7 +877,7 @@ impl SignatureEngine {
     pub fn match_batch(&self, contexts: &[PacketContext]) -> Vec<Vec<MatchResult>> {
         contexts
             .par_iter()
-            .map(|ctx| self.match_packet(ctx))
+            .map(|ctx| self.match_packet_ctx(ctx))
             .collect()
     }
 
@@ -621,7 +886,7 @@ impl SignatureEngine {
     pub fn match_batch(&self, contexts: &[PacketContext]) -> Vec<Vec<MatchResult>> {
         contexts
             .iter()
-            .map(|ctx| self.match_packet(ctx))
+            .map(|ctx| self.match_packet_ctx(ctx))
             .collect()
     }
 
@@ -1105,6 +1370,248 @@ impl SignatureEngine {
             }
         }
         true
+    }
+
+    // =========================================================================
+    // Direct helper methods using &Packet + &ProtocolContext + &FlowState
+    // These replace PacketContext-based methods for the new API
+    // TODO: Future optimization - analyze which fields are actually used per rule
+    // and skip unused checks
+    // =========================================================================
+
+    /// Check protocol match (direct version)
+    #[inline]
+    fn check_protocol_direct(&self, rule: &Rule, protocol: Protocol) -> bool {
+        rule.protocol == Protocol::Any || rule.protocol == protocol
+    }
+
+    /// Check IP/port addresses (direct version)
+    #[inline]
+    fn check_addresses_direct(
+        &self,
+        rule: &Rule,
+        src_ip: Option<IpAddr>,
+        dst_ip: Option<IpAddr>,
+        src_port: Option<u16>,
+        dst_port: Option<u16>,
+        to_server: bool,
+    ) -> bool {
+        // Check source IP
+        if !self.ip_matches(&rule.src_ip, src_ip) {
+            return false;
+        }
+
+        // Check destination IP
+        if !self.ip_matches(&rule.dst_ip, dst_ip) {
+            return false;
+        }
+
+        // Check source port
+        if !self.port_matches(&rule.src_port, src_port) {
+            return false;
+        }
+
+        // Check destination port
+        if !self.port_matches(&rule.dst_port, dst_port) {
+            return false;
+        }
+
+        // Check direction
+        match rule.direction {
+            Direction::ToServer => to_server,
+            Direction::ToClient => !to_server,
+            Direction::Both => true,
+        }
+    }
+
+    /// Check flow flags (direct version)
+    #[inline]
+    fn check_flow_direct(&self, rule: &Rule, flow_state: &FlowState) -> bool {
+        if let Some(flags) = rule.flow_flags() {
+            if flags.established && !flow_state.established {
+                return false;
+            }
+            if flags.not_established && flow_state.established {
+                return false;
+            }
+            if flags.to_server && !flow_state.to_server {
+                return false;
+            }
+            if flags.to_client && flow_state.to_server {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check flowbits prerequisites (direct version)
+    #[inline]
+    fn check_flowbits_prereqs_direct(&self, rule: &Rule, packet: &Packet, _flow_state: &FlowState) -> bool {
+        let state = self.flowbits_state.read();
+
+        for opt in &rule.options {
+            if let RuleOption::Flowbits(op) = opt {
+                match op {
+                    FlowbitsOp::IsSet(name) => {
+                        if !state.is_set_for_packet(packet, name) {
+                            return false;
+                        }
+                    }
+                    FlowbitsOp::IsNotSet(name) => {
+                        if state.is_set_for_packet(packet, name) {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Match content patterns (direct version)
+    #[inline]
+    fn match_contents_direct(
+        &self,
+        rule: &Rule,
+        payload: &[u8],
+        proto_ctx: &ProtocolContext,
+    ) -> Option<Vec<(usize, usize)>> {
+        let mut matches = Vec::new();
+        let mut last_match_end = 0;
+
+        for opt in &rule.options {
+            if let RuleOption::Content(cm) = opt {
+                // Select buffer based on sticky buffers
+                let buffer = self.select_buffer_direct(rule, payload, proto_ctx, opt);
+
+                if let Some(pos) = self.match_content(cm, buffer, last_match_end) {
+                    if cm.negated {
+                        return None; // Negated content matched - rule fails
+                    }
+                    matches.push((pos, pos + cm.pattern.len()));
+                    last_match_end = pos + cm.pattern.len();
+                } else if !cm.negated {
+                    return None; // Required content not found
+                }
+            }
+        }
+
+        Some(matches)
+    }
+
+    /// Select buffer for content matching (direct version using ProtocolContext)
+    #[inline]
+    fn select_buffer_direct<'a>(
+        &self,
+        rule: &Rule,
+        payload: &'a [u8],
+        proto_ctx: &'a ProtocolContext,
+        current_opt: &RuleOption,
+    ) -> &'a [u8] {
+        // Find the most recent sticky buffer before this option
+        let mut use_buffer: Option<&'a [u8]> = None;
+        for opt in &rule.options {
+            if std::ptr::eq(opt, current_opt) {
+                break;
+            }
+
+            use_buffer = match opt {
+                RuleOption::HttpUri => proto_ctx.http_uri(),
+                RuleOption::HttpMethod => proto_ctx.http_method(),
+                RuleOption::HttpHeader => proto_ctx.http_headers(),
+                RuleOption::HttpHost => proto_ctx.http_host(),
+                RuleOption::HttpUserAgent => proto_ctx.http_user_agent(),
+                RuleOption::DnsQuery => proto_ctx.dns_query(),
+                RuleOption::TlsSni => proto_ctx.tls_sni(),
+                _ => continue,
+            };
+        }
+
+        use_buffer.unwrap_or(payload)
+    }
+
+    /// Match PCRE patterns (direct version)
+    #[inline]
+    fn match_pcre_direct(&self, rule: &Rule, payload: &[u8], _proto_ctx: &ProtocolContext) -> bool {
+        for opt in &rule.options {
+            if let RuleOption::Pcre(pcre) = opt {
+                let buffer = payload;
+                let key = PcreCache::make_key(&pcre.pattern, &pcre.flags);
+
+                // Try read lock first (fast path for cached patterns)
+                let matched = {
+                    let cache = self.pcre_cache.read();
+                    if let Some(re) = cache.get(&key) {
+                        Some(re.is_match(buffer))
+                    } else {
+                        None
+                    }
+                };
+
+                let matched = match matched {
+                    Some(m) => m,
+                    None => {
+                        // Cache miss - need write lock to compile
+                        let mut cache = self.pcre_cache.write();
+                        // Double-check after acquiring write lock
+                        if let Some(re) = cache.get(&key) {
+                            re.is_match(buffer)
+                        } else if let Some(re) = cache.compile_and_insert(&pcre.pattern, &pcre.flags) {
+                            re.is_match(buffer)
+                        } else {
+                            continue; // Compilation failed, skip this pattern
+                        }
+                    }
+                };
+
+                if pcre.negated {
+                    if matched {
+                        return false;
+                    }
+                } else if !matched {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Check threshold (direct version)
+    #[inline]
+    fn check_threshold_direct(&self, rule: &Rule, src_ip: Option<IpAddr>) -> bool {
+        for opt in &rule.options {
+            match opt {
+                RuleOption::Threshold(spec) | RuleOption::DetectionFilter(spec) => {
+                    let mut state = self.threshold_state.write();
+                    // For direct version, we use src_ip for both src and dst tracking
+                    // This matches common use case; rules can use track:by_src
+                    if !state.check_threshold(rule.sid, spec, src_ip, src_ip) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Update flowbits state (direct version)
+    #[inline]
+    fn update_flowbits_direct(&self, rule: &Rule, packet: &Packet, _flow_state: &FlowState) {
+        let mut state = self.flowbits_state.write();
+
+        for opt in &rule.options {
+            if let RuleOption::Flowbits(op) = opt {
+                match op {
+                    FlowbitsOp::Set(name) => state.set_for_packet(packet, name),
+                    FlowbitsOp::Unset(name) => state.unset_for_packet(packet, name),
+                    FlowbitsOp::Toggle(name) => state.toggle_for_packet(packet, name),
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Cleanup expired state

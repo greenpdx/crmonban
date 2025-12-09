@@ -23,7 +23,9 @@ use crmonban::brute_force::BruteForceTracker;
 use crmonban::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
 
 #[cfg(feature = "signatures")]
-use crmonban::signatures::{SignatureConfig, SignatureEngine, RuleLoader, matcher::PacketContext, ast::Protocol};
+use crmonban::signatures::{SignatureConfig, SignatureEngine, RuleLoader, ast::Protocol};
+#[cfg(feature = "signatures")]
+use crmonban::signatures::matcher::{ProtocolContext, FlowState, HttpContext, DnsContext, TlsContext};
 
 #[cfg(feature = "protocols")]
 use crmonban::protocols::{HttpConfig, TlsConfig};
@@ -795,41 +797,30 @@ impl PcapBenchmark {
         if let Some(ref engine) = self.signature_engine {
             let start = Instant::now();
 
-            let ctx = PacketContext {
-                src_ip: Some(pkt.src_ip()),
-                dst_ip: Some(pkt.dst_ip()),
-                src_port: Some(pkt.src_port()),
-                dst_port: Some(pkt.dst_port()),
-                protocol: match pkt.protocol() {
-                    IpProtocol::Tcp => Protocol::Tcp,
-                    IpProtocol::Udp => Protocol::Udp,
-                    IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
-                    _ => Protocol::Ip,
-                },
-                tcp_flags: pkt.tcp_flags().as_ref().map(|f| {
-                    let mut flags = 0u8;
-                    if f.syn { flags |= 0x02; }
-                    if f.ack { flags |= 0x10; }
-                    if f.fin { flags |= 0x01; }
-                    if f.rst { flags |= 0x04; }
-                    if f.psh { flags |= 0x08; }
-                    if f.urg { flags |= 0x20; }
-                    flags
-                }).unwrap_or(0),
-                ttl: 64,
-                payload: pkt.payload().to_vec(),
+            // Build protocol context based on parsed data
+            let proto_ctx = if http_uri.is_some() || http_method.is_some() {
+                ProtocolContext::Http(HttpContext {
+                    uri: http_uri,
+                    method: http_method,
+                    headers: http_headers,
+                    host: http_host,
+                    user_agent: http_user_agent,
+                })
+            } else if tls_sni.is_some() || ja3_hash.is_some() {
+                ProtocolContext::Tls(TlsContext {
+                    sni: tls_sni,
+                    ja3_hash,
+                })
+            } else {
+                ProtocolContext::None
+            };
+
+            let flow_state = FlowState {
                 established: false,
                 to_server: true,
-                http_uri,
-                http_method,
-                http_headers,
-                http_host,
-                http_user_agent,
-                dns_query: None,
-                tls_sni,
-                ja3_hash,
             };
-            let matches = engine.match_packet(&ctx);
+
+            let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
             sig_match_count = matches.len();
             sig_time = start.elapsed();
         }
@@ -1183,50 +1174,21 @@ impl PcapBenchmark {
         packets_with_payload.fetch_add(payload_count, Ordering::Relaxed);
         total_payload_bytes.fetch_add(payload_bytes, Ordering::Relaxed);
 
-        // Signature matching in parallel
+        // Signature matching in parallel (using new API)
         #[cfg(feature = "signatures")]
         if let Some(ref engine) = self.signature_engine {
-            // Build PacketContexts
-            let contexts: Vec<_> = parsed.par_iter()
-                .map(|pkt| PacketContext {
-                    src_ip: Some(pkt.src_ip()),
-                    dst_ip: Some(pkt.dst_ip()),
-                    src_port: Some(pkt.src_port()),
-                    dst_port: Some(pkt.dst_port()),
-                    protocol: match pkt.protocol() {
-                        IpProtocol::Tcp => Protocol::Tcp,
-                        IpProtocol::Udp => Protocol::Udp,
-                        IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
-                        _ => Protocol::Ip,
-                    },
-                    tcp_flags: pkt.tcp_flags().as_ref().map(|f| {
-                        let mut flags = 0u8;
-                        if f.syn { flags |= 0x02; }
-                        if f.ack { flags |= 0x10; }
-                        if f.fin { flags |= 0x01; }
-                        if f.rst { flags |= 0x04; }
-                        if f.psh { flags |= 0x08; }
-                        if f.urg { flags |= 0x20; }
-                        flags
-                    }).unwrap_or(0),
-                    ttl: 64,
-                    payload: pkt.payload().to_vec(),
-                    established: false,
-                    to_server: true,
-                    http_uri: None,
-                    http_method: None,
-                    http_headers: None,
-                    http_host: None,
-                    http_user_agent: None,
-                    dns_query: None,
-                    tls_sni: None,
-                    ja3_hash: None,
+            // Match all packets in parallel using new API
+            let match_count: u64 = parsed.par_iter()
+                .map(|pkt| {
+                    let proto_ctx = ProtocolContext::None;
+                    let flow_state = FlowState {
+                        established: false,
+                        to_server: true,
+                    };
+                    engine.match_packet(pkt, &proto_ctx, &flow_state)
                 })
-                .collect();
-
-            // Match all packets in parallel
-            let results = engine.match_batch(&contexts);
-            let match_count: u64 = results.iter().filter(|r| !r.is_empty()).count() as u64;
+                .filter(|matches| !matches.is_empty())
+                .count() as u64;
             signature_matches.fetch_add(match_count, Ordering::Relaxed);
         }
     }
@@ -1376,32 +1338,14 @@ impl PcapBenchmark {
         #[cfg(feature = "signatures")]
         if let Some(ref engine) = self.signature_engine {
             let start = Instant::now();
-            let ctx = PacketContext {
-                src_ip: Some(pkt.src_ip()),
-                dst_ip: Some(pkt.dst_ip()),
-                src_port: Some(pkt.src_port()),
-                dst_port: Some(pkt.dst_port()),
-                protocol: match pkt.protocol() {
-                    IpProtocol::Tcp => Protocol::Tcp,
-                    IpProtocol::Udp => Protocol::Udp,
-                    IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
-                    _ => Protocol::Ip,
-                },
-                tcp_flags: record.tcp_flags,
-                ttl: 64,
-                payload: Vec::new(),
+
+            let proto_ctx = ProtocolContext::None;
+            let flow_state = FlowState {
                 established: (record.tcp_flags & 0x10) != 0, // ACK flag
                 to_server: true,
-                http_uri: None,
-                http_method: None,
-                http_headers: None,
-                http_host: None,
-                http_user_agent: None,
-                dns_query: None,
-                tls_sni: None,
-                ja3_hash: None,
             };
-            let matches = engine.match_packet(&ctx);
+
+            let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
             sig_match_count = matches.len();
             sig_time = start.elapsed();
         }

@@ -1409,51 +1409,21 @@ async fn start_packet_engine(
                 // Check signatures
                 #[cfg(feature = "signatures")]
                 if let Some(ref engine) = signature_engine {
-                    use signatures::matcher::PacketContext;
-                    use signatures::ast::Protocol;
+                    use signatures::matcher::{ProtocolContext, FlowState};
 
-                    // Stage 2: Build context
+                    // Stage 2: Build context (now using new API)
                     let context_start = std::time::Instant::now();
-                    let ctx = PacketContext {
-                        src_ip: Some(packet.src_ip()),
-                        dst_ip: Some(packet.dst_ip()),
-                        src_port: Some(packet.src_port()),
-                        dst_port: Some(packet.dst_port()),
-                        protocol: match packet.protocol() {
-                            IpProtocol::Tcp => Protocol::Tcp,
-                            IpProtocol::Udp => Protocol::Udp,
-                            IpProtocol::Icmp | IpProtocol::Icmpv6 => Protocol::Icmp,
-                            _ => Protocol::Ip,
-                        },
-                        tcp_flags: packet.tcp_flags().as_ref().map(|f| {
-                            let mut flags = 0u8;
-                            if f.syn { flags |= 0x02; }
-                            if f.ack { flags |= 0x10; }
-                            if f.fin { flags |= 0x01; }
-                            if f.rst { flags |= 0x04; }
-                            if f.psh { flags |= 0x08; }
-                            if f.urg { flags |= 0x20; }
-                            flags
-                        }).unwrap_or(0),
-                        ttl: 64,
-                        payload: packet.payload().to_vec(),
+                    let proto_ctx = ProtocolContext::None; // No protocol parsing yet
+                    let flow_state = FlowState {
                         established: false,
                         to_server: true,
-                        http_uri: None,
-                        http_method: None,
-                        http_headers: None,
-                        http_host: None,
-                        http_user_agent: None,
-                        dns_query: None,
-                        tls_sni: None,
-                        ja3_hash: None,
                     };
                     let context_elapsed = context_start.elapsed().as_micros() as u64;
                     timing_context_us += context_elapsed;
 
-                    // Stage 3: Signature matching
+                    // Stage 3: Signature matching (new API: &Packet, &ProtocolContext, &FlowState)
                     let match_start = std::time::Instant::now();
-                    let matches = engine.match_packet(&ctx);
+                    let matches = engine.match_packet(&packet, &proto_ctx, &flow_state);
                     let match_elapsed = match_start.elapsed().as_micros() as u64;
                     timing_match_us += match_elapsed;
 
