@@ -1,8 +1,25 @@
 //! Processing pipeline
 //!
 //! Routes packets through the detection engines.
+//!
+//! ## Pipeline Design (v3)
+//!
+//! The pipeline processes packets through 8 sequential stages:
+//! 1. Flow Tracking - connection state tracking
+//! 2. Port Scan Detection - NULL/XMAS/FIN/Maimon/ACK/SYN scans
+//! 3. Brute Force Detection - session-based login attempt tracking
+//! 4. Signature Matching - Aho-Corasick + rule verification
+//! 5. Threat Intel - IOC lookups
+//! 6. Protocol Analysis - HTTP/DNS/TLS/SSH parsers
+//! 7. ML Anomaly Detection - flow-based scoring
+//! 8. Correlation - DB write + alert generation (only if marked)
+//!
+//! Stage order is configurable via `PipelineConfig::stage_order` for optimization.
+//! Each stage has pass_count and marked_count counters for debugging.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
@@ -41,6 +58,24 @@ pub struct PipelineConfig {
     pub enable_brute_force: bool,
     /// Stats update interval (seconds)
     pub stats_interval_secs: u64,
+    /// Stage execution order (configurable for optimization)
+    /// Default order: Flow, ScanDetect, BruteForce, Signatures, Intel, Protocols, ML, Correlation
+    #[serde(default = "default_stage_order")]
+    pub stage_order: Vec<PipelineStage>,
+}
+
+/// Default stage order per v3 spec
+fn default_stage_order() -> Vec<PipelineStage> {
+    vec![
+        PipelineStage::FlowTracker,
+        PipelineStage::ScanDetection,
+        PipelineStage::BruteForceDetection,
+        PipelineStage::SignatureMatching,
+        PipelineStage::ThreatIntel,
+        PipelineStage::ProtocolAnalysis,
+        PipelineStage::MLDetection,
+        PipelineStage::Correlation,
+    ]
 }
 
 impl Default for PipelineConfig {
@@ -56,6 +91,23 @@ impl Default for PipelineConfig {
             enable_scan_detect: true,
             enable_brute_force: true,
             stats_interval_secs: 1,
+            stage_order: default_stage_order(),
+        }
+    }
+}
+
+impl PipelineConfig {
+    /// Check if a stage is enabled based on its type
+    pub fn is_stage_enabled(&self, stage: PipelineStage) -> bool {
+        match stage {
+            PipelineStage::FlowTracker => self.enable_flows,
+            PipelineStage::ScanDetection => self.enable_scan_detect,
+            PipelineStage::BruteForceDetection => self.enable_brute_force,
+            PipelineStage::SignatureMatching => self.enable_signatures,
+            PipelineStage::ThreatIntel => self.enable_intel,
+            PipelineStage::ProtocolAnalysis => self.enable_protocols,
+            PipelineStage::MLDetection => self.enable_ml,
+            PipelineStage::Correlation => self.enable_correlation,
         }
     }
 }
@@ -190,67 +242,163 @@ impl Pipeline {
 }
 
 /// A processing stage in the pipeline
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PipelineStage {
-    /// Flow tracking
+    /// Flow tracking (Stage 1)
     FlowTracker,
-    /// Protocol analysis
-    ProtocolAnalysis,
-    /// Signature matching
-    SignatureMatching,
-    /// Threat intel lookup
-    ThreatIntel,
-    /// ML/Anomaly detection
-    MLDetection,
-    /// Port scan detection
+    /// Port scan detection (Stage 2) - NULL/XMAS/FIN/Maimon/ACK/SYN scans
     ScanDetection,
-    /// Brute force detection
+    /// Brute force detection (Stage 3) - session-based login tracking
     BruteForceDetection,
-    /// Correlation
+    /// Signature matching (Stage 4) - Aho-Corasick + rules
+    SignatureMatching,
+    /// Threat intel lookup (Stage 5) - IOC matching
+    ThreatIntel,
+    /// Protocol analysis (Stage 6) - HTTP/DNS/TLS/SSH parsers
+    ProtocolAnalysis,
+    /// ML/Anomaly detection (Stage 7) - flow-based scoring
+    MLDetection,
+    /// Correlation (Stage 8) - DB write + alert generation
     Correlation,
 }
 
 impl PipelineStage {
-    /// Get all stages in order
+    /// Get all stages in default order (v3 spec)
     pub fn all() -> Vec<Self> {
-        vec![
-            PipelineStage::FlowTracker,
-            PipelineStage::ProtocolAnalysis,
-            PipelineStage::SignatureMatching,
-            PipelineStage::ThreatIntel,
-            PipelineStage::MLDetection,
-            PipelineStage::ScanDetection,
-            PipelineStage::BruteForceDetection,
-            PipelineStage::Correlation,
-        ]
+        default_stage_order()
     }
 
     /// Get stage name
     pub fn name(&self) -> &'static str {
         match self {
             PipelineStage::FlowTracker => "flow_tracker",
-            PipelineStage::ProtocolAnalysis => "protocol_analysis",
-            PipelineStage::SignatureMatching => "signature_matching",
-            PipelineStage::ThreatIntel => "threat_intel",
-            PipelineStage::MLDetection => "ml_detection",
             PipelineStage::ScanDetection => "scan_detection",
             PipelineStage::BruteForceDetection => "brute_force_detection",
+            PipelineStage::SignatureMatching => "signature_matching",
+            PipelineStage::ThreatIntel => "threat_intel",
+            PipelineStage::ProtocolAnalysis => "protocol_analysis",
+            PipelineStage::MLDetection => "ml_detection",
             PipelineStage::Correlation => "correlation",
+        }
+    }
+
+    /// Get stage index in default order (0-7)
+    pub fn default_index(&self) -> usize {
+        match self {
+            PipelineStage::FlowTracker => 0,
+            PipelineStage::ScanDetection => 1,
+            PipelineStage::BruteForceDetection => 2,
+            PipelineStage::SignatureMatching => 3,
+            PipelineStage::ThreatIntel => 4,
+            PipelineStage::ProtocolAnalysis => 5,
+            PipelineStage::MLDetection => 6,
+            PipelineStage::Correlation => 7,
         }
     }
 }
 
-/// Per-stage metrics
-#[derive(Debug, Clone, Default)]
+/// Per-stage metrics with atomic counters for thread-safe updates
+#[derive(Debug, Default)]
 pub struct StageMetrics {
-    /// Packets processed
-    pub packets_processed: u64,
-    /// Events generated
-    pub events_generated: u64,
-    /// Processing time (microseconds)
-    pub processing_time_us: u64,
-    /// Errors
+    /// Packets that passed through this stage
+    pub pass_count: AtomicU64,
+    /// Packets marked as suspicious by this stage
+    pub marked_count: AtomicU64,
+    /// Processing time (nanoseconds)
+    pub processing_time_ns: AtomicU64,
+    /// Errors encountered
+    pub errors: AtomicU64,
+}
+
+impl StageMetrics {
+    /// Create new stage metrics
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a packet passing through
+    pub fn record_pass(&self) {
+        self.pass_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a packet being marked
+    pub fn record_marked(&self) {
+        self.marked_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record processing time
+    pub fn record_time(&self, ns: u64) {
+        self.processing_time_ns.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    /// Record an error
+    pub fn record_error(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get snapshot of metrics
+    pub fn snapshot(&self) -> StageMetricsSnapshot {
+        StageMetricsSnapshot {
+            pass_count: self.pass_count.load(Ordering::Relaxed),
+            marked_count: self.marked_count.load(Ordering::Relaxed),
+            processing_time_ns: self.processing_time_ns.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Snapshot of stage metrics (for reporting)
+#[derive(Debug, Clone, Default)]
+pub struct StageMetricsSnapshot {
+    /// Packets that passed through this stage
+    pub pass_count: u64,
+    /// Packets marked as suspicious by this stage
+    pub marked_count: u64,
+    /// Processing time (nanoseconds)
+    pub processing_time_ns: u64,
+    /// Errors encountered
     pub errors: u64,
+}
+
+/// All pipeline stage metrics
+#[derive(Debug, Default)]
+pub struct PipelineMetrics {
+    /// Metrics per stage
+    pub stages: HashMap<PipelineStage, StageMetrics>,
+}
+
+impl PipelineMetrics {
+    /// Create new pipeline metrics with all stages initialized
+    pub fn new() -> Self {
+        let mut stages = HashMap::new();
+        for stage in PipelineStage::all() {
+            stages.insert(stage, StageMetrics::new());
+        }
+        Self { stages }
+    }
+
+    /// Get metrics for a specific stage
+    pub fn get(&self, stage: PipelineStage) -> Option<&StageMetrics> {
+        self.stages.get(&stage)
+    }
+
+    /// Log all stage metrics (for debug)
+    pub fn log_summary(&self) {
+        for stage in PipelineStage::all() {
+            if let Some(metrics) = self.stages.get(&stage) {
+                let snap = metrics.snapshot();
+                debug!(
+                    "Stage {:20} | pass: {:>10} | marked: {:>10} | time: {:>10}ns | errors: {}",
+                    stage.name(),
+                    snap.pass_count,
+                    snap.marked_count,
+                    snap.processing_time_ns,
+                    snap.errors
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -263,18 +411,74 @@ mod tests {
         assert!(config.enable_flows);
         assert!(config.enable_signatures);
         assert_eq!(config.buffer_size, 10_000);
+        // Default stage order should have 8 stages
+        assert_eq!(config.stage_order.len(), 8);
+        // First stage should be FlowTracker
+        assert_eq!(config.stage_order[0], PipelineStage::FlowTracker);
+        // Second stage should be ScanDetection (per v3 spec)
+        assert_eq!(config.stage_order[1], PipelineStage::ScanDetection);
+        // Last stage should be Correlation
+        assert_eq!(config.stage_order[7], PipelineStage::Correlation);
     }
 
     #[test]
-    fn test_pipeline_stages() {
+    fn test_pipeline_stages_order() {
         let stages = PipelineStage::all();
-        assert_eq!(stages.len(), 8); // FlowTracker, ProtocolAnalysis, SignatureMatching, ThreatIntel, MLDetection, ScanDetection, BruteForceDetection, Correlation
+        assert_eq!(stages.len(), 8);
+        // Verify v3 order: Flow, Scan, Brute, Sig, Intel, Proto, ML, Corr
         assert_eq!(stages[0], PipelineStage::FlowTracker);
+        assert_eq!(stages[1], PipelineStage::ScanDetection);
+        assert_eq!(stages[2], PipelineStage::BruteForceDetection);
+        assert_eq!(stages[3], PipelineStage::SignatureMatching);
+        assert_eq!(stages[4], PipelineStage::ThreatIntel);
+        assert_eq!(stages[5], PipelineStage::ProtocolAnalysis);
+        assert_eq!(stages[6], PipelineStage::MLDetection);
+        assert_eq!(stages[7], PipelineStage::Correlation);
     }
 
     #[test]
     fn test_stage_names() {
         assert_eq!(PipelineStage::FlowTracker.name(), "flow_tracker");
+        assert_eq!(PipelineStage::ScanDetection.name(), "scan_detection");
+        assert_eq!(PipelineStage::BruteForceDetection.name(), "brute_force_detection");
         assert_eq!(PipelineStage::MLDetection.name(), "ml_detection");
+        assert_eq!(PipelineStage::Correlation.name(), "correlation");
+    }
+
+    #[test]
+    fn test_stage_metrics() {
+        let metrics = StageMetrics::new();
+        metrics.record_pass();
+        metrics.record_pass();
+        metrics.record_marked();
+        metrics.record_time(1000);
+
+        let snap = metrics.snapshot();
+        assert_eq!(snap.pass_count, 2);
+        assert_eq!(snap.marked_count, 1);
+        assert_eq!(snap.processing_time_ns, 1000);
+    }
+
+    #[test]
+    fn test_pipeline_metrics() {
+        let metrics = PipelineMetrics::new();
+        // Should have all 8 stages
+        assert_eq!(metrics.stages.len(), 8);
+        // Should be able to get each stage
+        assert!(metrics.get(PipelineStage::FlowTracker).is_some());
+        assert!(metrics.get(PipelineStage::Correlation).is_some());
+    }
+
+    #[test]
+    fn test_is_stage_enabled() {
+        let mut config = PipelineConfig::default();
+        assert!(config.is_stage_enabled(PipelineStage::FlowTracker));
+        assert!(config.is_stage_enabled(PipelineStage::ScanDetection));
+
+        config.enable_scan_detect = false;
+        assert!(!config.is_stage_enabled(PipelineStage::ScanDetection));
+
+        config.enable_brute_force = false;
+        assert!(!config.is_stage_enabled(PipelineStage::BruteForceDetection));
     }
 }
