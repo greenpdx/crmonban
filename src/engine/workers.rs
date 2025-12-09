@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use tracing::{trace, debug, warn};
+use tracing::{trace, debug};
 
 use crate::brute_force::BruteForceTracker;
 use crate::core::event::{DetectionEvent, DetectionType, Severity};
@@ -35,7 +35,8 @@ use crate::flow::{FlowTracker, FlowConfig};
 use crate::ml::{MLEngine, MLConfig, AnomalyCategory};
 use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent};
 use crate::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
-use crate::signatures::{SignatureEngine, SignatureConfig, MatchResult, Action};
+use crate::signatures::{SignatureEngine, SignatureConfig, RuleLoader, MatchResult, Action};
+use crate::signatures::matcher::{ProtocolContext, FlowState};
 use crate::threat_intel::{IntelEngine, ThreatCategory};
 use crate::wasm::{WasmEngine, WasmConfig, StageContext, ScanInfo, IntelInfo};
 
@@ -52,6 +53,9 @@ pub struct WorkerConfig {
     pub queue_depth: usize,
     /// Enable CPU affinity
     pub cpu_affinity: bool,
+    /// Rules directory for signature matching
+    #[serde(default)]
+    pub rules_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for WorkerConfig {
@@ -60,6 +64,7 @@ impl Default for WorkerConfig {
             num_workers: 0, // Auto-detect
             queue_depth: 1000,
             cpu_affinity: false,
+            rules_dir: None,
         }
     }
 }
@@ -104,7 +109,8 @@ pub struct WorkerPool {
     // Stage 3: Brute Force Detection
     brute_force_tracker: BruteForceTracker,
 
-    // Stage 4: Signature Matching (TODO: integrate SignatureEngine)
+    // Stage 4: Signature Matching
+    signature_engine: Option<SignatureEngine>,
 
     // Stage 5: Threat Intel
     intel_engine: IntelEngine,
@@ -137,6 +143,10 @@ pub struct WorkerPool {
 impl WorkerPool {
     /// Create a new worker pool
     pub fn new(config: WorkerConfig) -> Self {
+        // Stage 4: Load signature engine if rules_dir is configured
+        let signature_engine = config.rules_dir.as_ref()
+            .and_then(|dir| SignatureEngine::load_from_dir(dir));
+
         Self {
             config,
             packets_processed: Arc::new(AtomicU64::new(0)),
@@ -157,6 +167,9 @@ impl WorkerPool {
 
             // Stage 3: Brute Force Detection
             brute_force_tracker: BruteForceTracker::new(),
+
+            // Stage 4: Signature Matching
+            signature_engine,
 
             // Stage 5: Threat Intel
             intel_engine: IntelEngine::new(),
@@ -328,19 +341,49 @@ impl WorkerPool {
                 // Stage 4: Signature Matching
                 PipelineStage::SignatureMatching => {
                     trace!("Stage 4: Signature matching");
-                    // TODO: integrate SignatureEngine here
-                    // For now, sample detection for sensitive ports
-                    if packet.dst_port() == 22 || packet.dst_port() == 3389 {
-                        events.push(self.create_event(
-                            &packet,
-                            DetectionType::SignatureMatch,
-                            Severity::Low,
-                            "Connection to sensitive service",
-                        ));
-                        true
-                    } else {
-                        false
+                    let mut matched = false;
+
+                    if let Some(ref engine) = self.signature_engine {
+                        // Build flow state from current flow
+                        let flow_state = if let Some(ref flow) = self.current_flow {
+                            FlowState {
+                                established: flow.state == crate::core::flow::FlowState::Established,
+                                to_server: flow.fwd_packets > flow.bwd_packets,
+                            }
+                        } else {
+                            FlowState::default()
+                        };
+
+                        // TODO: Build protocol context from protocol detector results
+                        let proto_ctx = ProtocolContext::None;
+
+                        // Match packet against signatures
+                        let matches = engine.match_packet(&packet, &proto_ctx, &flow_state);
+
+                        for m in matches {
+                            let severity = match m.priority {
+                                1 => Severity::Critical,
+                                2 => Severity::High,
+                                3 => Severity::Medium,
+                                _ => Severity::Low,
+                            };
+
+                            events.push(
+                                DetectionEvent::new(
+                                    DetectionType::SignatureMatch,
+                                    severity,
+                                    packet.src_ip(),
+                                    packet.dst_ip(),
+                                    format!("[{}:{}] {}", m.sid, m.priority, m.msg),
+                                )
+                                .with_detector("signature")
+                                .with_ports(packet.src_port(), packet.dst_port())
+                            );
+                            matched = true;
+                        }
                     }
+
+                    matched
                 }
 
                 // Stage 5: Threat Intel

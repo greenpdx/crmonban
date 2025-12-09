@@ -576,6 +576,56 @@ impl SignatureEngine {
         }
     }
 
+    /// Load rules from a specified directory
+    ///
+    /// Returns Some(engine) on success, None if directory doesn't exist or loading fails.
+    pub fn load_from_dir(rules_dir: &std::path::Path) -> Option<Self> {
+        use super::RuleLoader;
+        use tracing::{debug, warn};
+
+        if !rules_dir.exists() {
+            warn!("Rules directory does not exist: {:?}", rules_dir);
+            return None;
+        }
+
+        debug!("Loading signatures from {:?}...", rules_dir);
+
+        let mut config = super::SignatureConfig::default();
+        config.rule_dirs = vec![rules_dir.to_path_buf()];
+
+        let mut engine = Self::new(config.clone());
+        let mut loader = RuleLoader::new(config);
+
+        // Load classification.config for priority mapping
+        let classification_path = rules_dir.join("classification.config");
+        if classification_path.exists() {
+            if let Err(e) = loader.load_classifications(&classification_path) {
+                warn!("Failed to load classification.config: {}", e);
+            }
+        }
+
+        match loader.load_all() {
+            Ok(ruleset) => {
+                debug!(
+                    "Loaded {} rules ({} enabled, {} with content patterns)",
+                    ruleset.stats.total_rules,
+                    ruleset.stats.total_rules - ruleset.stats.disabled,
+                    ruleset.stats.with_content
+                );
+                for (_, rule) in ruleset.rules {
+                    engine.add_rule(rule);
+                }
+                engine.rebuild_prefilter();
+                debug!("Prefilter patterns: {}", engine.prefilter_pattern_count());
+                Some(engine)
+            }
+            Err(e) => {
+                warn!("Failed to load rules: {}", e);
+                None
+            }
+        }
+    }
+
     /// Add a rule to the engine
     pub fn add_rule(&mut self, rule: Rule) {
         let id = rule.id;
@@ -625,6 +675,26 @@ impl SignatureEngine {
         proto_ctx: &ProtocolContext,
         flow_state: &FlowState,
     ) -> Vec<MatchResult> {
+        self.match_packet_with_stream(packet, proto_ctx, flow_state, None, None)
+    }
+
+    /// Match packet against all rules, including stream data
+    ///
+    /// # Arguments
+    /// * `packet` - The packet to match against
+    /// * `proto_ctx` - Protocol-specific context (HTTP, DNS, TLS, etc.)
+    /// * `flow_state` - Connection flow state (established, direction)
+    /// * `fwd_stream` - Optional forward stream data (client to server)
+    /// * `bwd_stream` - Optional backward stream data (server to client)
+    #[inline]
+    pub fn match_packet_with_stream(
+        &self,
+        packet: &Packet,
+        proto_ctx: &ProtocolContext,
+        flow_state: &FlowState,
+        fwd_stream: Option<&[u8]>,
+        bwd_stream: Option<&[u8]>,
+    ) -> Vec<MatchResult> {
         use tracing::debug;
         use std::time::Instant;
 
@@ -632,7 +702,13 @@ impl SignatureEngine {
         let mut results = Vec::new();
 
         // Extract packet info once
-        let payload = packet.payload();
+        let packet_payload = packet.payload();
+        // Use stream data if available and has content, otherwise use packet payload
+        let payload = if flow_state.to_server {
+            fwd_stream.filter(|s| !s.is_empty()).unwrap_or(packet_payload)
+        } else {
+            bwd_stream.filter(|s| !s.is_empty()).unwrap_or(packet_payload)
+        };
         let protocol = ip_protocol_to_sig_protocol(packet.protocol());
         let src_ip = Some(packet.src_ip());
         let dst_ip = Some(packet.dst_ip());
