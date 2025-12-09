@@ -513,6 +513,69 @@ impl SignatureEngine {
         }
     }
 
+    /// Load rules from the default Suricata rules directory
+    ///
+    /// Returns an initialized SignatureEngine with rules loaded and prefilter built.
+    /// Default rules directory: /var/lib/crmonban/data/signatures/suricata/rules
+    pub fn load_default_rules() -> Result<Self, String> {
+        use super::RuleLoader;
+        use std::path::PathBuf;
+
+        let mut config = super::SignatureConfig::default();
+        let rules_dir = PathBuf::from("/var/lib/crmonban/data/signatures/suricata/rules");
+        if rules_dir.exists() {
+            config.rule_dirs = vec![rules_dir];
+        }
+
+        let mut engine = Self::new(config.clone());
+        let mut loader = RuleLoader::new(config);
+
+        match loader.load_all() {
+            Ok(ruleset) => {
+                for (_, rule) in ruleset.rules {
+                    engine.add_rule(rule);
+                }
+                engine.rebuild_prefilter();
+                Ok(engine)
+            }
+            Err(e) => Err(format!("Failed to load rules: {}", e)),
+        }
+    }
+
+    /// Load rules from the default directory, printing status to stdout
+    ///
+    /// Same as load_default_rules() but with verbose output for CLI/benchmark use.
+    pub fn load_default_rules_verbose() -> Result<Self, String> {
+        use super::RuleLoader;
+        use std::path::PathBuf;
+
+        let mut config = super::SignatureConfig::default();
+        let rules_dir = PathBuf::from("/var/lib/crmonban/data/signatures/suricata/rules");
+        if rules_dir.exists() {
+            config.rule_dirs = vec![rules_dir.clone()];
+            println!("Loading rules from: {:?}", rules_dir);
+        }
+
+        let mut engine = Self::new(config.clone());
+        let mut loader = RuleLoader::new(config);
+
+        match loader.load_all() {
+            Ok(ruleset) => {
+                println!("Loaded {} rules ({} enabled, {} with content patterns)",
+                    ruleset.stats.total_rules,
+                    ruleset.stats.total_rules - ruleset.stats.disabled,
+                    ruleset.stats.with_content);
+                for (_, rule) in ruleset.rules {
+                    engine.add_rule(rule);
+                }
+                engine.rebuild_prefilter();
+                println!("Prefilter patterns: {}", engine.prefilter_pattern_count());
+                Ok(engine)
+            }
+            Err(e) => Err(format!("Failed to load rules: {}", e)),
+        }
+    }
+
     /// Add a rule to the engine
     pub fn add_rule(&mut self, rule: Rule) {
         let id = rule.id;
@@ -612,12 +675,16 @@ impl SignatureEngine {
         // Debug: track verification stats
         let mut verified_count = 0u32;
         let mut failed_protocol = 0u32;
+        let mut failed_flags = 0u32;
         let mut failed_address = 0u32;
         let mut failed_flow = 0u32;
         let mut failed_flowbits = 0u32;
         let mut failed_content = 0u32;
         let mut failed_pcre = 0u32;
         let mut failed_threshold = 0u32;
+
+        // Get TCP flags once for all rules
+        let tcp_flags = packet.tcp_flags();
 
         // Verify each candidate rule
         let verify_start = Instant::now();
@@ -633,6 +700,10 @@ impl SignatureEngine {
                 // Check each stage and count failures
                 if !self.check_protocol_direct(rule, protocol) {
                     failed_protocol += 1;
+                    continue;
+                }
+                if !self.check_tcp_flags_direct(rule, tcp_flags) {
+                    failed_flags += 1;
                     continue;
                 }
                 if !self.check_addresses_direct(rule, src_ip, dst_ip, src_port, dst_port, flow_state.to_server) {
@@ -720,8 +791,8 @@ impl SignatureEngine {
         // Log verification stats periodically
         if count % 10000 == 0 && candidates.len() > 0 {
             debug!(
-                "Verify stats #{}: checked={}, proto_fail={}, addr_fail={}, flow_fail={}, flowbits_fail={}, content_fail={}, pcre_fail={}, thresh_fail={}, matched={}, time={:?}",
-                count, verified_count, failed_protocol, failed_address, failed_flow,
+                "Verify stats #{}: checked={}, proto_fail={}, flags_fail={}, addr_fail={}, flow_fail={}, flowbits_fail={}, content_fail={}, pcre_fail={}, thresh_fail={}, matched={}, time={:?}",
+                count, verified_count, failed_protocol, failed_flags, failed_address, failed_flow,
                 failed_flowbits, failed_content, failed_pcre, failed_threshold,
                 results.len(), verify_start.elapsed()
             );
@@ -1042,6 +1113,106 @@ impl SignatureEngine {
     #[inline]
     fn check_protocol_direct(&self, rule: &Rule, protocol: Protocol) -> bool {
         rule.protocol == Protocol::Any || rule.protocol == protocol
+    }
+
+    /// Check TCP flags match (direct version)
+    ///
+    /// Implements Suricata-style flags matching:
+    /// - `flags:S` - SYN flag must be set
+    /// - `flags:SA` - SYN and ACK must be set
+    /// - `flags:S,12` - Only check SYN and ACK bits (mask), SYN must be set
+    /// - `flags:0` - No flags set (NULL scan)
+    /// - `flags:+S` - At least SYN must be set (match_all mode)
+    /// - `flags:*SA` - At least one of SYN or ACK must be set (match_any mode)
+    #[inline]
+    fn check_tcp_flags_direct(
+        &self,
+        rule: &Rule,
+        packet_flags: Option<crate::core::packet::TcpFlags>,
+    ) -> bool {
+        // Find Flags option in rule
+        for opt in &rule.options {
+            if let RuleOption::Flags(rule_flags) = opt {
+                // If packet is not TCP, flags check fails
+                let pkt_flags = match packet_flags {
+                    Some(f) => f,
+                    None => return false,
+                };
+
+                // Check each specified flag
+                // For each flag in the rule spec, if Some(true) it must be set,
+                // if Some(false) it must NOT be set, if None it's not checked
+
+                if rule_flags.match_any {
+                    // At least one specified flag must match
+                    let mut any_match = false;
+                    if rule_flags.syn == Some(true) && pkt_flags.syn { any_match = true; }
+                    if rule_flags.ack == Some(true) && pkt_flags.ack { any_match = true; }
+                    if rule_flags.fin == Some(true) && pkt_flags.fin { any_match = true; }
+                    if rule_flags.rst == Some(true) && pkt_flags.rst { any_match = true; }
+                    if rule_flags.psh == Some(true) && pkt_flags.psh { any_match = true; }
+                    if rule_flags.urg == Some(true) && pkt_flags.urg { any_match = true; }
+                    if rule_flags.ece == Some(true) && pkt_flags.ece { any_match = true; }
+                    if rule_flags.cwr == Some(true) && pkt_flags.cwr { any_match = true; }
+                    if !any_match {
+                        return false;
+                    }
+                } else {
+                    // Default: all specified flags must match exactly
+                    // SYN
+                    if let Some(expected) = rule_flags.syn {
+                        if pkt_flags.syn != expected {
+                            return false;
+                        }
+                    }
+                    // ACK
+                    if let Some(expected) = rule_flags.ack {
+                        if pkt_flags.ack != expected {
+                            return false;
+                        }
+                    }
+                    // FIN
+                    if let Some(expected) = rule_flags.fin {
+                        if pkt_flags.fin != expected {
+                            return false;
+                        }
+                    }
+                    // RST
+                    if let Some(expected) = rule_flags.rst {
+                        if pkt_flags.rst != expected {
+                            return false;
+                        }
+                    }
+                    // PSH
+                    if let Some(expected) = rule_flags.psh {
+                        if pkt_flags.psh != expected {
+                            return false;
+                        }
+                    }
+                    // URG
+                    if let Some(expected) = rule_flags.urg {
+                        if pkt_flags.urg != expected {
+                            return false;
+                        }
+                    }
+                    // ECE
+                    if let Some(expected) = rule_flags.ece {
+                        if pkt_flags.ece != expected {
+                            return false;
+                        }
+                    }
+                    // CWR
+                    if let Some(expected) = rule_flags.cwr {
+                        if pkt_flags.cwr != expected {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // No flags option or all flags matched
+        true
     }
 
     /// Check IP/port addresses (direct version)
@@ -2126,5 +2297,116 @@ mod tests {
         assert_eq!(result.priority, 2);
         assert_eq!(result.classtype, Some("attempted-admin".to_string()));
         assert_eq!(result.action, Action::Alert);
+    }
+
+    // =========================================================================
+    // Rule loading from filesystem tests
+    // =========================================================================
+
+    #[test]
+    fn test_load_default_rules() {
+        use std::path::Path;
+
+        let rules_dir = Path::new("/var/lib/crmonban/data/signatures/suricata/rules");
+
+        // Skip test if rules directory doesn't exist (CI environment)
+        if !rules_dir.exists() {
+            eprintln!("Skipping test_load_default_rules: rules directory not found");
+            return;
+        }
+
+        // Load rules from default directory
+        let result = SignatureEngine::load_default_rules();
+        assert!(result.is_ok(), "Failed to load rules: {:?}", result.err());
+
+        let engine = result.unwrap();
+
+        // Verify rules were loaded
+        let stats = engine.stats();
+        assert!(stats.total_rules > 0, "No rules loaded from {:?}", rules_dir);
+
+        // Verify prefilter was built
+        assert!(engine.prefilter_pattern_count() > 0, "Prefilter not built");
+
+        eprintln!(
+            "Loaded {} rules ({} disabled, {} prefilter patterns)",
+            stats.total_rules,
+            stats.disabled,
+            engine.prefilter_pattern_count()
+        );
+    }
+
+    #[test]
+    fn test_load_default_rules_verbose() {
+        use std::path::Path;
+
+        let rules_dir = Path::new("/var/lib/crmonban/data/signatures/suricata/rules");
+
+        // Skip test if rules directory doesn't exist
+        if !rules_dir.exists() {
+            eprintln!("Skipping test_load_default_rules_verbose: rules directory not found");
+            return;
+        }
+
+        let result = SignatureEngine::load_default_rules_verbose();
+        assert!(result.is_ok(), "Failed to load rules: {:?}", result.err());
+
+        let engine = result.unwrap();
+        assert!(engine.stats().total_rules > 0, "No rules loaded");
+    }
+
+    #[test]
+    fn test_load_rules_from_custom_directory() {
+        use std::path::PathBuf;
+        use crate::signatures::RuleLoader;
+
+        let rules_dir = PathBuf::from("/var/lib/crmonban/data/signatures/suricata/rules");
+
+        // Skip test if rules directory doesn't exist
+        if !rules_dir.exists() {
+            eprintln!("Skipping test_load_rules_from_custom_directory: rules directory not found");
+            return;
+        }
+
+        let mut config = SignatureConfig::default();
+        config.rule_dirs = vec![rules_dir.clone()];
+
+        let mut loader = RuleLoader::new(config.clone());
+        let ruleset = loader.load_all();
+        assert!(ruleset.is_ok(), "Failed to load ruleset: {:?}", ruleset.err());
+
+        let ruleset = ruleset.unwrap();
+        assert!(ruleset.stats.total_rules > 0, "No rules in ruleset");
+
+        // Build engine from loaded rules
+        let mut engine = SignatureEngine::new(config);
+        for (_, rule) in ruleset.rules {
+            engine.add_rule(rule);
+        }
+        engine.rebuild_prefilter();
+
+        eprintln!(
+            "Custom load: {} rules, {} with content, {} disabled",
+            ruleset.stats.total_rules,
+            ruleset.stats.with_content,
+            ruleset.stats.disabled
+        );
+    }
+
+    #[test]
+    fn test_load_nonexistent_directory() {
+        use std::path::PathBuf;
+        use crate::signatures::RuleLoader;
+
+        let mut config = SignatureConfig::default();
+        config.rule_dirs = vec![PathBuf::from("/nonexistent/rules/directory")];
+
+        let mut loader = RuleLoader::new(config);
+        let result = loader.load_all();
+
+        // Should succeed but load no rules (directory doesn't exist)
+        assert!(result.is_ok());
+        let ruleset = result.unwrap();
+        assert_eq!(ruleset.stats.total_rules, 0, "Should load 0 rules from nonexistent dir");
     }
 }

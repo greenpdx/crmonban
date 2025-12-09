@@ -1,50 +1,49 @@
 # Local scan detection rules for crmonban
-# These rules use nftables for fast blocking (not just logging like traditional NIDS)
-# Keep thresholds low since blocking is immediate and effective
+#
+# DISABLED: All scan detection is now handled by the ScanDetectEngine
+# which tracks per-source port diversity and uses proper scoring.
+# These signature-based rules cause excessive false positives on normal traffic.
+#
+# The ScanDetectEngine provides:
+# - Per-source port diversity tracking
+# - Commonly targeted port weighting
+# - Connection success/failure tracking
+# - Adaptive thresholds based on traffic patterns
+#
+# To re-enable individual rules, uncomment them below.
 
-# TCP Half-Open (SYN) Scan - 2 SYN packets to different ports triggers alert
-alert tcp any any -> any any (msg:"LOCAL TCP Half-Open Scan Detection"; flags:S; threshold:type both, track by_src, count 2, seconds 10; classtype:attempted-recon; sid:9000051; rev:1; priority:2;)
+# TCP Half-Open (SYN) Scan - DISABLED: Too many FPs, threshold too low
+# alert tcp any any -> any any (msg:"LOCAL TCP Half-Open Scan Detection"; flags:S; threshold:type both, track by_src, count 2, seconds 10; classtype:attempted-recon; sid:9000051; rev:1; priority:2;)
 
-# TCP FIN Scan - FIN without established connection
-alert tcp any any -> any any (msg:"LOCAL TCP FIN Scan Detection"; flags:F,12; threshold:type both, track by_src, count 2, seconds 10; classtype:attempted-recon; sid:9000052; rev:1; priority:2;)
+# TCP FIN Scan - DISABLED: Matches normal connection termination
+# alert tcp any any -> any any (msg:"LOCAL TCP FIN Scan Detection"; flags:F,12; threshold:type both, track by_src, count 2, seconds 10; classtype:attempted-recon; sid:9000052; rev:1; priority:2;)
 
-# TCP NULL Scan - No flags set
-alert tcp any any -> any any (msg:"LOCAL TCP NULL Scan Detection"; flags:0,12; threshold:type both, track by_src, count 2, seconds 10; classtype:attempted-recon; sid:9000053; rev:1; priority:2;)
+# TCP NULL Scan - DISABLED: Rare attack, but threshold too low
+# alert tcp any any -> any any (msg:"LOCAL TCP NULL Scan Detection"; flags:0,12; threshold:type both, track by_src, count 2, seconds 10; classtype:attempted-recon; sid:9000053; rev:1; priority:2;)
 
-# TCP XMAS Scan - FIN+PSH+URG flags
-alert tcp any any -> any any (msg:"LOCAL TCP XMAS Scan Detection"; flags:FPU,12; threshold:type both, track by_src, count 2, seconds 10; classtype:attempted-recon; sid:9000054; rev:1; priority:2;)
+# TCP XMAS Scan - DISABLED: Rare attack, threshold too low
+# alert tcp any any -> any any (msg:"LOCAL TCP XMAS Scan Detection"; flags:FPU,12; threshold:type both, track by_src, count 2, seconds 10; classtype:attempted-recon; sid:9000054; rev:1; priority:2;)
 
-# TCP ACK Scan - ACK without established connection (firewall mapping)
-alert tcp any any -> any any (msg:"LOCAL TCP ACK Scan Detection"; flags:A,12; threshold:type both, track by_src, count 5, seconds 10; classtype:attempted-recon; sid:9000055; rev:1; priority:2;)
+# TCP ACK Scan - DISABLED: Matches normal ACK traffic
+# alert tcp any any -> any any (msg:"LOCAL TCP ACK Scan Detection"; flags:A,12; threshold:type both, track by_src, count 5, seconds 10; classtype:attempted-recon; sid:9000055; rev:1; priority:2;)
 
-# Malformed TCP - SYN+FIN together (should never happen)
+# Malformed TCP packets - Keep enabled, these should never happen in normal traffic
 alert tcp any any -> any any (msg:"LOCAL Malformed TCP SYN+FIN"; flags:SF; classtype:bad-unknown; sid:9000056; rev:1; priority:1;)
-
-# Malformed TCP - SYN+RST together (should never happen)
 alert tcp any any -> any any (msg:"LOCAL Malformed TCP SYN+RST"; flags:SR; classtype:bad-unknown; sid:9000057; rev:1; priority:1;)
 
-# UDP Port Scan - rapid UDP probes
-alert udp any any -> any any (msg:"LOCAL UDP Port Scan Detection"; threshold:type both, track by_src, count 5, seconds 10; classtype:attempted-recon; sid:9000058; rev:1; priority:2;)
+# UDP Port Scan - DISABLED: Matches normal UDP traffic (DNS, etc)
+# alert udp any any -> any any (msg:"LOCAL UDP Port Scan Detection"; threshold:type both, track by_src, count 5, seconds 10; classtype:attempted-recon; sid:9000058; rev:1; priority:2;)
 
-# ICMP Sweep - ping sweep detection
-alert icmp any any -> any any (msg:"LOCAL ICMP Sweep Detection"; itype:8; threshold:type both, track by_src, count 3, seconds 10; classtype:attempted-recon; sid:9000059; rev:1; priority:2;)
+# ICMP Sweep - DISABLED: Normal ping traffic triggers this
+# alert icmp any any -> any any (msg:"LOCAL ICMP Sweep Detection"; itype:8; threshold:type both, track by_src, count 3, seconds 10; classtype:attempted-recon; sid:9000059; rev:1; priority:2;)
 
-# Vertical Port Scan - many ports on single host (SYN flood to one target)
-alert tcp any any -> any 1:1024 (msg:"LOCAL Vertical Port Scan - Privileged Ports"; flags:S; threshold:type both, track by_src, count 10, seconds 30; classtype:attempted-recon; sid:9000060; rev:1; priority:1;)
+# Vertical Port Scan - DISABLED: Handled by ScanDetectEngine
+# alert tcp any any -> any 1:1024 (msg:"LOCAL Vertical Port Scan - Privileged Ports"; flags:S; threshold:type both, track by_src, count 10, seconds 30; classtype:attempted-recon; sid:9000060; rev:1; priority:1;)
 
-# Service-specific rapid connection attempts (stealth reconnaissance)
-# SSH rapid SYN (lower threshold than ET rules)
-alert tcp any any -> any 22 (msg:"LOCAL Rapid SSH Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000061; rev:1; priority:2;)
-
-# RDP rapid SYN
-alert tcp any any -> any 3389 (msg:"LOCAL Rapid RDP Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000062; rev:1; priority:2;)
-
-# SMB rapid SYN
-alert tcp any any -> any 445 (msg:"LOCAL Rapid SMB Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000063; rev:1; priority:2;)
-
-# MySQL rapid SYN
-alert tcp any any -> any 3306 (msg:"LOCAL Rapid MySQL Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000064; rev:1; priority:2;)
-
-# PostgreSQL rapid SYN
-alert tcp any any -> any 5432 (msg:"LOCAL Rapid PostgreSQL Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000065; rev:1; priority:2;)
+# Service-specific rapid connection attempts - DISABLED: Handled by BruteForceTracker
+# alert tcp any any -> any 22 (msg:"LOCAL Rapid SSH Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000061; rev:1; priority:2;)
+# alert tcp any any -> any 3389 (msg:"LOCAL Rapid RDP Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000062; rev:1; priority:2;)
+# alert tcp any any -> any 445 (msg:"LOCAL Rapid SMB Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000063; rev:1; priority:2;)
+# alert tcp any any -> any 3306 (msg:"LOCAL Rapid MySQL Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000064; rev:1; priority:2;)
+# alert tcp any any -> any 5432 (msg:"LOCAL Rapid PostgreSQL Connection Attempts"; flags:S; threshold:type both, track by_src, count 3, seconds 30; classtype:attempted-recon; sid:9000065; rev:1; priority:2;)
 

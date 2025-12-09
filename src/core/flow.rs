@@ -260,6 +260,18 @@ pub struct Flow {
     /// ACK count
     pub ack_count: u32,
 
+    // TCP stream reassembly (only populated when enabled)
+    /// Forward stream buffer (client to server)
+    pub fwd_stream: Option<Vec<u8>>,
+    /// Backward stream buffer (server to client)
+    pub bwd_stream: Option<Vec<u8>>,
+    /// Expected next sequence number (forward direction)
+    pub fwd_next_seq: Option<u32>,
+    /// Expected next sequence number (backward direction)
+    pub bwd_next_seq: Option<u32>,
+    /// Maximum buffer size for reassembly
+    pub max_stream_buffer: usize,
+
     // Application layer
     /// Detected application protocol
     pub app_protocol: AppProtocol,
@@ -273,6 +285,10 @@ pub struct Flow {
     pub tags: Vec<String>,
     /// Alert IDs triggered by this flow
     pub alert_ids: Vec<u64>,
+    /// Flow marked as malicious (signature matched)
+    pub is_malicious: bool,
+    /// SID that first identified this flow as malicious
+    pub malicious_sid: Option<u32>,
 }
 
 impl Flow {
@@ -334,11 +350,19 @@ impl Flow {
             psh_count: 0,
             urg_count: 0,
             ack_count: 0,
+            // Stream reassembly - initialized as None, enabled via enable_reassembly()
+            fwd_stream: None,
+            bwd_stream: None,
+            fwd_next_seq: None,
+            bwd_next_seq: None,
+            max_stream_buffer: 0,
             app_protocol: AppProtocol::Unknown,
             app_data: HashMap::new(),
             risk_score: 0.0,
             tags: Vec::new(),
             alert_ids: Vec::new(),
+            is_malicious: false,
+            malicious_sid: None,
         }
     }
 
@@ -521,6 +545,85 @@ impl Flow {
     /// Store app-layer data
     pub fn set_app_data(&mut self, key: &str, value: serde_json::Value) {
         self.app_data.insert(key.to_string(), value);
+    }
+
+    /// Mark flow as malicious (triggered by signature match)
+    pub fn mark_malicious(&mut self, sid: u32) {
+        if !self.is_malicious {
+            self.is_malicious = true;
+            self.malicious_sid = Some(sid);
+        }
+    }
+
+    /// Enable TCP stream reassembly with the given max buffer size in bytes
+    pub fn enable_reassembly(&mut self, max_buffer_bytes: usize) {
+        if self.fwd_stream.is_none() {
+            self.fwd_stream = Some(Vec::with_capacity(4096.min(max_buffer_bytes)));
+            self.bwd_stream = Some(Vec::with_capacity(4096.min(max_buffer_bytes)));
+            self.max_stream_buffer = max_buffer_bytes;
+        }
+    }
+
+    /// Check if reassembly is enabled
+    pub fn is_reassembly_enabled(&self) -> bool {
+        self.fwd_stream.is_some()
+    }
+
+    /// Accumulate TCP payload into stream buffer
+    /// Returns true if data was added, false if buffer is full
+    #[inline]
+    pub fn accumulate_payload(&mut self, payload: &[u8], is_forward: bool) -> bool {
+        if payload.is_empty() {
+            return true;
+        }
+
+        let buffer = if is_forward {
+            self.fwd_stream.as_mut()
+        } else {
+            self.bwd_stream.as_mut()
+        };
+
+        if let Some(buf) = buffer {
+            let available = self.max_stream_buffer.saturating_sub(buf.len());
+            if available == 0 {
+                return false; // Buffer full
+            }
+            let to_copy = payload.len().min(available);
+            buf.extend_from_slice(&payload[..to_copy]);
+            true
+        } else {
+            true // Reassembly not enabled, no-op
+        }
+    }
+
+    /// Get forward stream (client to server)
+    pub fn fwd_stream(&self) -> Option<&[u8]> {
+        self.fwd_stream.as_deref()
+    }
+
+    /// Get backward stream (server to client)
+    pub fn bwd_stream(&self) -> Option<&[u8]> {
+        self.bwd_stream.as_deref()
+    }
+
+    /// Get forward stream length
+    pub fn fwd_stream_len(&self) -> usize {
+        self.fwd_stream.as_ref().map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Get backward stream length
+    pub fn bwd_stream_len(&self) -> usize {
+        self.bwd_stream.as_ref().map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// Clear stream buffers (e.g., after signature match or when buffers get too large)
+    pub fn clear_streams(&mut self) {
+        if let Some(buf) = self.fwd_stream.as_mut() {
+            buf.clear();
+        }
+        if let Some(buf) = self.bwd_stream.as_mut() {
+            buf.clear();
+        }
     }
 }
 

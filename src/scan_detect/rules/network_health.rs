@@ -105,7 +105,7 @@ impl DetectionRule for VerificationFailureRule {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::scan_detect::behavior::SourceBehavior;
+    use crate::scan_detect::behavior::{SourceBehavior, FlowKey};
     use crate::scan_detect::config::ScanDetectConfig;
 
     fn test_context<'a>(
@@ -141,8 +141,13 @@ mod tests {
         let config = ScanDetectConfig::default();
 
         // Record many ports
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         for port in 1..=60 {
-            behavior.record_syn(port);
+            behavior.record_syn(FlowKey {
+                src_port: 50000,
+                dst_ip,
+                dst_port: port,
+            });
         }
 
         let ctx = test_context(&behavior, &config);

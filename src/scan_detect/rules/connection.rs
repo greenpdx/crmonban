@@ -21,9 +21,9 @@ impl DetectionRule for HalfOpenSynRule {
             return None;
         }
 
-        // Check if this port doesn't already have a connection
-        let port = ctx.current_port?;
-        if ctx.behavior.completed_ports.contains(&port) {
+        // Check if this flow doesn't already have a completed connection
+        let flow_key = ctx.flow_key()?;
+        if ctx.behavior.is_flow_completed(&flow_key) {
             return None;
         }
 
@@ -35,7 +35,7 @@ impl DetectionRule for HalfOpenSynRule {
             Some(RuleResult::new(
                 self.id(),
                 weight,
-                &format!("SYN to port {} ({} half-open)", port, half_open + 1),
+                &format!("SYN to port {} ({} half-open)", flow_key.dst_port, half_open + 1),
             ).with_tag("half-open"))
         } else {
             None
@@ -147,16 +147,16 @@ impl DetectionRule for ClosedPortRstRule {
             return None;
         }
 
-        let port = ctx.current_port?;
+        let flow_key = ctx.flow_key()?;
 
         // Check if this was a half-open connection that got RST
-        if let Some(conn) = ctx.behavior.connections.get(&port) {
+        if let Some(conn) = ctx.behavior.get_connection(&flow_key) {
             if conn.state == super::super::behavior::ConnectionState::HalfOpen {
                 let weight = ctx.config.weights.closed_port_rst;
                 return Some(RuleResult::new(
                     self.id(),
                     weight,
-                    &format!("RST received for port {}", port),
+                    &format!("RST received for port {}", flow_key.dst_port),
                 ).with_tag("closed-port"));
             }
         }
@@ -282,10 +282,10 @@ impl DetectionRule for CompletedHandshakeRule {
             return None;
         }
 
-        let port = ctx.current_port?;
+        let flow_key = ctx.flow_key()?;
 
-        // Check if we have a half-open connection on this port that's completing
-        if let Some(conn) = ctx.behavior.connections.get(&port) {
+        // Check if we have a half-open connection on this flow that's completing
+        if let Some(conn) = ctx.behavior.get_connection(&flow_key) {
             if conn.state == super::super::behavior::ConnectionState::HalfOpen
                 || conn.state == super::super::behavior::ConnectionState::SynReceived
             {
@@ -293,7 +293,7 @@ impl DetectionRule for CompletedHandshakeRule {
                 return Some(RuleResult::new(
                     self.id(),
                     weight,
-                    &format!("Handshake completed on port {}", port),
+                    &format!("Handshake completed on port {}", flow_key.dst_port),
                 ).with_tag("legitimate"));
             }
         }
@@ -317,10 +317,10 @@ impl DetectionRule for DataExchangedRule {
             return None;
         }
 
-        let port = ctx.current_port?;
+        let flow_key = ctx.flow_key()?;
 
         // Check if connection is established
-        if let Some(conn) = ctx.behavior.connections.get(&port) {
+        if let Some(conn) = ctx.behavior.get_connection(&flow_key) {
             if conn.state == super::super::behavior::ConnectionState::Established
                 || conn.state == super::super::behavior::ConnectionState::Active
             {
@@ -328,7 +328,7 @@ impl DetectionRule for DataExchangedRule {
                 return Some(RuleResult::new(
                     self.id(),
                     weight,
-                    &format!("Data exchanged on port {} ({} bytes)", port, ctx.payload_size),
+                    &format!("Data exchanged on port {} ({} bytes)", flow_key.dst_port, ctx.payload_size),
                 ).with_tag("legitimate"));
             }
         }
@@ -347,17 +347,17 @@ impl DetectionRule for TlsCompletedRule {
     fn default_weight(&self) -> f32 { -2.0 }
 
     fn evaluate(&self, ctx: &EvaluationContext) -> Option<RuleResult> {
-        let port = ctx.current_port?;
+        let flow_key = ctx.flow_key()?;
 
         // Check if protocol detected is TLS
-        if let Some(conn) = ctx.behavior.connections.get(&port) {
+        if let Some(conn) = ctx.behavior.get_connection(&flow_key) {
             if let Some(ref proto) = conn.protocol {
                 if proto == "tls" || proto == "ssl" {
                     let weight = ctx.config.weights.tls_completed;
                     return Some(RuleResult::new(
                         self.id(),
                         weight,
-                        &format!("TLS handshake completed on port {}", port),
+                        &format!("TLS handshake completed on port {}", flow_key.dst_port),
                     ).with_tag("legitimate"));
                 }
             }
@@ -377,17 +377,17 @@ impl DetectionRule for HttpRequestRule {
     fn default_weight(&self) -> f32 { -1.5 }
 
     fn evaluate(&self, ctx: &EvaluationContext) -> Option<RuleResult> {
-        let port = ctx.current_port?;
+        let flow_key = ctx.flow_key()?;
 
         // Check if protocol detected is HTTP
-        if let Some(conn) = ctx.behavior.connections.get(&port) {
+        if let Some(conn) = ctx.behavior.get_connection(&flow_key) {
             if let Some(ref proto) = conn.protocol {
                 if proto == "http" || proto == "https" {
                     let weight = ctx.config.weights.http_request;
                     return Some(RuleResult::new(
                         self.id(),
                         weight,
-                        &format!("HTTP request on port {}", port),
+                        &format!("HTTP request on port {}", flow_key.dst_port),
                     ).with_tag("legitimate"));
                 }
             }
@@ -415,7 +415,7 @@ fn is_masscan_signature(_options: &[u8]) -> bool {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::scan_detect::behavior::SourceBehavior;
+    use crate::scan_detect::behavior::{FlowKey, SourceBehavior};
     use crate::scan_detect::config::ScanDetectConfig;
 
     fn test_context<'a>(
@@ -425,15 +425,22 @@ mod tests {
         EvaluationContext::new(behavior.src_ip, behavior, config)
     }
 
+    fn make_flow_key(src_port: u16, dst_ip: IpAddr, dst_port: u16) -> FlowKey {
+        FlowKey::new(src_port, dst_ip, dst_port)
+    }
+
     #[test]
     fn test_half_open_syn_rule() {
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
-        let mut behavior = SourceBehavior::new(ip);
+        let src_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut behavior = SourceBehavior::new(src_ip);
         let config = ScanDetectConfig::default();
 
         // First SYN - no rule trigger (need at least 1 existing half-open)
-        behavior.record_syn(22);
+        behavior.record_syn(make_flow_key(50000, dst_ip, 22));
         let ctx = test_context(&behavior, &config)
+            .with_src_port(50001)
+            .with_dst_ip(dst_ip)
             .with_port(80)
             .with_syn();
 
@@ -445,12 +452,15 @@ mod tests {
 
     #[test]
     fn test_targeted_port_rule() {
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
-        let behavior = SourceBehavior::new(ip);
+        let src_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let behavior = SourceBehavior::new(src_ip);
         let config = ScanDetectConfig::default();
 
         // SYN to targeted port (SSH)
         let ctx = test_context(&behavior, &config)
+            .with_src_port(50000)
+            .with_dst_ip(dst_ip)
             .with_port(22)
             .with_syn();
 
@@ -461,6 +471,8 @@ mod tests {
 
         // SYN to non-targeted port
         let ctx = test_context(&behavior, &config)
+            .with_src_port(50001)
+            .with_dst_ip(dst_ip)
             .with_port(12345)
             .with_syn();
 
@@ -470,13 +482,14 @@ mod tests {
 
     #[test]
     fn test_sequential_scan_rule() {
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
-        let mut behavior = SourceBehavior::new(ip);
+        let src_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut behavior = SourceBehavior::new(src_ip);
         let config = ScanDetectConfig::default();
 
         // Record sequential ports
         for port in 100..=102 {
-            behavior.record_syn(port);
+            behavior.record_syn(make_flow_key(50000 + port, dst_ip, port));
         }
 
         let ctx = test_context(&behavior, &config);
@@ -487,15 +500,20 @@ mod tests {
 
     #[test]
     fn test_completed_handshake_rule() {
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
-        let mut behavior = SourceBehavior::new(ip);
+        let src_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut behavior = SourceBehavior::new(src_ip);
         let config = ScanDetectConfig::default();
 
-        // Record SYN
-        behavior.record_syn(80);
+        let flow_80 = make_flow_key(50000, dst_ip, 80);
 
-        // ACK completing handshake
+        // Record SYN
+        behavior.record_syn(flow_80);
+
+        // ACK completing handshake (same flow)
         let ctx = test_context(&behavior, &config)
+            .with_src_port(50000)
+            .with_dst_ip(dst_ip)
             .with_port(80)
             .with_ack();
 

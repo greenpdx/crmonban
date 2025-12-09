@@ -10,8 +10,9 @@ alert tcp any any -> any 21 (msg:"LOCAL FTP Brute Force Attempt"; flow:to_server
 # FTP PASS Brute Force - detect PASS commands
 alert tcp any any -> any 21 (msg:"LOCAL FTP Password Brute Force"; flow:to_server,established; content:"PASS "; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000003; rev:1; priority:1;)
 
-# Telnet Brute Force - detect telnet connections
-alert tcp any any -> any 23 (msg:"LOCAL Telnet Brute Force Attempt"; flow:to_server; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000004; rev:1; priority:1;)
+# Telnet Brute Force - detect telnet login prompts (IAC sequences)
+# Disabled: Too broad without proper telnet protocol detection
+# alert tcp any any -> any 23 (msg:"LOCAL Telnet Brute Force Attempt"; flow:to_server,established; content:"|ff fd|"; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000004; rev:2; priority:1;)
 
 # HTTP Basic Auth Brute Force - detect Authorization header
 alert tcp any any -> any 80 (msg:"LOCAL HTTP Basic Auth Brute Force"; flow:to_server,established; content:"Authorization: Basic"; nocase; threshold:type both, track by_src, count 10, seconds 60; classtype:attempted-admin; sid:9000005; rev:1; priority:1;)
@@ -46,11 +47,13 @@ alert tcp any any -> any 6379 (msg:"LOCAL Redis Auth Brute Force"; flow:to_serve
 # MongoDB Brute Force
 alert tcp any any -> any 27017 (msg:"LOCAL MongoDB Auth Brute Force"; flow:to_server; content:"authenticate"; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000015; rev:1; priority:1;)
 
-# LDAP Bind Brute Force
-alert tcp any any -> any 389 (msg:"LOCAL LDAP Bind Brute Force"; flow:to_server; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000016; rev:1; priority:1;)
+# LDAP Bind Brute Force - detect LDAP bind requests
+# Disabled: Too broad without LDAP protocol parsing, causes FPs on normal LDAP traffic
+# alert tcp any any -> any 389 (msg:"LOCAL LDAP Bind Brute Force"; flow:to_server,established; content:"|30|"; depth:1; threshold:type both, track by_src, count 10, seconds 60; classtype:attempted-admin; sid:9000016; rev:2; priority:1;)
 
 # SMB Brute Force
 alert tcp any any -> any 445 (msg:"LOCAL SMB Auth Brute Force"; flow:to_server; content:"NTLMSSP"; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000017; rev:1; priority:1;)
 
 # Generic high port connection flood (port sweep)
-alert tcp any any -> any 1:65535 (msg:"LOCAL Port Sweep Detection"; flags:S; threshold:type both, track by_src, count 20, seconds 30; classtype:attempted-recon; sid:9000050; rev:1; priority:2;)
+# Disabled: Handled by ScanDetectEngine with proper tracking
+# alert tcp any any -> any 1:65535 (msg:"LOCAL Port Sweep Detection"; flags:S; threshold:type both, track by_src, count 20, seconds 30; classtype:attempted-recon; sid:9000050; rev:1; priority:2;)

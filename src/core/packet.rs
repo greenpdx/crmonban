@@ -5,6 +5,7 @@
 
 use std::net::IpAddr;
 use std::time::Instant;
+use etherparse::SlicedPacket;
 use serde::{Deserialize, Serialize};
 
 use super::layers::{
@@ -202,6 +203,88 @@ impl Packet {
             interface,
             raw_len: 0,
         }
+    }
+
+    /// Parse raw Ethernet frame bytes into a Packet
+    ///
+    /// Returns `None` if the packet cannot be parsed (non-IP, malformed, etc.)
+    pub fn from_ethernet_bytes(data: &[u8]) -> Option<Self> {
+        let sliced = SlicedPacket::from_ethernet(data).ok()?;
+
+        let (src_ip, dst_ip, protocol) = match &sliced.net {
+            Some(etherparse::NetSlice::Ipv4(ipv4)) => {
+                let header = ipv4.header();
+                let src = IpAddr::V4(header.source_addr());
+                let dst = IpAddr::V4(header.destination_addr());
+                let proto = match header.protocol().0 {
+                    6 => IpProtocol::Tcp,
+                    17 => IpProtocol::Udp,
+                    1 => IpProtocol::Icmp,
+                    other => IpProtocol::Other(other),
+                };
+                (src, dst, proto)
+            }
+            Some(etherparse::NetSlice::Ipv6(ipv6)) => {
+                let header = ipv6.header();
+                let src = IpAddr::V6(header.source_addr());
+                let dst = IpAddr::V6(header.destination_addr());
+                let proto = match header.next_header().0 {
+                    6 => IpProtocol::Tcp,
+                    17 => IpProtocol::Udp,
+                    58 => IpProtocol::Icmpv6,
+                    other => IpProtocol::Other(other),
+                };
+                (src, dst, proto)
+            }
+            None => return None,
+            _ => return None, // ARP and other non-IP packets
+        };
+
+        let mut pkt = Packet::new(src_ip, dst_ip, protocol);
+        pkt.raw_len = data.len() as u32;
+
+        // Extract transport layer info
+        match &sliced.transport {
+            Some(etherparse::TransportSlice::Tcp(tcp)) => {
+                if let Some(tcp_info) = pkt.tcp_mut() {
+                    tcp_info.src_port = tcp.source_port();
+                    tcp_info.dst_port = tcp.destination_port();
+                    tcp_info.seq = tcp.sequence_number();
+                    tcp_info.ack = tcp.acknowledgment_number();
+                    tcp_info.flags = TcpFlags {
+                        syn: tcp.syn(),
+                        ack: tcp.ack(),
+                        fin: tcp.fin(),
+                        rst: tcp.rst(),
+                        psh: tcp.psh(),
+                        urg: tcp.urg(),
+                        ece: tcp.ece(),
+                        cwr: tcp.cwr(),
+                    };
+                    tcp_info.payload = tcp.payload().to_vec();
+                }
+            }
+            Some(etherparse::TransportSlice::Udp(udp)) => {
+                if let Some(udp_info) = pkt.udp_mut() {
+                    udp_info.src_port = udp.source_port();
+                    udp_info.dst_port = udp.destination_port();
+                    udp_info.payload = udp.payload().to_vec();
+                }
+            }
+            Some(etherparse::TransportSlice::Icmpv4(icmp)) => {
+                if let Some(icmp_info) = pkt.layer4.as_icmp_mut() {
+                    icmp_info.payload = icmp.payload().to_vec();
+                }
+            }
+            Some(etherparse::TransportSlice::Icmpv6(icmp)) => {
+                if let Some(icmp_info) = pkt.layer4.as_icmpv6_mut() {
+                    icmp_info.payload = icmp.payload().to_vec();
+                }
+            }
+            _ => {}
+        }
+
+        Some(pkt)
     }
 
     /// Create a new packet with minimal info (backward compatible)

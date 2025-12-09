@@ -89,7 +89,13 @@ impl FlowTable {
         // Create new flow
         let flow_id = self.next_id;
         self.next_id += 1;
-        let flow = Flow::new(flow_id, pkt);
+        let mut flow = Flow::new(flow_id, pkt);
+
+        // Enable stream reassembly if configured
+        if self.config.enable_reassembly {
+            flow.enable_reassembly(self.config.reassembly_buffer_bytes());
+        }
+
         let timeout = self.config.timeout_for(&flow);
 
         // Add to ID index

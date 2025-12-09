@@ -62,6 +62,12 @@ impl FlowTracker {
             flow.update(pkt)
         };
 
+        // Accumulate payload if reassembly is enabled
+        if flow.is_reassembly_enabled() {
+            let is_forward = direction == Direction::ToServer;
+            flow.accumulate_payload(pkt.payload(), is_forward);
+        }
+
         // Update packet with flow info
         pkt.flow_id = Some(flow.id);
         pkt.direction = direction;

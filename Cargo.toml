@@ -123,13 +123,13 @@ name = "crmonban"
 path = "src/main.rs"
 
 [[bin]]
-name = "pcap_benchmark"
-path = "benches/pcap_benchmark.rs"
-required-features = ["flow-tracking", "profiling"]
-
-[[bin]]
 name = "pcap_replay"
 path = "src/bin/pcap_replay.rs"
+
+[[bin]]
+name = "attack_detection_test"
+path = "src/bin/attack_detection_test.rs"
+required-features = ["flow-tracking", "signatures"]
 
 [lib]
 name = "crmonban"

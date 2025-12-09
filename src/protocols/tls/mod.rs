@@ -169,7 +169,7 @@ impl TlsAnalyzer {
     }
 
     /// Parse ClientHello and extract JA3
-    fn parse_client_hello(&self, data: &[u8]) -> Option<TlsHandshake> {
+    pub fn parse_client_hello(&self, data: &[u8]) -> Option<TlsHandshake> {
         if data.len() < 38 {
             return None;
         }

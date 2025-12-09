@@ -113,8 +113,10 @@ impl DetectionRule for FinScanRule {
         let flags = ctx.tcp_flags()?;
 
         if flags.is_fin_only() {
-            // Check if there's an existing connection for this port
-            let has_connection = ctx.behavior.connections.contains_key(&ctx.dst_port.unwrap_or(0));
+            // Check if there's an existing connection for this flow
+            let has_connection = ctx.flow_key()
+                .map(|fk| ctx.behavior.get_connection(&fk).is_some())
+                .unwrap_or(false);
 
             if !has_connection {
                 let fin_count = ctx.behavior.stealth_scan_counts.get("fin").copied().unwrap_or(0);
@@ -193,7 +195,9 @@ impl DetectionRule for MaimonScanRule {
         let flags = ctx.tcp_flags()?;
 
         if flags.is_maimon() {
-            let has_connection = ctx.behavior.connections.contains_key(&ctx.dst_port.unwrap_or(0));
+            let has_connection = ctx.flow_key()
+                .map(|fk| ctx.behavior.get_connection(&fk).is_some())
+                .unwrap_or(false);
 
             if !has_connection {
                 let maimon_count = ctx.behavior.stealth_scan_counts.get("maimon").copied().unwrap_or(0);
@@ -234,7 +238,9 @@ impl DetectionRule for AckScanRule {
         let flags = ctx.tcp_flags()?;
 
         if flags.is_ack_only() {
-            let has_connection = ctx.behavior.connections.contains_key(&ctx.dst_port.unwrap_or(0));
+            let has_connection = ctx.flow_key()
+                .map(|fk| ctx.behavior.get_connection(&fk).is_some())
+                .unwrap_or(false);
 
             // ACK without connection is suspicious
             if !has_connection {

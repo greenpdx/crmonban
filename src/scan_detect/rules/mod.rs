@@ -16,7 +16,7 @@ pub use reputation::ReputationData;
 use std::net::IpAddr;
 use std::time::Instant;
 
-use super::behavior::SourceBehavior;
+use super::behavior::{FlowKey, SourceBehavior};
 use super::config::ScanDetectConfig;
 
 /// Rule categories
@@ -94,6 +94,10 @@ pub struct EvaluationContext<'a> {
     pub timestamp: Instant,
     /// Current port being processed (if any)
     pub current_port: Option<u16>,
+    /// Source port for flow tracking
+    pub src_port: Option<u16>,
+    /// Destination IP for flow tracking
+    pub dst_ip: Option<IpAddr>,
     /// Is this a SYN packet?
     pub is_syn: bool,
     /// Is this a SYN-ACK packet?
@@ -142,6 +146,8 @@ impl<'a> EvaluationContext<'a> {
             config,
             timestamp: Instant::now(),
             current_port: None,
+            src_port: None,
+            dst_ip: None,
             is_syn: false,
             is_syn_ack: false,
             is_ack: false,
@@ -166,6 +172,25 @@ impl<'a> EvaluationContext<'a> {
         self.current_port = Some(port);
         self.dst_port = Some(port);
         self
+    }
+
+    pub fn with_src_port(mut self, port: u16) -> Self {
+        self.src_port = Some(port);
+        self
+    }
+
+    pub fn with_dst_ip(mut self, ip: IpAddr) -> Self {
+        self.dst_ip = Some(ip);
+        self
+    }
+
+    /// Get the flow key for the current packet (if all required fields are present)
+    pub fn flow_key(&self) -> Option<FlowKey> {
+        Some(FlowKey::new(
+            self.src_port?,
+            self.dst_ip?,
+            self.current_port?,
+        ))
     }
 
     pub fn with_syn(mut self) -> Self {

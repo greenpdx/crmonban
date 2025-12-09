@@ -38,6 +38,11 @@ use std::time::Duration;
 pub use crate::core::flow::{Flow, FlowKey, FlowState, FlowStats};
 pub use crate::core::packet::Direction;
 
+/// Minimum reassembly buffer size (64 KB)
+pub const MIN_REASSEMBLY_BUFFER_KB: usize = 64;
+/// Maximum reassembly buffer size (1 MB)
+pub const MAX_REASSEMBLY_BUFFER_KB: usize = 1024;
+
 /// Configuration for flow tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowConfig {
@@ -65,8 +70,9 @@ pub struct FlowConfig {
     /// Enable TCP stream reassembly
     pub enable_reassembly: bool,
 
-    /// Maximum reassembly buffer per flow (bytes)
-    pub max_reassembly_buffer: usize,
+    /// Maximum reassembly buffer per flow in KB (64-1024)
+    /// Configurable from 64KB to 1MB
+    pub max_reassembly_buffer_kb: usize,
 
     /// Export closed flows to database
     pub export_on_close: bool,
@@ -92,7 +98,7 @@ impl Default for FlowConfig {
             timeout_udp: 180,                  // 3 minutes
             timeout_icmp: 30,                  // 30 seconds
             enable_reassembly: false,
-            max_reassembly_buffer: 1_048_576,  // 1 MB
+            max_reassembly_buffer_kb: 64,      // 64 KB default
             export_on_close: true,
             cleanup_interval: 30,              // 30 seconds
             track_timing: true,
@@ -102,6 +108,14 @@ impl Default for FlowConfig {
 }
 
 impl FlowConfig {
+    /// Get reassembly buffer size in bytes, clamped to valid range (64KB-1MB)
+    pub fn reassembly_buffer_bytes(&self) -> usize {
+        let kb = self.max_reassembly_buffer_kb
+            .max(MIN_REASSEMBLY_BUFFER_KB)
+            .min(MAX_REASSEMBLY_BUFFER_KB);
+        kb * 1024
+    }
+
     /// Get timeout for a flow based on protocol and state
     pub fn timeout_for(&self, flow: &Flow) -> Duration {
         use crate::core::packet::IpProtocol;

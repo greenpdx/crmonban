@@ -252,6 +252,22 @@ impl Layer4 {
         }
     }
 
+    /// Get mutable ICMP info if present
+    pub fn as_icmp_mut(&mut self) -> Option<&mut IcmpInfo> {
+        match self {
+            Layer4::Icmp(info) => Some(info),
+            _ => None,
+        }
+    }
+
+    /// Get mutable ICMPv6 info if present
+    pub fn as_icmpv6_mut(&mut self) -> Option<&mut Icmpv6Info> {
+        match self {
+            Layer4::Icmpv6(info) => Some(info),
+            _ => None,
+        }
+    }
+
     /// Check if TCP
     pub fn is_tcp(&self) -> bool {
         matches!(self, Layer4::Tcp(_))

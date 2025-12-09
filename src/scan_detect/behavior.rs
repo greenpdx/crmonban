@@ -6,6 +6,22 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+/// Flow key for tracking individual connections
+/// Uses the full 4-tuple: (src_port, dst_ip, dst_port)
+/// Note: src_ip is already the key for SourceBehavior
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FlowKey {
+    pub src_port: u16,
+    pub dst_ip: IpAddr,
+    pub dst_port: u16,
+}
+
+impl FlowKey {
+    pub fn new(src_port: u16, dst_ip: IpAddr, dst_port: u16) -> Self {
+        Self { src_port, dst_ip, dst_port }
+    }
+}
+
 /// Connection state for a specific port
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -148,14 +164,17 @@ pub struct SourceBehavior {
     /// Source IP address
     pub src_ip: IpAddr,
 
-    /// Per-port connection tracking
-    pub connections: HashMap<u16, PortConnection>,
+    /// Per-flow connection tracking (full 4-tuple)
+    pub connections: HashMap<FlowKey, PortConnection>,
 
-    /// Ports that had half-open connections that expired
-    pub expired_half_opens: HashSet<u16>,
+    /// Flow keys that had half-open connections that expired
+    pub expired_half_opens: HashSet<FlowKey>,
 
-    /// Ports with completed handshakes
-    pub completed_ports: HashSet<u16>,
+    /// Flow keys with completed handshakes
+    pub completed_flows: HashSet<FlowKey>,
+
+    /// Unique destination ports touched (for scan detection)
+    pub touched_ports: HashSet<u16>,
 
     /// Current score
     pub score: f32,
@@ -212,7 +231,8 @@ impl SourceBehavior {
             src_ip,
             connections: HashMap::new(),
             expired_half_opens: HashSet::new(),
-            completed_ports: HashSet::new(),
+            completed_flows: HashSet::new(),
+            touched_ports: HashSet::new(),
             score: 0.0,
             score_history: VecDeque::with_capacity(100),
             classification: Classification::Normal,
@@ -232,47 +252,58 @@ impl SourceBehavior {
         *self.stealth_scan_counts.entry(scan_type.to_string()).or_insert(0) += 1;
     }
 
-    /// Record a SYN packet
-    pub fn record_syn(&mut self, port: u16) {
+    /// Record a SYN packet with full flow key
+    pub fn record_syn(&mut self, flow_key: FlowKey) {
         let now = Instant::now();
         self.last_seen = now;
         self.syn_timestamps.push_back(now);
-        self.port_sequence.push(port);
+        self.port_sequence.push(flow_key.dst_port);
+        self.touched_ports.insert(flow_key.dst_port);
 
-        // Only create if not already tracking this port
-        self.connections.entry(port).or_insert_with(PortConnection::new);
+        // Only create if not already tracking this flow
+        self.connections.entry(flow_key).or_insert_with(PortConnection::new);
     }
 
     /// Record handshake completion (SYN-ACK + ACK received)
-    pub fn record_established(&mut self, port: u16) {
+    pub fn record_established(&mut self, flow_key: FlowKey) {
         self.last_seen = Instant::now();
-        if let Some(conn) = self.connections.get_mut(&port) {
+        if let Some(conn) = self.connections.get_mut(&flow_key) {
             conn.establish();
-            self.completed_ports.insert(port);
+            self.completed_flows.insert(flow_key);
         }
     }
 
     /// Record data transfer
-    pub fn record_data(&mut self, port: u16, bytes: u64) {
+    pub fn record_data(&mut self, flow_key: FlowKey, bytes: u64) {
         self.last_seen = Instant::now();
-        if let Some(conn) = self.connections.get_mut(&port) {
+        if let Some(conn) = self.connections.get_mut(&flow_key) {
             conn.add_bytes(bytes);
         }
     }
 
     /// Record protocol detection
-    pub fn record_protocol(&mut self, port: u16, protocol: &str) {
-        if let Some(conn) = self.connections.get_mut(&port) {
+    pub fn record_protocol(&mut self, flow_key: FlowKey, protocol: &str) {
+        if let Some(conn) = self.connections.get_mut(&flow_key) {
             conn.protocol = Some(protocol.to_string());
         }
     }
 
     /// Record RST received (closed port or connection reset)
-    pub fn record_rst(&mut self, port: u16) {
+    pub fn record_rst(&mut self, flow_key: FlowKey) {
         self.last_seen = Instant::now();
-        if let Some(conn) = self.connections.get_mut(&port) {
+        if let Some(conn) = self.connections.get_mut(&flow_key) {
             conn.state = ConnectionState::Reset;
         }
+    }
+
+    /// Check if a flow exists (for rule lookups)
+    pub fn get_connection(&self, flow_key: &FlowKey) -> Option<&PortConnection> {
+        self.connections.get(flow_key)
+    }
+
+    /// Check if flow is completed
+    pub fn is_flow_completed(&self, flow_key: &FlowKey) -> bool {
+        self.completed_flows.contains(flow_key)
     }
 
     /// Apply a score delta
@@ -310,18 +341,18 @@ impl SourceBehavior {
 
     /// Clean up expired half-open connections
     pub fn cleanup_expired(&mut self, timeout: Duration) {
-        let expired: Vec<u16> = self
+        let expired: Vec<FlowKey> = self
             .connections
             .iter()
             .filter(|(_, conn)| conn.is_expired(timeout))
-            .map(|(port, _)| *port)
+            .map(|(flow_key, _)| *flow_key)
             .collect();
 
-        for port in expired {
-            if let Some(conn) = self.connections.get_mut(&port) {
+        for flow_key in expired {
+            if let Some(conn) = self.connections.get_mut(&flow_key) {
                 conn.state = ConnectionState::Expired;
             }
-            self.expired_half_opens.insert(port);
+            self.expired_half_opens.insert(flow_key);
         }
 
         // Clean up old SYN timestamps
@@ -345,7 +376,7 @@ impl SourceBehavior {
 
     /// Count completed handshakes
     pub fn completed_count(&self) -> usize {
-        self.completed_ports.len()
+        self.completed_flows.len()
     }
 
     /// Count expired half-opens (never completed)
@@ -353,9 +384,9 @@ impl SourceBehavior {
         self.expired_half_opens.len()
     }
 
-    /// Get unique ports touched
-    pub fn unique_ports(&self) -> HashSet<u16> {
-        self.connections.keys().copied().collect()
+    /// Get unique destination ports touched
+    pub fn unique_ports(&self) -> &HashSet<u16> {
+        &self.touched_ports
     }
 
     /// Calculate SYN rate (SYNs per second in recent window)
@@ -421,7 +452,8 @@ impl SourceBehavior {
     pub fn reset(&mut self) {
         self.connections.clear();
         self.expired_half_opens.clear();
-        self.completed_ports.clear();
+        self.completed_flows.clear();
+        self.touched_ports.clear();
         self.score = 0.0;
         self.score_history.clear();
         self.classification = Classification::Normal;
@@ -439,6 +471,10 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
+    fn make_flow_key(src_port: u16, dst_ip: IpAddr, dst_port: u16) -> FlowKey {
+        FlowKey::new(src_port, dst_ip, dst_port)
+    }
+
     #[test]
     fn test_source_behavior_new() {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
@@ -452,12 +488,13 @@ mod tests {
 
     #[test]
     fn test_record_syn() {
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
-        let mut behavior = SourceBehavior::new(ip);
+        let src_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut behavior = SourceBehavior::new(src_ip);
 
-        behavior.record_syn(22);
-        behavior.record_syn(80);
-        behavior.record_syn(443);
+        behavior.record_syn(make_flow_key(50000, dst_ip, 22));
+        behavior.record_syn(make_flow_key(50001, dst_ip, 80));
+        behavior.record_syn(make_flow_key(50002, dst_ip, 443));
 
         assert_eq!(behavior.half_open_count(), 3);
         assert_eq!(behavior.unique_ports().len(), 3);
@@ -465,16 +502,20 @@ mod tests {
 
     #[test]
     fn test_record_established() {
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
-        let mut behavior = SourceBehavior::new(ip);
+        let src_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut behavior = SourceBehavior::new(src_ip);
 
-        behavior.record_syn(80);
-        behavior.record_syn(443);
-        behavior.record_established(80);
+        let flow_80 = make_flow_key(50000, dst_ip, 80);
+        let flow_443 = make_flow_key(50001, dst_ip, 443);
+
+        behavior.record_syn(flow_80);
+        behavior.record_syn(flow_443);
+        behavior.record_established(flow_80);
 
         assert_eq!(behavior.half_open_count(), 1);
         assert_eq!(behavior.completed_count(), 1);
-        assert!(behavior.completed_ports.contains(&80));
+        assert!(behavior.completed_flows.contains(&flow_80));
     }
 
     #[test]
@@ -492,12 +533,13 @@ mod tests {
 
     #[test]
     fn test_sequential_pattern() {
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
-        let mut behavior = SourceBehavior::new(ip);
+        let src_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
+        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut behavior = SourceBehavior::new(src_ip);
 
         // Sequential: 80, 81, 82, 83, 84
         for port in 80..=84 {
-            behavior.record_syn(port);
+            behavior.record_syn(make_flow_key(50000 + port, dst_ip, port));
         }
 
         assert!(behavior.has_sequential_pattern(5));

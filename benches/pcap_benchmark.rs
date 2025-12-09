@@ -13,7 +13,6 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use etherparse::SlicedPacket;
 use pcap::Capture;
 
 use crmonban::core::flow::Flow;
@@ -23,7 +22,7 @@ use crmonban::brute_force::BruteForceTracker;
 use crmonban::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
 
 #[cfg(feature = "signatures")]
-use crmonban::signatures::{SignatureConfig, SignatureEngine, RuleLoader, ast::Protocol};
+use crmonban::signatures::{SignatureEngine, ast::Protocol};
 #[cfg(feature = "signatures")]
 use crmonban::signatures::matcher::{ProtocolContext, FlowState, HttpContext, DnsContext, TlsContext};
 
@@ -103,6 +102,29 @@ struct Args {
     /// Batch size for parallel processing
     #[arg(long, default_value = "1000")]
     batch_size: usize,
+
+    /// CICIDS2017 dataset mode - enables ground truth labeling
+    /// Tuesday: FTP-Patator + SSH-Patator (attacker: 192.168.10.51)
+    #[arg(long)]
+    cicids2017: bool,
+
+    /// Custom attacker IPs for ground truth (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    attacker_ips: Option<Vec<String>>,
+
+    /// Attack ports for ground truth (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    attack_ports: Option<Vec<u16>>,
+}
+
+/// CICIDS2017 ground truth configuration
+struct GroundTruth {
+    attacker_ips: std::collections::HashSet<IpAddr>,
+    attack_ports: std::collections::HashSet<u16>,
+    /// Track detected attackers (for source-level detection rate)
+    detected_attackers: std::collections::HashSet<IpAddr>,
+    /// Packets until first detection per attacker
+    packets_to_detection: Vec<(IpAddr, usize)>,
 }
 
 /// NetFlow v3 CSV record (NF-ToN-IoT format)
@@ -327,6 +349,9 @@ struct DetectionStats {
     // Signature detections
     signature_matches: usize,
 
+    // Per-SID match counts for debugging FPs
+    sid_match_counts: std::collections::HashMap<u32, usize>,
+
     // ML detections
     ml_anomalies: usize,
     ml_scores_sum: f64,
@@ -406,6 +431,7 @@ struct PcapBenchmark {
     flows_processed: usize,
     label_stats: LabelStats,
     detection_stats: DetectionStats,
+    ground_truth: Option<GroundTruth>,
 
     // Components
     flow_tracker: Option<FlowTracker>,
@@ -431,9 +457,49 @@ impl PcapBenchmark {
     fn new(args: Args) -> Self {
         let enable_all = args.all;
 
-        // Initialize flow tracker
+        // Initialize ground truth if CICIDS2017 mode or custom attacker IPs provided
+        let ground_truth = if args.cicids2017 || args.attacker_ips.is_some() {
+            let mut attacker_ips = std::collections::HashSet::new();
+            let mut attack_ports = std::collections::HashSet::new();
+
+            if args.cicids2017 {
+                // CICIDS2017 Tuesday dataset: FTP-Patator + SSH-Patator
+                attacker_ips.insert("192.168.10.51".parse::<IpAddr>().unwrap());
+                attack_ports.insert(21); // FTP
+                attack_ports.insert(22); // SSH
+            }
+
+            // Add custom attacker IPs
+            if let Some(ref custom_ips) = args.attacker_ips {
+                for ip_str in custom_ips {
+                    if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                        attacker_ips.insert(ip);
+                    }
+                }
+            }
+
+            // Add custom attack ports
+            if let Some(ref custom_ports) = args.attack_ports {
+                for port in custom_ports {
+                    attack_ports.insert(*port);
+                }
+            }
+
+            Some(GroundTruth {
+                attacker_ips,
+                attack_ports,
+                detected_attackers: std::collections::HashSet::new(),
+                packets_to_detection: Vec::new(),
+            })
+        } else {
+            None
+        };
+
+        // Initialize flow tracker with reassembly enabled
         let flow_tracker = if args.flow || enable_all {
-            Some(FlowTracker::new(FlowConfig::default()))
+            let mut flow_config = FlowConfig::default();
+            flow_config.enable_reassembly = true;
+            Some(FlowTracker::new(flow_config))
         } else {
             None
         };
@@ -441,37 +507,13 @@ impl PcapBenchmark {
         // Initialize signature engine
         #[cfg(feature = "signatures")]
         let signature_engine = if args.signatures || enable_all {
-            let mut config = SignatureConfig::default();
-            // Add ET Open rules directory
-            let rules_dir = PathBuf::from("/var/lib/crmonban/data/signatures/suricata/rules");
-            if rules_dir.exists() {
-                config.rule_dirs = vec![rules_dir.clone()];
-                println!("Loading rules from: {:?}", rules_dir);
-            }
-
-            let mut engine = SignatureEngine::new(config.clone());
-
-            // Load rules
-            let mut loader = RuleLoader::new(config);
-            match loader.load_all() {
-                Ok(ruleset) => {
-                    println!("Loaded {} rules ({} enabled, {} with content patterns)",
-                        ruleset.stats.total_rules,
-                        ruleset.stats.total_rules - ruleset.stats.disabled,
-                        ruleset.stats.with_content);
-                    // Add rules to engine
-                    for (_, rule) in ruleset.rules {
-                        engine.add_rule(rule);
-                    }
-                    engine.rebuild_prefilter();
-                    println!("Prefilter patterns: {}", engine.prefilter_pattern_count());
-                }
+            match SignatureEngine::load_default_rules_verbose() {
+                Ok(engine) => Some(engine),
                 Err(e) => {
-                    eprintln!("Warning: Failed to load rules: {}", e);
+                    eprintln!("Warning: {}", e);
+                    None
                 }
             }
-
-            Some(engine)
         } else {
             None
         };
@@ -519,6 +561,7 @@ impl PcapBenchmark {
             flows_processed: 0,
             label_stats: LabelStats::new(),
             detection_stats: DetectionStats::new(),
+            ground_truth,
             flow_tracker,
             scan_detect_engine: ScanDetectEngine::new(ScanDetectConfig::default()),
             brute_force_tracker: BruteForceTracker::new(),
@@ -565,7 +608,7 @@ impl PcapBenchmark {
         None
     }
 
-    /// Parse TLS ClientHello from payload
+    /// Parse TLS ClientHello from payload using TlsAnalyzer
     #[cfg(feature = "protocols")]
     fn parse_tls(&self, payload: &[u8]) -> Option<(Option<Vec<u8>>, Option<String>)> {
         if let Some(ref analyzer) = self.tls_analyzer {
@@ -574,144 +617,15 @@ impl PcapBenchmark {
                 let length = u16::from_be_bytes([payload[3], payload[4]]) as usize;
                 if payload.len() >= 5 + length {
                     let handshake_data = &payload[5..5 + length];
-                    if !handshake_data.is_empty() && handshake_data[0] == 1 { // ClientHello
-                        // Parse SNI from ClientHello extensions
-                        if let Some(sni) = self.parse_sni(handshake_data) {
-                            let ja3 = self.compute_ja3_simple(handshake_data);
-                            return Some((Some(sni.as_bytes().to_vec()), ja3));
-                        }
+                    if let Some(handshake) = analyzer.parse_client_hello(handshake_data) {
+                        let sni = handshake.sni.map(|s| s.as_bytes().to_vec());
+                        let ja3 = handshake.ja3.map(|j| j.hash);
+                        return Some((sni, ja3));
                     }
                 }
             }
         }
         None
-    }
-
-    /// Parse SNI from ClientHello handshake data
-    #[cfg(feature = "protocols")]
-    fn parse_sni(&self, data: &[u8]) -> Option<String> {
-        if data.len() < 38 { return None; }
-        let mut offset = 38; // Skip past fixed fields
-
-        // Session ID
-        if offset >= data.len() { return None; }
-        let session_id_len = data[offset] as usize;
-        offset += 1 + session_id_len;
-
-        // Cipher suites
-        if offset + 2 > data.len() { return None; }
-        let cipher_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-        offset += 2 + cipher_len;
-
-        // Compression
-        if offset >= data.len() { return None; }
-        let comp_len = data[offset] as usize;
-        offset += 1 + comp_len;
-
-        // Extensions
-        if offset + 2 > data.len() { return None; }
-        let ext_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
-        offset += 2;
-
-        let ext_end = offset + ext_len;
-        while offset + 4 <= ext_end && offset + 4 <= data.len() {
-            let ext_type = u16::from_be_bytes([data[offset], data[offset + 1]]);
-            let ext_data_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize;
-            offset += 4;
-
-            if ext_type == 0 && offset + ext_data_len <= data.len() { // SNI extension
-                // SNI list length (2) + type (1) + name length (2) + name
-                if ext_data_len >= 5 {
-                    let name_len = u16::from_be_bytes([data[offset + 3], data[offset + 4]]) as usize;
-                    if offset + 5 + name_len <= data.len() {
-                        return String::from_utf8(data[offset + 5..offset + 5 + name_len].to_vec()).ok();
-                    }
-                }
-            }
-            offset += ext_data_len;
-        }
-        None
-    }
-
-    /// Compute simple JA3 hash
-    #[cfg(feature = "protocols")]
-    fn compute_ja3_simple(&self, _data: &[u8]) -> Option<String> {
-        // For now, just return None - full JA3 computation is complex
-        // The TLS analyzer already does this properly
-        None
-    }
-
-    /// Parse raw packet bytes into our Packet struct
-    fn parse_packet(&self, data: &[u8]) -> Option<Packet> {
-        match SlicedPacket::from_ethernet(data) {
-            Ok(sliced) => {
-                let (src_ip, dst_ip, protocol) = match &sliced.net {
-                    Some(etherparse::NetSlice::Ipv4(ipv4)) => {
-                        let header = ipv4.header();
-                        let src = IpAddr::V4(header.source_addr());
-                        let dst = IpAddr::V4(header.destination_addr());
-                        let proto = match header.protocol().0 {
-                            6 => IpProtocol::Tcp,
-                            17 => IpProtocol::Udp,
-                            1 => IpProtocol::Icmp,
-                            other => IpProtocol::Other(other),
-                        };
-                        (src, dst, proto)
-                    }
-                    Some(etherparse::NetSlice::Ipv6(ipv6)) => {
-                        let header = ipv6.header();
-                        let src = IpAddr::V6(header.source_addr());
-                        let dst = IpAddr::V6(header.destination_addr());
-                        let proto = match header.next_header().0 {
-                            6 => IpProtocol::Tcp,
-                            17 => IpProtocol::Udp,
-                            58 => IpProtocol::Icmpv6,
-                            other => IpProtocol::Other(other),
-                        };
-                        (src, dst, proto)
-                    }
-                    None => return None,
-                    _ => return None, // ARP and other non-IP packets
-                };
-
-                let mut pkt = Packet::new(src_ip, dst_ip, protocol);
-                pkt.raw_len = data.len() as u32;
-
-                // Extract transport layer info
-                match &sliced.transport {
-                    Some(etherparse::TransportSlice::Tcp(tcp)) => {
-                        if let Some(tcp_info) = pkt.tcp_mut() {
-                            tcp_info.src_port = tcp.source_port();
-                            tcp_info.dst_port = tcp.destination_port();
-                            tcp_info.seq = tcp.sequence_number();
-                            tcp_info.ack = tcp.acknowledgment_number();
-                            tcp_info.flags = TcpFlags {
-                                syn: tcp.syn(),
-                                ack: tcp.ack(),
-                                fin: tcp.fin(),
-                                rst: tcp.rst(),
-                                psh: tcp.psh(),
-                                urg: tcp.urg(),
-                                ece: tcp.ece(),
-                                cwr: tcp.cwr(),
-                            };
-                            tcp_info.payload = tcp.payload().to_vec();
-                        }
-                    }
-                    Some(etherparse::TransportSlice::Udp(udp)) => {
-                        if let Some(udp_info) = pkt.udp_mut() {
-                            udp_info.src_port = udp.source_port();
-                            udp_info.dst_port = udp.destination_port();
-                            udp_info.payload = udp.payload().to_vec();
-                        }
-                    }
-                    _ => {}
-                }
-
-                Some(pkt)
-            }
-            Err(_) => None,
-        }
     }
 
     /// Process a single packet through the pipeline
@@ -720,7 +634,7 @@ impl PcapBenchmark {
 
         // Parse packet
         let parse_start = Instant::now();
-        let pkt = match self.parse_packet(data) {
+        let pkt = match Packet::from_ethernet_bytes(data) {
             Some(p) => p,
             None => return,
         };
@@ -765,6 +679,8 @@ impl PcapBenchmark {
         let mut sig_time = Duration::ZERO;
         #[allow(unused_mut)]
         let mut sig_match_count: usize = 0;
+        #[allow(unused_mut)]
+        let mut sig_match_sids: Vec<u32> = Vec::new();
         #[cfg(feature = "signatures")]
         if let Some(ref engine) = self.signature_engine {
             let start = Instant::now();
@@ -794,6 +710,7 @@ impl PcapBenchmark {
 
             let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
             sig_match_count = matches.len();
+            sig_match_sids = matches.iter().map(|m| m.sid).collect();
             sig_time = start.elapsed();
         }
 
@@ -863,9 +780,13 @@ impl PcapBenchmark {
             self.timings.ml_score.record(ml_score_time);
             self.timings.total.record(total_time);
 
-            // Track signature matches (no ground truth for PCAP, just count)
+            // Track signature matches
             if sig_match_count > 0 {
                 self.detection_stats.signature_matches += 1;
+                // Track per-SID counts for FP analysis
+                for sid in &sig_match_sids {
+                    *self.detection_stats.sid_match_counts.entry(*sid).or_insert(0) += 1;
+                }
             }
             if ml_anomaly_score >= 0.5 {
                 self.detection_stats.ml_anomalies += 1;
@@ -873,23 +794,60 @@ impl PcapBenchmark {
             self.detection_stats.ml_scores_sum += ml_anomaly_score as f64;
 
             // Track port scan alerts
-            if let Some(ref alert) = scan_alert {
+            let scan_detected = if let Some(ref alert) = scan_alert {
                 self.detection_stats.scan_alerts += 1;
                 // Consider ConfirmedScan or LikelyAttack as targeted
                 if matches!(alert.classification, Classification::ConfirmedScan | Classification::LikelyAttack) {
                     self.detection_stats.targeted_scan_alerts += 1;
+                    true
+                } else {
+                    false
                 }
-            }
+            } else {
+                false
+            };
 
             // Track brute force alerts
-            if brute_force_alert.is_some() {
+            let brute_force_detected = if brute_force_alert.is_some() {
                 self.detection_stats.brute_force_alerts += 1;
-            }
+                true
+            } else {
+                false
+            };
 
             // Track payload stats
             if !pkt.payload().is_empty() {
                 self.detection_stats.packets_with_payload += 1;
                 self.detection_stats.total_payload_bytes += pkt.payload().len();
+            }
+
+            // Ground truth evaluation (if CICIDS2017 mode enabled)
+            if let Some(ref mut gt) = self.ground_truth {
+                let src_ip = pkt.src_ip();
+                let dst_port = pkt.dst_port();
+
+                // Check if this is an attack packet (from known attacker to attack port)
+                let is_attack = gt.attacker_ips.contains(&src_ip) &&
+                                (gt.attack_ports.is_empty() || gt.attack_ports.contains(&dst_port));
+
+                // For attack detection rate, only count SIGNATURE matches (precise detection)
+                // Scan/brute force alerts are behavioral and cause high FPs on mixed traffic
+                let detected_by_signature = sig_match_count > 0;
+
+                // Track confusion matrix using signature-based detection only
+                match (detected_by_signature, is_attack) {
+                    (true, true) => {
+                        self.detection_stats.true_positives += 1;
+                        // Track first detection of this attacker
+                        if !gt.detected_attackers.contains(&src_ip) {
+                            gt.detected_attackers.insert(src_ip);
+                            gt.packets_to_detection.push((src_ip, self.packets_processed));
+                        }
+                    }
+                    (true, false) => self.detection_stats.false_positives += 1,
+                    (false, true) => self.detection_stats.false_negatives += 1,
+                    (false, false) => self.detection_stats.true_negatives += 1,
+                }
             }
         }
     }
@@ -939,6 +897,11 @@ impl PcapBenchmark {
         println!("  Threat intel: {}", self.ioc_cache.is_some());
         #[cfg(feature = "ml-detection")]
         println!("  ML detection: {}", self.feature_extractor.is_some());
+        if let Some(ref gt) = self.ground_truth {
+            println!("  Ground truth: enabled");
+            println!("    Attacker IPs: {:?}", gt.attacker_ips.iter().collect::<Vec<_>>());
+            println!("    Attack ports: {:?}", gt.attack_ports.iter().collect::<Vec<_>>());
+        }
         println!();
 
         let start = Instant::now();
@@ -1132,7 +1095,7 @@ impl PcapBenchmark {
     ) {
         // Parse all packets in parallel
         let parsed: Vec<_> = batch.par_iter()
-            .filter_map(|data| self.parse_packet(data))
+            .filter_map(|data| Packet::from_ethernet_bytes(data))
             .collect();
 
         // Update byte counter
@@ -1186,6 +1149,18 @@ impl PcapBenchmark {
         println!("Signature matches:  {:>10} ({:.2}% of packets)",
             d.signature_matches,
             d.signature_matches as f64 / self.packets_processed as f64 * 100.0);
+
+        // Show top SIDs causing matches (for FP analysis)
+        if !d.sid_match_counts.is_empty() {
+            let mut sid_counts: Vec<_> = d.sid_match_counts.iter().collect();
+            sid_counts.sort_by(|a, b| b.1.cmp(a.1));
+            println!("  Top matching SIDs:");
+            for (sid, count) in sid_counts.iter().take(10) {
+                println!("    SID {:>8}: {:>6} matches ({:.2}%)",
+                    sid, count, **count as f64 / self.packets_processed as f64 * 100.0);
+            }
+        }
+
         println!("ML anomalies:       {:>10} (score >= 0.5)", d.ml_anomalies);
         println!("Avg ML score:       {:>10.4}", d.avg_ml_score(self.packets_processed));
         println!();
@@ -1224,6 +1199,93 @@ impl PcapBenchmark {
         println!("  Total payload bytes:  {:>8} ({:.2} MB)",
             d.total_payload_bytes,
             d.total_payload_bytes as f64 / 1_000_000.0);
+
+        // Ground truth evaluation (if enabled)
+        if let Some(ref gt) = self.ground_truth {
+            println!();
+            println!("════════════════════════════════════════════════════════════════════════════════");
+            println!("                    GROUND TRUTH ATTACK DETECTION");
+            println!("════════════════════════════════════════════════════════════════════════════════");
+            println!("Known attackers:    {:?}", gt.attacker_ips.iter().collect::<Vec<_>>());
+            println!("Attack ports:       {:?}", gt.attack_ports.iter().collect::<Vec<_>>());
+            println!();
+
+            let total_attack = d.true_positives + d.false_negatives;
+            let total_benign = d.true_negatives + d.false_positives;
+            let detection_rate = if total_attack > 0 {
+                d.true_positives as f64 / total_attack as f64 * 100.0
+            } else { 0.0 };
+            let fp_rate = if total_benign > 0 {
+                d.false_positives as f64 / total_benign as f64 * 100.0
+            } else { 0.0 };
+            let fn_rate = if total_attack > 0 {
+                d.false_negatives as f64 / total_attack as f64 * 100.0
+            } else { 0.0 };
+
+            println!("TRAFFIC CLASSIFICATION:");
+            println!("  Attack packets:       {:>10} (from known attacker IPs to attack ports)", total_attack);
+            println!("  Benign packets:       {:>10}", total_benign);
+            println!();
+            println!("CONFUSION MATRIX:");
+            println!("                        Predicted");
+            println!("                        Attack      Benign");
+            println!("  Actual Attack    {:>10} TP  {:>10} FN", d.true_positives, d.false_negatives);
+            println!("  Actual Benign    {:>10} FP  {:>10} TN", d.false_positives, d.true_negatives);
+            println!();
+            println!("DETECTION METRICS:");
+            println!("  Detection rate (TPR): {:>10.3}%  (target: >99.9%)", detection_rate);
+            println!("  False positive rate:  {:>10.3}%  (target: <0.5%)", fp_rate);
+            println!("  False negative rate:  {:>10.3}%  (target: <0.1%)", fn_rate);
+            println!("  Precision:            {:>10.3}%", d.precision() * 100.0);
+            println!("  Recall:               {:>10.3}%", d.recall() * 100.0);
+            println!("  F1 Score:             {:>10.4}", d.f1_score());
+            println!();
+
+            // Source-level detection
+            println!("ATTACKER SOURCE DETECTION:");
+            println!("  Known attackers:      {:>10}", gt.attacker_ips.len());
+            println!("  Detected attackers:   {:>10}", gt.detected_attackers.len());
+            let source_detection_rate = gt.detected_attackers.len() as f64 / gt.attacker_ips.len() as f64 * 100.0;
+            println!("  Source detection:     {:>10.1}%", source_detection_rate);
+
+            // Time to detection
+            if !gt.packets_to_detection.is_empty() {
+                println!("  First detection:");
+                for (ip, pkt_num) in &gt.packets_to_detection {
+                    println!("    {} detected at packet #{}", ip, pkt_num);
+                }
+            }
+            println!();
+
+            // Final verdict
+            println!("════════════════════════════════════════════════════════════════════════════════");
+            println!("                           FINAL VERDICT");
+            println!("════════════════════════════════════════════════════════════════════════════════");
+            let detection_pass = detection_rate >= 99.9;
+            let fp_pass = fp_rate < 0.5;
+            let fn_pass = fn_rate < 0.1;
+
+            if detection_pass {
+                println!("  [PASS] Detection rate >= 99.9% ({:.3}%)", detection_rate);
+            } else {
+                println!("  [FAIL] Detection rate < 99.9% ({:.3}%)", detection_rate);
+            }
+            if fp_pass {
+                println!("  [PASS] False positive rate < 0.5% ({:.3}%)", fp_rate);
+            } else {
+                println!("  [FAIL] False positive rate >= 0.5% ({:.3}%)", fp_rate);
+            }
+            if fn_pass {
+                println!("  [PASS] False negative rate < 0.1% ({:.3}%)", fn_rate);
+            } else {
+                println!("  [FAIL] False negative rate >= 0.1% ({:.3}%)", fn_rate);
+            }
+
+            if detection_pass && fp_pass && fn_pass {
+                println!();
+                println!("  *** ALL TARGETS MET ***");
+            }
+        }
 
         println!();
         println!("────────────────────────────────────────────────────────────────────────────────");

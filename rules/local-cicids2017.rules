@@ -1,0 +1,21 @@
+# CICIDS2017 specific detection rules
+# For brute force attacks, detect the protocol signatures without thresholds
+# since we want to detect ALL attack packets for evaluation
+
+# SSH Connection Attempt - detect SSH banner in either direction
+alert tcp any any -> any 22 (msg:"CICIDS SSH Connection"; flow:to_server; content:"SSH-"; depth:4; classtype:attempted-admin; sid:9100001; rev:1; priority:2;)
+
+# SSH Protocol Version - detect SSH version response
+alert tcp any 22 -> any any (msg:"CICIDS SSH Server Response"; flow:to_client; content:"SSH-"; depth:4; classtype:attempted-admin; sid:9100002; rev:1; priority:3;)
+
+# FTP USER command - detect login attempts
+alert tcp any any -> any 21 (msg:"CICIDS FTP USER Command"; flow:to_server; content:"USER "; nocase; classtype:attempted-admin; sid:9100003; rev:1; priority:2;)
+
+# FTP PASS command - detect password attempts
+alert tcp any any -> any 21 (msg:"CICIDS FTP PASS Command"; flow:to_server; content:"PASS "; nocase; classtype:attempted-admin; sid:9100004; rev:1; priority:2;)
+
+# FTP Response 530 - Login incorrect (failed auth)
+alert tcp any 21 -> any any (msg:"CICIDS FTP Login Failed"; flow:to_client; content:"530 "; depth:4; classtype:attempted-admin; sid:9100005; rev:1; priority:1;)
+
+# FTP Response 220 - Banner/Ready (connection established)
+alert tcp any 21 -> any any (msg:"CICIDS FTP Banner"; flow:to_client; content:"220 "; depth:4; classtype:misc-activity; sid:9100006; rev:1; priority:3;)

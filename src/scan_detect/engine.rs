@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::core::packet::Packet;
-use super::behavior::{Classification, SourceBehavior};
+use super::behavior::{Classification, FlowKey, SourceBehavior};
 use super::config::ScanDetectConfig;
 use super::rules::{EvaluationContext, RuleRegistry};
 
@@ -167,6 +167,8 @@ impl ScanDetectEngine {
 
         self.process_internal(
             packet.src_ip(),
+            packet.src_port(),
+            packet.dst_ip(),
             packet.dst_port(),
             is_syn,
             is_syn_ack,
@@ -184,6 +186,8 @@ impl ScanDetectEngine {
     fn process_internal(
         &mut self,
         src_ip: IpAddr,
+        src_port: u16,
+        dst_ip: IpAddr,
         dst_port: u16,
         is_syn: bool,
         is_syn_ack: bool,
@@ -198,6 +202,9 @@ impl ScanDetectEngine {
         if !self.config.enabled {
             return None;
         }
+
+        // Create flow key for this connection
+        let flow_key = FlowKey::new(src_port, dst_ip, dst_port);
 
         // Get or create behavior tracker for this IP
         let behavior = self.behaviors.entry(src_ip).or_insert_with(|| {
@@ -226,28 +233,30 @@ impl ScanDetectEngine {
             behavior.record_stealth_scan("fin");
         } else if is_maimon {
             behavior.record_stealth_scan("maimon");
-        } else if is_ack_only && !behavior.connections.contains_key(&dst_port) {
-            // ACK without prior connection
+        } else if is_ack_only && behavior.get_connection(&flow_key).is_none() {
+            // ACK without prior connection for this flow
             behavior.record_stealth_scan("ack_only");
         }
 
-        // Update behavior based on packet type
+        // Update behavior based on packet type using full flow key
         if is_syn {
-            behavior.record_syn(dst_port);
+            behavior.record_syn(flow_key);
         } else if is_ack && !is_syn_ack && !is_fin {
-            behavior.record_established(dst_port);
+            behavior.record_established(flow_key);
             if payload_size > 0 {
-                behavior.record_data(dst_port, payload_size as u64);
+                behavior.record_data(flow_key, payload_size as u64);
             }
         } else if is_rst {
-            behavior.record_rst(dst_port);
+            behavior.record_rst(flow_key);
         }
 
         // Cleanup expired half-opens
         behavior.cleanup_expired(self.config.syn_timeout());
 
-        // Build evaluation context
+        // Build evaluation context with full tuple info
         let ctx = EvaluationContext::new(src_ip, behavior, &self.config)
+            .with_src_port(src_port)
+            .with_dst_ip(dst_ip)
             .with_port(dst_port);
 
         let ctx = if is_syn { ctx.with_syn() } else { ctx };
@@ -295,9 +304,10 @@ impl ScanDetectEngine {
     }
 
     /// Mark a connection as having a specific protocol detected
-    pub fn mark_protocol(&mut self, src_ip: IpAddr, dst_port: u16, protocol: &str) {
+    pub fn mark_protocol(&mut self, src_ip: IpAddr, src_port: u16, dst_ip: IpAddr, dst_port: u16, protocol: &str) {
+        let flow_key = FlowKey::new(src_port, dst_ip, dst_port);
         if let Some(behavior) = self.behaviors.get_mut(&src_ip) {
-            behavior.record_protocol(dst_port, protocol);
+            behavior.record_protocol(flow_key, protocol);
         }
     }
 
@@ -328,9 +338,9 @@ impl ScanDetectEngine {
                     half_open_ports: behavior.connections
                         .iter()
                         .filter(|(_, c)| c.state == super::behavior::ConnectionState::HalfOpen)
-                        .map(|(p, _)| *p)
+                        .map(|(fk, _)| fk.dst_port)
                         .collect(),
-                    completed_ports: behavior.completed_ports.iter().copied().collect(),
+                    completed_ports: behavior.completed_flows.iter().map(|fk| fk.dst_port).collect(),
                 },
                 Classification::LikelyAttack => AlertType::LikelyAttack {
                     score,
