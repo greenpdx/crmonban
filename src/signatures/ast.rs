@@ -849,17 +849,18 @@ impl Rule {
 
     /// Get fast pattern (for Aho-Corasick pre-filter)
     pub fn fast_pattern(&self) -> Option<&ContentMatch> {
-        // First look for explicit fast_pattern
+        // First look for explicit fast_pattern (must not be negated)
         for opt in &self.options {
             if let RuleOption::Content(cm) = opt {
-                if cm.fast_pattern {
+                if cm.fast_pattern && !cm.negated {
                     return Some(cm);
                 }
             }
         }
-        // Otherwise use longest content
+        // Otherwise use longest non-negated content
         self.content_patterns()
             .into_iter()
+            .filter(|cm| !cm.negated)
             .max_by_key(|cm| cm.pattern.len())
     }
 

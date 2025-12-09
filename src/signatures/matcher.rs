@@ -201,48 +201,6 @@ fn ip_protocol_to_sig_protocol(ip_proto: crate::core::packet::IpProtocol) -> Pro
     }
 }
 
-/// Legacy packet context for signature matching (kept for backward compatibility)
-/// TODO: Remove once all callers migrate to match_packet(&Packet, &ProtocolContext, &FlowState)
-#[derive(Debug, Clone, Default)]
-pub struct PacketContext {
-    /// Protocol (TCP, UDP, etc.)
-    pub protocol: Protocol,
-    /// Source IP address
-    pub src_ip: Option<IpAddr>,
-    /// Destination IP address
-    pub dst_ip: Option<IpAddr>,
-    /// Source port
-    pub src_port: Option<u16>,
-    /// Destination port
-    pub dst_port: Option<u16>,
-    /// Packet payload
-    pub payload: Vec<u8>,
-    /// Is established connection
-    pub established: bool,
-    /// Direction: to server
-    pub to_server: bool,
-    /// TCP flags as u8
-    pub tcp_flags: u8,
-    /// TTL value
-    pub ttl: u8,
-    /// HTTP URI (for http_uri sticky buffer)
-    pub http_uri: Option<Vec<u8>>,
-    /// HTTP method
-    pub http_method: Option<Vec<u8>>,
-    /// HTTP headers
-    pub http_headers: Option<Vec<u8>>,
-    /// HTTP host
-    pub http_host: Option<Vec<u8>>,
-    /// HTTP user agent
-    pub http_user_agent: Option<Vec<u8>>,
-    /// DNS query
-    pub dns_query: Option<Vec<u8>>,
-    /// TLS SNI
-    pub tls_sni: Option<Vec<u8>>,
-    /// JA3 hash
-    pub ja3_hash: Option<String>,
-}
-
 /// Pre-compiled pattern matcher using Aho-Corasick
 pub struct PatternMatcher {
     /// Aho-Corasick automaton
@@ -515,53 +473,6 @@ impl FlowbitsState {
             bits.insert(name.to_string());
         }
     }
-
-    // Legacy methods for PacketContext (kept for backward compatibility)
-
-    /// Generate flow key as u64 hash from PacketContext
-    #[inline]
-    fn flow_key(ctx: &PacketContext) -> u64 {
-        use std::hash::{Hash, Hasher};
-        use std::collections::hash_map::DefaultHasher;
-
-        let mut hasher = DefaultHasher::new();
-        ctx.src_ip.hash(&mut hasher);
-        ctx.src_port.hash(&mut hasher);
-        ctx.dst_ip.hash(&mut hasher);
-        ctx.dst_port.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    #[inline]
-    fn set(&mut self, ctx: &PacketContext, name: &str) {
-        let key = Self::flow_key(ctx);
-        self.bits.entry(key).or_default().insert(name.to_string());
-    }
-
-    #[inline]
-    fn unset(&mut self, ctx: &PacketContext, name: &str) {
-        let key = Self::flow_key(ctx);
-        if let Some(bits) = self.bits.get_mut(&key) {
-            bits.remove(name);
-        }
-    }
-
-    #[inline]
-    fn is_set(&self, ctx: &PacketContext, name: &str) -> bool {
-        let key = Self::flow_key(ctx);
-        self.bits.get(&key).map(|b| b.contains(name)).unwrap_or(false)
-    }
-
-    #[inline]
-    fn toggle(&mut self, ctx: &PacketContext, name: &str) {
-        let key = Self::flow_key(ctx);
-        let bits = self.bits.entry(key).or_default();
-        if bits.contains(name) {
-            bits.remove(name);
-        } else {
-            bits.insert(name.to_string());
-        }
-    }
 }
 
 /// Main signature matching engine
@@ -667,7 +578,7 @@ impl SignatureEngine {
 
         // Get candidate rules from prefilter
         let prefilter_start = Instant::now();
-        let candidates = if let Some(ref prefilter) = self.prefilter {
+        let mut candidates = if let Some(ref prefilter) = self.prefilter {
             let c = prefilter.find_candidates(payload);
             // Debug: log candidate count for non-empty payloads
             if !payload.is_empty() && c.len() > 0 {
@@ -680,6 +591,13 @@ impl SignatureEngine {
             debug!("No prefilter, checking protocol rules for {:?}", protocol);
             self.get_protocol_rules(protocol)
         };
+
+        // Also include rules that couldn't be in prefilter:
+        // - Rules with sticky buffers (HTTP/DNS/TLS context)
+        // - Rules with short patterns (< min_length)
+        // - Rules with no content patterns
+        let non_prefilter_rules = self.get_non_prefilter_rules(protocol, proto_ctx);
+        candidates.extend(non_prefilter_rules);
 
         // Debug: periodically log candidate stats
         static MATCH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -705,6 +623,11 @@ impl SignatureEngine {
         let verify_start = Instant::now();
         for rule_id in &candidates {
             if let Some(rule) = self.rules.get(rule_id) {
+                // Skip disabled rules
+                if !rule.enabled {
+                    continue;
+                }
+
                 verified_count += 1;
 
                 // Check each stage and count failures
@@ -812,89 +735,6 @@ impl SignatureEngine {
         results
     }
 
-    /// Legacy match_packet using PacketContext (kept for backward compatibility)
-    /// TODO: Remove once all callers migrate to match_packet(&Packet, &ProtocolContext, &FlowState)
-    #[inline]
-    pub fn match_packet_ctx(&self, ctx: &PacketContext) -> Vec<MatchResult> {
-        // Convert PacketContext to ProtocolContext
-        let proto_ctx = if ctx.http_uri.is_some() || ctx.http_method.is_some() {
-            ProtocolContext::Http(HttpContext {
-                uri: ctx.http_uri.clone(),
-                method: ctx.http_method.clone(),
-                headers: ctx.http_headers.clone(),
-                host: ctx.http_host.clone(),
-                user_agent: ctx.http_user_agent.clone(),
-            })
-        } else if ctx.dns_query.is_some() {
-            ProtocolContext::Dns(DnsContext {
-                query: ctx.dns_query.clone(),
-            })
-        } else if ctx.tls_sni.is_some() {
-            ProtocolContext::Tls(TlsContext {
-                sni: ctx.tls_sni.clone(),
-                ja3_hash: None,
-            })
-        } else {
-            ProtocolContext::None
-        };
-
-        let flow_state = FlowState {
-            established: ctx.established,
-            to_server: ctx.to_server,
-        };
-
-        // Use verify_rule for the legacy path since it handles PacketContext
-        self.rules
-            .values()
-            .filter_map(|rule| self.verify_rule(rule, ctx))
-            .collect()
-    }
-
-    /// Match multiple packets in parallel batches
-    /// Returns a vector of (packet_index, matches) tuples
-    #[cfg(feature = "parallel")]
-    pub fn match_packets_parallel(&self, contexts: &[PacketContext]) -> Vec<(usize, Vec<MatchResult>)> {
-        contexts
-            .par_iter()
-            .enumerate()
-            .map(|(idx, ctx)| (idx, self.match_packet_ctx(ctx)))
-            .collect()
-    }
-
-    /// Match multiple packets in parallel batches (non-parallel fallback)
-    #[cfg(not(feature = "parallel"))]
-    pub fn match_packets_parallel(&self, contexts: &[PacketContext]) -> Vec<(usize, Vec<MatchResult>)> {
-        contexts
-            .iter()
-            .enumerate()
-            .map(|(idx, ctx)| (idx, self.match_packet_ctx(ctx)))
-            .collect()
-    }
-
-    /// Match packets in batches with parallel processing
-    /// More efficient for large batches as it reduces overhead
-    #[cfg(feature = "parallel")]
-    pub fn match_batch(&self, contexts: &[PacketContext]) -> Vec<Vec<MatchResult>> {
-        contexts
-            .par_iter()
-            .map(|ctx| self.match_packet_ctx(ctx))
-            .collect()
-    }
-
-    /// Match packets in batches (non-parallel fallback)
-    #[cfg(not(feature = "parallel"))]
-    pub fn match_batch(&self, contexts: &[PacketContext]) -> Vec<Vec<MatchResult>> {
-        contexts
-            .iter()
-            .map(|ctx| self.match_packet_ctx(ctx))
-            .collect()
-    }
-
-    /// Count total matches from a batch (useful for statistics)
-    pub fn count_batch_matches(results: &[Vec<MatchResult>]) -> usize {
-        results.iter().map(|v| v.len()).sum()
-    }
-
     /// Get rule IDs for a protocol
     fn get_protocol_rules(&self, protocol: Protocol) -> HashSet<u32> {
         let mut rules = HashSet::new();
@@ -919,101 +759,83 @@ impl SignatureEngine {
         rules
     }
 
-    /// Fully verify a rule against packet context
-    #[inline]
-    fn verify_rule(&self, rule: &Rule, ctx: &PacketContext) -> Option<MatchResult> {
-        // Check if rule is enabled
-        if !rule.enabled {
-            return None;
+    /// Get rules that couldn't be added to prefilter but should be checked
+    /// based on protocol context or rule characteristics
+    fn get_non_prefilter_rules(&self, protocol: Protocol, proto_ctx: &ProtocolContext) -> HashSet<u32> {
+        let mut rules = HashSet::new();
+        let min_length = self.config.prefilter_min_length;
+
+        for rule in self.rules.values() {
+            if !rule.enabled {
+                continue;
+            }
+
+            // Skip if protocol doesn't match
+            if rule.protocol != Protocol::Any && rule.protocol != protocol {
+                continue;
+            }
+
+            // Check if rule uses sticky buffers that match the protocol context
+            let uses_sticky_buffer = rule.options.iter().any(|opt| {
+                matches!(opt,
+                    RuleOption::HttpUri |
+                    RuleOption::HttpMethod |
+                    RuleOption::HttpHeader |
+                    RuleOption::HttpHost |
+                    RuleOption::HttpUserAgent |
+                    RuleOption::DnsQuery |
+                    RuleOption::TlsSni
+                )
+            });
+
+            // Check if rule has only short patterns (below prefilter threshold)
+            let has_only_short_patterns = if let Some(fp) = rule.fast_pattern() {
+                fp.pattern.len() < min_length
+            } else {
+                // No fast pattern - check all content patterns
+                let content_patterns: Vec<_> = rule.options.iter()
+                    .filter_map(|o| match o {
+                        RuleOption::Content(cm) => Some(&cm.pattern),
+                        _ => None,
+                    })
+                    .collect();
+
+                if content_patterns.is_empty() {
+                    true // No content patterns at all
+                } else {
+                    content_patterns.iter().all(|p| p.len() < min_length)
+                }
+            };
+
+            // Include rule if:
+            // 1. Uses sticky buffers AND matching context is available
+            // 2. Has only short patterns (couldn't be in prefilter)
+            // 3. Has no content patterns (protocol-only rule)
+            let context_matches = match proto_ctx {
+                ProtocolContext::Http(_) => uses_sticky_buffer && rule.options.iter().any(|opt| {
+                    matches!(opt,
+                        RuleOption::HttpUri |
+                        RuleOption::HttpMethod |
+                        RuleOption::HttpHeader |
+                        RuleOption::HttpHost |
+                        RuleOption::HttpUserAgent
+                    )
+                }),
+                ProtocolContext::Dns(_) => uses_sticky_buffer && rule.options.iter().any(|opt| {
+                    matches!(opt, RuleOption::DnsQuery)
+                }),
+                ProtocolContext::Tls(_) => uses_sticky_buffer && rule.options.iter().any(|opt| {
+                    matches!(opt, RuleOption::TlsSni)
+                }),
+                _ => false,
+            };
+
+            if context_matches || has_only_short_patterns {
+                rules.insert(rule.id);
+            }
         }
 
-        // Check protocol match
-        if !self.check_protocol(rule, ctx) {
-            return None;
-        }
-
-        // Check IP/port match
-        if !self.check_addresses(rule, ctx) {
-            return None;
-        }
-
-        // Check flow flags
-        if !self.check_flow(rule, ctx) {
-            return None;
-        }
-
-        // Check flowbits prerequisites
-        if !self.check_flowbits_prereqs(rule, ctx) {
-            return None;
-        }
-
-        // Match content patterns
-        let content_matches = self.match_contents(rule, ctx)?;
-
-        // Match PCRE patterns
-        if !self.match_pcre(rule, ctx) {
-            return None;
-        }
-
-        // Check threshold/detection_filter
-        if !self.check_threshold(rule, ctx) {
-            return None;
-        }
-
-        // Update flowbits state
-        self.update_flowbits(rule, ctx);
-
-        // Check for noalert
-        if rule.options.iter().any(|o| matches!(o, RuleOption::Noalert)) {
-            return None;
-        }
-
-        Some(MatchResult {
-            rule_id: rule.id,
-            sid: rule.sid,
-            msg: rule.msg.clone(),
-            classtype: rule.classtype.clone(),
-            priority: rule.priority,
-            action: rule.action,
-            references: rule.references.clone(),
-            timestamp: Instant::now(),
-            content_matches,
-        })
-    }
-
-    #[inline]
-    fn check_protocol(&self, rule: &Rule, ctx: &PacketContext) -> bool {
-        rule.protocol == Protocol::Any || rule.protocol == ctx.protocol
-    }
-
-    #[inline]
-    fn check_addresses(&self, rule: &Rule, ctx: &PacketContext) -> bool {
-        // Check source IP
-        if !self.ip_matches(&rule.src_ip, ctx.src_ip) {
-            return false;
-        }
-
-        // Check destination IP
-        if !self.ip_matches(&rule.dst_ip, ctx.dst_ip) {
-            return false;
-        }
-
-        // Check source port
-        if !self.port_matches(&rule.src_port, ctx.src_port) {
-            return false;
-        }
-
-        // Check destination port
-        if !self.port_matches(&rule.dst_port, ctx.dst_port) {
-            return false;
-        }
-
-        // Check direction
-        match rule.direction {
-            Direction::ToServer => ctx.to_server,
-            Direction::ToClient => !ctx.to_server,
-            Direction::Both => true,
-        }
+        rules
     }
 
     fn ip_matches(&self, spec: &IpSpec, ip: Option<IpAddr>) -> bool {
@@ -1089,110 +911,6 @@ impl SignatureEngine {
             PortSpec::List(specs) => specs.iter().any(|s| self.port_matches(s, port)),
             PortSpec::Negated(inner) => !self.port_matches(inner, port),
         }
-    }
-
-    fn check_flow(&self, rule: &Rule, ctx: &PacketContext) -> bool {
-        if let Some(flags) = rule.flow_flags() {
-            if flags.established && !ctx.established {
-                return false;
-            }
-            if flags.not_established && ctx.established {
-                return false;
-            }
-            if flags.to_server && !ctx.to_server {
-                return false;
-            }
-            if flags.to_client && ctx.to_server {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn check_flowbits_prereqs(&self, rule: &Rule, ctx: &PacketContext) -> bool {
-        let state = self.flowbits_state.read();
-
-        for opt in &rule.options {
-            if let RuleOption::Flowbits(op) = opt {
-                match op {
-                    FlowbitsOp::IsSet(name) => {
-                        if !state.is_set(ctx, name) {
-                            return false;
-                        }
-                    }
-                    FlowbitsOp::IsNotSet(name) => {
-                        if state.is_set(ctx, name) {
-                            return false;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        true
-    }
-
-    fn update_flowbits(&self, rule: &Rule, ctx: &PacketContext) {
-        let mut state = self.flowbits_state.write();
-
-        for opt in &rule.options {
-            if let RuleOption::Flowbits(op) = opt {
-                match op {
-                    FlowbitsOp::Set(name) => state.set(ctx, name),
-                    FlowbitsOp::Unset(name) => state.unset(ctx, name),
-                    FlowbitsOp::Toggle(name) => state.toggle(ctx, name),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    fn match_contents(&self, rule: &Rule, ctx: &PacketContext) -> Option<Vec<(usize, usize)>> {
-        let mut matches = Vec::new();
-        let mut last_match_end = 0;
-
-        for opt in &rule.options {
-            if let RuleOption::Content(cm) = opt {
-                // Select buffer based on sticky buffers
-                let buffer = self.select_buffer(rule, ctx, opt);
-
-                if let Some(pos) = self.match_content(cm, buffer, last_match_end) {
-                    if cm.negated {
-                        return None; // Negated content matched - rule fails
-                    }
-                    matches.push((pos, pos + cm.pattern.len()));
-                    last_match_end = pos + cm.pattern.len();
-                } else if !cm.negated {
-                    return None; // Required content not found
-                }
-            }
-        }
-
-        Some(matches)
-    }
-
-    fn select_buffer<'a>(&self, rule: &Rule, ctx: &'a PacketContext, current_opt: &RuleOption) -> &'a [u8] {
-        // Find the most recent sticky buffer before this option
-        let mut use_buffer = None;
-        for opt in &rule.options {
-            if std::ptr::eq(opt, current_opt) {
-                break;
-            }
-
-            use_buffer = match opt {
-                RuleOption::HttpUri => ctx.http_uri.as_deref(),
-                RuleOption::HttpMethod => ctx.http_method.as_deref(),
-                RuleOption::HttpHeader => ctx.http_headers.as_deref(),
-                RuleOption::HttpHost => ctx.http_host.as_deref(),
-                RuleOption::HttpUserAgent => ctx.http_user_agent.as_deref(),
-                RuleOption::DnsQuery => ctx.dns_query.as_deref(),
-                RuleOption::TlsSni => ctx.tls_sni.as_deref(),
-                _ => continue,
-            };
-        }
-
-        use_buffer.unwrap_or(&ctx.payload)
     }
 
     /// Match content pattern (optimized - minimal allocations)
@@ -1311,65 +1029,6 @@ impl SignatureEngine {
             }
         }
         None
-    }
-
-    fn match_pcre(&self, rule: &Rule, ctx: &PacketContext) -> bool {
-        for opt in &rule.options {
-            if let RuleOption::Pcre(pcre) = opt {
-                let buffer = &ctx.payload;
-                let key = PcreCache::make_key(&pcre.pattern, &pcre.flags);
-
-                // Try read lock first (fast path for cached patterns)
-                let matched = {
-                    let cache = self.pcre_cache.read();
-                    if let Some(re) = cache.get(&key) {
-                        Some(re.is_match(buffer))
-                    } else {
-                        None
-                    }
-                };
-
-                let matched = match matched {
-                    Some(m) => m,
-                    None => {
-                        // Cache miss - need write lock to compile
-                        let mut cache = self.pcre_cache.write();
-                        // Double-check after acquiring write lock
-                        if let Some(re) = cache.get(&key) {
-                            re.is_match(buffer)
-                        } else if let Some(re) = cache.compile_and_insert(&pcre.pattern, &pcre.flags) {
-                            re.is_match(buffer)
-                        } else {
-                            continue; // Compilation failed, skip this pattern
-                        }
-                    }
-                };
-
-                if pcre.negated {
-                    if matched {
-                        return false;
-                    }
-                } else if !matched {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    fn check_threshold(&self, rule: &Rule, ctx: &PacketContext) -> bool {
-        for opt in &rule.options {
-            match opt {
-                RuleOption::Threshold(spec) | RuleOption::DetectionFilter(spec) => {
-                    let mut state = self.threshold_state.write();
-                    if !state.check_threshold(rule.sid, spec, ctx.src_ip, ctx.dst_ip) {
-                        return false;
-                    }
-                }
-                _ => {}
-            }
-        }
-        true
     }
 
     // =========================================================================
@@ -1680,6 +1339,105 @@ impl SignatureEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::packet::{Packet, IpProtocol, TcpFlags};
+    use crate::core::layers::{Layer3, Layer4, Ipv4Info, TcpInfo, UdpInfo};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    // =========================================================================
+    // Helper functions for creating synthetic packets
+    // =========================================================================
+
+    /// Create a TCP packet with payload
+    fn make_tcp_packet(
+        src_ip: &str,
+        dst_ip: &str,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Packet {
+        let layer3 = Layer3::Ipv4(Ipv4Info {
+            src_addr: src_ip.parse().unwrap(),
+            dst_addr: dst_ip.parse().unwrap(),
+            protocol: 6, // TCP
+            ttl: 64,
+            ..Default::default()
+        });
+
+        let layer4 = Layer4::Tcp(TcpInfo {
+            src_port,
+            dst_port,
+            seq: 1000,
+            ack: 0,
+            flags: TcpFlags { syn: false, ack: true, ..Default::default() },
+            window: 65535,
+            payload: payload.to_vec(),
+            ..Default::default()
+        });
+
+        Packet::from_layers(1, layer3, layer4, "lo".to_string())
+    }
+
+    /// Create a UDP packet with payload
+    fn make_udp_packet(
+        src_ip: &str,
+        dst_ip: &str,
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Packet {
+        let layer3 = Layer3::Ipv4(Ipv4Info {
+            src_addr: src_ip.parse().unwrap(),
+            dst_addr: dst_ip.parse().unwrap(),
+            protocol: 17, // UDP
+            ttl: 64,
+            ..Default::default()
+        });
+
+        let layer4 = Layer4::Udp(UdpInfo {
+            src_port,
+            dst_port,
+            length: payload.len() as u16 + 8,
+            payload: payload.to_vec(),
+        });
+
+        Packet::from_layers(1, layer3, layer4, "lo".to_string())
+    }
+
+    /// Create a simple rule for testing
+    fn make_rule(
+        sid: u32,
+        protocol: Protocol,
+        content: Option<&[u8]>,
+        msg: &str,
+    ) -> Rule {
+        let mut rule = Rule {
+            id: sid,
+            sid,
+            msg: msg.to_string(),
+            protocol,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+
+        if let Some(pat) = content {
+            rule.options.push(RuleOption::Content(ContentMatch {
+                pattern: pat.to_vec(),
+                ..Default::default()
+            }));
+        }
+
+        rule
+    }
+
+    // =========================================================================
+    // Original tests (preserved)
+    // =========================================================================
 
     #[test]
     fn test_content_match() {
@@ -1740,5 +1498,633 @@ mod tests {
         assert!(engine.port_matches(&spec, Some(443)));
         assert!(engine.port_matches(&spec, Some(100)));
         assert!(!engine.port_matches(&spec, Some(8080)));
+    }
+
+    // =========================================================================
+    // New API tests: match_packet with synthetic sessions
+    // =========================================================================
+
+    #[test]
+    fn test_match_packet_simple_content() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+        let rule = make_rule(1001, Protocol::Tcp, Some(b"malware"), "Test malware detection");
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET /malware.exe HTTP/1.1");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState { established: true, to_server: true };
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].sid, 1001);
+    }
+
+    #[test]
+    fn test_match_packet_no_match() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+        let rule = make_rule(1002, Protocol::Tcp, Some(b"malware"), "Test no match");
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET /index.html HTTP/1.1");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState { established: true, to_server: true };
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_match_packet_protocol_filter() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+        // UDP-only rule
+        let rule = make_rule(1003, Protocol::Udp, Some(b"test"), "UDP only rule");
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        // TCP packet should NOT match UDP rule
+        let tcp_pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"test data");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&tcp_pkt, &proto_ctx, &flow_state);
+        assert!(matches.is_empty(), "TCP packet should not match UDP rule");
+
+        // UDP packet SHOULD match
+        let udp_pkt = make_udp_packet("10.0.0.1", "192.168.1.1", 12345, 53, b"test data");
+        let matches = engine.match_packet(&udp_pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_multiple_rules() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        // Add multiple rules that should match
+        let rule1 = make_rule(2001, Protocol::Tcp, Some(b"GET"), "HTTP GET");
+        let rule2 = make_rule(2002, Protocol::Tcp, Some(b"HTTP"), "HTTP Protocol");
+        engine.add_rule(rule1);
+        engine.add_rule(rule2);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET /index.html HTTP/1.1");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState { established: true, to_server: true };
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn test_match_packet_http_context() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        // Rule that matches on HTTP URI
+        let mut rule = Rule {
+            id: 3001,
+            sid: 3001,
+            msg: "SQL injection attempt".to_string(),
+            protocol: Protocol::Tcp,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        rule.options.push(RuleOption::HttpUri);
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"UNION SELECT".to_vec(),
+            nocase: true,
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"");
+        let proto_ctx = ProtocolContext::Http(HttpContext {
+            uri: Some(b"/search?q=UNION SELECT * FROM users".to_vec()),
+            method: Some(b"GET".to_vec()),
+            ..Default::default()
+        });
+        let flow_state = FlowState { established: true, to_server: true };
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].msg, "SQL injection attempt");
+    }
+
+    #[test]
+    fn test_match_packet_dns_context() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = Rule {
+            id: 3002,
+            sid: 3002,
+            msg: "Suspicious DNS query".to_string(),
+            protocol: Protocol::Udp,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        rule.options.push(RuleOption::DnsQuery);
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"malicious.com".to_vec(),
+            nocase: true,
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_udp_packet("10.0.0.1", "8.8.8.8", 12345, 53, b"");
+        let proto_ctx = ProtocolContext::Dns(DnsContext {
+            query: Some(b"evil.malicious.com".to_vec()),
+        });
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_tls_context() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = Rule {
+            id: 3003,
+            sid: 3003,
+            msg: "Suspicious TLS SNI".to_string(),
+            protocol: Protocol::Tcp,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        rule.options.push(RuleOption::TlsSni);
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"bad-site.com".to_vec(),
+            nocase: true,
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 443, b"");
+        let proto_ctx = ProtocolContext::Tls(TlsContext {
+            sni: Some(b"www.bad-site.com".to_vec()),
+            ja3_hash: None,
+        });
+        let flow_state = FlowState { established: true, to_server: true };
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_flow_state_established() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        // Rule requires established connection
+        let mut rule = make_rule(4001, Protocol::Tcp, Some(b"test"), "Established only");
+        rule.options.push(RuleOption::Flow(FlowFlags {
+            established: true,
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"test data");
+        let proto_ctx = ProtocolContext::None;
+
+        // Not established - should NOT match
+        let flow_state = FlowState { established: false, to_server: true };
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert!(matches.is_empty(), "Should not match when not established");
+
+        // Established - SHOULD match
+        let flow_state = FlowState { established: true, to_server: true };
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_flow_direction_to_server() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = make_rule(4002, Protocol::Tcp, Some(b"test"), "To server only");
+        rule.options.push(RuleOption::Flow(FlowFlags {
+            to_server: true,
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"test data");
+        let proto_ctx = ProtocolContext::None;
+
+        // To client - should NOT match
+        let flow_state = FlowState { established: true, to_server: false };
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert!(matches.is_empty());
+
+        // To server - SHOULD match
+        let flow_state = FlowState { established: true, to_server: true };
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_content_nocase() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = Rule {
+            id: 5001,
+            sid: 5001,
+            msg: "Case insensitive match".to_string(),
+            protocol: Protocol::Tcp,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"MALWARE".to_vec(),
+            nocase: true,
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"downloading malware.exe");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_content_depth() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = Rule {
+            id: 5002,
+            sid: 5002,
+            msg: "Content with depth".to_string(),
+            protocol: Protocol::Tcp,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"GET".to_vec(),
+            depth: Some(10),
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        // GET within first 10 bytes - should match
+        let pkt1 = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET / HTTP/1.1");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+        let matches = engine.match_packet(&pkt1, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+
+        // GET beyond first 10 bytes - should NOT match
+        let pkt2 = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"XXXXXXXXXX GET /");
+        let matches = engine.match_packet(&pkt2, &proto_ctx, &flow_state);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_match_packet_multiple_content_patterns() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = Rule {
+            id: 5003,
+            sid: 5003,
+            msg: "Multiple content patterns".to_string(),
+            protocol: Protocol::Tcp,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        // Both patterns must match
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"GET".to_vec(),
+            ..Default::default()
+        }));
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"HTTP".to_vec(),
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        // Both patterns present - should match
+        let pkt1 = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET /index.html HTTP/1.1");
+        let matches = engine.match_packet(&pkt1, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+
+        // Only first pattern - should NOT match
+        let pkt2 = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET /index.html");
+        let matches = engine.match_packet(&pkt2, &proto_ctx, &flow_state);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_match_packet_negated_content() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = Rule {
+            id: 5004,
+            sid: 5004,
+            msg: "Negated content".to_string(),
+            protocol: Protocol::Tcp,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"GET".to_vec(),
+            ..Default::default()
+        }));
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"safe".to_vec(),
+            negated: true, // Must NOT contain "safe"
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        // Contains "GET" but not "safe" - should match
+        let pkt1 = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET /malware.exe");
+        let matches = engine.match_packet(&pkt1, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+
+        // Contains both "GET" and "safe" - should NOT match
+        let pkt2 = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET /safe/file.txt");
+        let matches = engine.match_packet(&pkt2, &proto_ctx, &flow_state);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_match_packet_ip_address_filter() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = make_rule(6001, Protocol::Tcp, Some(b"test"), "Specific source IP");
+        rule.src_ip = IpSpec::Cidr("10.0.0.0".parse().unwrap(), 8);
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        // Source IP in 10.0.0.0/8 - should match
+        let pkt1 = make_tcp_packet("10.1.2.3", "192.168.1.1", 12345, 80, b"test data");
+        let matches = engine.match_packet(&pkt1, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+
+        // Source IP NOT in 10.0.0.0/8 - should NOT match
+        let pkt2 = make_tcp_packet("192.168.1.100", "192.168.1.1", 12345, 80, b"test data");
+        let matches = engine.match_packet(&pkt2, &proto_ctx, &flow_state);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_match_packet_port_filter() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = make_rule(6002, Protocol::Tcp, Some(b"test"), "HTTP ports only");
+        rule.dst_port = PortSpec::List(vec![
+            PortSpec::Single(80),
+            PortSpec::Single(8080),
+            PortSpec::Single(443),
+        ]);
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        // Port 80 - should match
+        let pkt1 = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"test data");
+        let matches = engine.match_packet(&pkt1, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+
+        // Port 22 - should NOT match
+        let pkt2 = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 22, b"test data");
+        let matches = engine.match_packet(&pkt2, &proto_ctx, &flow_state);
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_match_packet_empty_payload() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        // Rule without content - should match based on protocol only
+        let rule = make_rule(7001, Protocol::Tcp, None, "TCP packet no content");
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_large_payload() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let rule = make_rule(7002, Protocol::Tcp, Some(b"END_MARKER"), "Large payload test");
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        // Create large payload with marker at the end
+        let mut payload = vec![b'X'; 10000];
+        payload.extend_from_slice(b"END_MARKER");
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, &payload);
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_binary_content() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        // Binary pattern (shellcode-like)
+        let binary_pattern = vec![0x90, 0x90, 0x90, 0x90]; // NOP sled
+        let mut rule = Rule {
+            id: 7003,
+            sid: 7003,
+            msg: "NOP sled detected".to_string(),
+            protocol: Protocol::Tcp,
+            action: Action::Alert,
+            enabled: true,
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: binary_pattern.clone(),
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        // Payload with NOP sled
+        let payload: Vec<u8> = vec![0x00, 0x01, 0x90, 0x90, 0x90, 0x90, 0xCC];
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, &payload);
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_packet_disabled_rule() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = make_rule(8001, Protocol::Tcp, Some(b"test"), "Disabled rule");
+        rule.enabled = false;
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"test data");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert!(matches.is_empty(), "Disabled rule should not match");
+    }
+
+    #[test]
+    fn test_match_packet_noalert_rule() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = make_rule(8002, Protocol::Tcp, Some(b"test"), "Noalert rule");
+        rule.options.push(RuleOption::Noalert);
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"test data");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert!(matches.is_empty(), "Noalert rule should not generate alert");
+    }
+
+    #[test]
+    fn test_match_packet_protocol_any() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let rule = make_rule(9001, Protocol::Any, Some(b"test"), "Any protocol");
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        // TCP should match
+        let tcp_pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"test data");
+        let matches = engine.match_packet(&tcp_pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+
+        // UDP should also match
+        let udp_pkt = make_udp_packet("10.0.0.1", "192.168.1.1", 12345, 53, b"test data");
+        let matches = engine.match_packet(&udp_pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_match_result_fields() {
+        let mut engine = SignatureEngine::new(SignatureConfig::default());
+
+        let mut rule = Rule {
+            id: 10001,
+            sid: 10001,
+            msg: "Test alert message".to_string(),
+            protocol: Protocol::Tcp,
+            action: Action::Alert,
+            enabled: true,
+            priority: 2,
+            classtype: Some("attempted-admin".to_string()),
+            src_ip: IpSpec::Any,
+            src_port: PortSpec::Any,
+            dst_ip: IpSpec::Any,
+            dst_port: PortSpec::Any,
+            direction: Direction::Both,
+            ..Default::default()
+        };
+        rule.options.push(RuleOption::Content(ContentMatch {
+            pattern: b"admin".to_vec(),
+            ..Default::default()
+        }));
+        engine.add_rule(rule);
+        engine.rebuild_prefilter();
+
+        let pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 12345, 80, b"GET /admin/login");
+        let proto_ctx = ProtocolContext::None;
+        let flow_state = FlowState::default();
+
+        let matches = engine.match_packet(&pkt, &proto_ctx, &flow_state);
+        assert_eq!(matches.len(), 1);
+
+        let result = &matches[0];
+        assert_eq!(result.sid, 10001);
+        assert_eq!(result.msg, "Test alert message");
+        assert_eq!(result.priority, 2);
+        assert_eq!(result.classtype, Some("attempted-admin".to_string()));
+        assert_eq!(result.action, Action::Alert);
     }
 }

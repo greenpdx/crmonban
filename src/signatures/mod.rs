@@ -36,10 +36,7 @@ pub use ast::*;
 pub use parser::{parse_rule, apply_content_modifiers, ParseError};
 pub use matcher::{
     SignatureEngine, MatchResult, PatternMatcher,
-    // New API types
     FlowState, ProtocolContext, HttpContext, DnsContext, TlsContext, SshContext, SmtpContext,
-    // Legacy type (kept for backward compatibility)
-    PacketContext,
 };
 pub use loader::{RuleLoader, RuleSet, RuleSource};
 pub use storage::{SignatureStorage, SignatureSet, SignatureSetMetadata, StorageStats, SIGNATURE_DATA_DIR};
