@@ -444,9 +444,11 @@ mod tests {
 
     fn make_test_flow(id: u64) -> Flow {
         let mut pkt = Packet::new(
-            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
-            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            0,
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             IpProtocol::Tcp,
+            "lo",
         );
         if let Some(tcp) = pkt.tcp_mut() {
             tcp.src_port = 54321;

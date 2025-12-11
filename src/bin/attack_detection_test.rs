@@ -327,7 +327,7 @@ fn parse_packet(data: &[u8]) -> Option<Packet> {
                 _ => return None,
             };
 
-            let mut pkt = Packet::new(src_ip, dst_ip, protocol);
+            let mut pkt = Packet::new(0, src_ip, dst_ip, protocol, "lo");
             pkt.raw_len = data.len() as u32;
 
             match &sliced.transport {

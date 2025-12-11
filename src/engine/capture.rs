@@ -74,10 +74,10 @@ impl Default for CaptureConfig {
 /// Trait for packet capture implementations
 pub trait PacketCapture: Send {
     /// Get the next packet
-    fn next_packet(&mut self) -> anyhow::Result<Option<Packet>>;
+    fn next_packet(&mut self, packet_id: u64) -> anyhow::Result<Option<Packet>>;
 
     /// Set verdict for NFQUEUE packets
-    fn set_verdict(&mut self, packet_id: u32, accept: bool) -> anyhow::Result<()>;
+    fn set_verdict(&mut self, packet_id: u64, accept: bool) -> anyhow::Result<()>;
 
     /// Get capture statistics
     fn stats(&mut self) -> CaptureStats;
@@ -139,14 +139,14 @@ impl NfqueueCapture {
 }
 
 impl PacketCapture for NfqueueCapture {
-    fn next_packet(&mut self) -> anyhow::Result<Option<Packet>> {
+    fn next_packet(&mut self, packet_id: u64) -> anyhow::Result<Option<Packet>> {
         // Return dummy packets for testing (NFQUEUE requires root)
         std::thread::sleep(Duration::from_millis(100));
         self.stats.received += 1;
         Ok(None)
     }
 
-    fn set_verdict(&mut self, _packet_id: u32, _accept: bool) -> anyhow::Result<()> {
+    fn set_verdict(&mut self, _packet_id: u64, _accept: bool) -> anyhow::Result<()> {
         // Verdict handling would use msg.set_verdict() and queue.verdict(msg)
         Ok(())
     }
@@ -193,12 +193,12 @@ impl AfPacketCapture {
 }
 
 impl PacketCapture for AfPacketCapture {
-    fn next_packet(&mut self) -> anyhow::Result<Option<Packet>> {
+    fn next_packet(&mut self, packet_id: u64) -> anyhow::Result<Option<Packet>> {
         match self.capture.next_packet() {
             Ok(packet) => {
                 self.stats.received += 1;
                 self.packet_id += 1;
-                let packet_id = self.packet_id;
+                let packet_id = packet_id;
                 let interface = self.interface.clone();
                 // Copy data before the borrow ends
                 let data = packet.data.to_vec();
@@ -215,7 +215,7 @@ impl PacketCapture for AfPacketCapture {
         }
     }
 
-    fn set_verdict(&mut self, _packet_id: u32, _accept: bool) -> anyhow::Result<()> {
+    fn set_verdict(&mut self, _packet_id: u64, _accept: bool) -> anyhow::Result<()> {
         // AF_PACKET is passive, no verdict
         Ok(())
     }
@@ -265,7 +265,7 @@ impl PcapCapture {
 }
 
 impl PacketCapture for PcapCapture {
-    fn next_packet(&mut self) -> anyhow::Result<Option<Packet>> {
+    fn next_packet(&mut self, packet_id: u64) -> anyhow::Result<Option<Packet>> {
         match self.capture.next_packet() {
             Ok(pkt) => {
                 self.stats.received += 1;
@@ -282,7 +282,7 @@ impl PacketCapture for PcapCapture {
         }
     }
 
-    fn set_verdict(&mut self, _packet_id: u32, _accept: bool) -> anyhow::Result<()> {
+    fn set_verdict(&mut self, _packet_id: u64, _accept: bool) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -317,7 +317,7 @@ impl Default for DummyCapture {
 }
 
 impl PacketCapture for DummyCapture {
-    fn next_packet(&mut self) -> anyhow::Result<Option<Packet>> {
+    fn next_packet(&mut self, packet_id: u64) -> anyhow::Result<Option<Packet>> {
         self.counter += 1;
         self.stats.received += 1;
 
@@ -326,7 +326,7 @@ impl PacketCapture for DummyCapture {
             let src_ip: IpAddr = "192.168.1.100".parse().unwrap();
             let dst_ip: IpAddr = "10.0.0.1".parse().unwrap();
 
-            let mut packet = Packet::new(src_ip, dst_ip, IpProtocol::Tcp);
+            let mut packet = Packet::new(packet_id, src_ip, dst_ip, IpProtocol::Tcp, "lo");
             // Set ports via the TCP layer
             if let Some(tcp) = packet.tcp_mut() {
                 tcp.src_port = 12345;
@@ -341,7 +341,7 @@ impl PacketCapture for DummyCapture {
         Ok(None)
     }
 
-    fn set_verdict(&mut self, _packet_id: u32, _accept: bool) -> anyhow::Result<()> {
+    fn set_verdict(&mut self, _packet_id: u64, _accept: bool) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -369,7 +369,7 @@ mod tests {
 
         // Should produce packets periodically
         for _ in 0..150 {
-            let _ = capture.next_packet();
+            let _ = capture.next_packet(0);
         }
 
         assert!(capture.stats().received > 0);

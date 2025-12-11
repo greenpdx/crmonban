@@ -21,7 +21,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-
+use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tracing::{trace, debug};
 
@@ -64,7 +64,7 @@ impl Default for WorkerConfig {
             num_workers: 0, // Auto-detect
             queue_depth: 1000,
             cpu_affinity: false,
-            rules_dir: None,
+            rules_dir: Some("/var/lib/crmonban/data/rules".into()),
         }
     }
 }
@@ -792,7 +792,7 @@ mod tests {
         let src_ip = "192.168.1.100".parse().unwrap();
         let dst_ip = "10.0.0.1".parse().unwrap();
 
-        let mut packet = Packet::new(src_ip, dst_ip, IpProtocol::Tcp);
+        let mut packet = Packet::new(0, src_ip, dst_ip, IpProtocol::Tcp, "lo");
         if let Some(tcp) = packet.tcp_mut() {
             tcp.src_port = 12345;
             tcp.dst_port = 80;
@@ -821,7 +821,7 @@ mod tests {
         let src_ip: IpAddr = src.parse().unwrap();
         let dst_ip: IpAddr = dst.parse().unwrap();
 
-        let mut packet = Packet::new(src_ip, dst_ip, IpProtocol::Tcp);
+        let mut packet = Packet::new(0, src_ip, dst_ip, IpProtocol::Tcp, "lo");
         if let Some(tcp) = packet.tcp_mut() {
             tcp.src_port = src_port;
             tcp.dst_port = dst_port;

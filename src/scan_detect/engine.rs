@@ -483,9 +483,11 @@ mod tests {
     /// Create a TCP SYN packet for testing
     fn make_syn_packet(src_ip: Ipv4Addr, dst_port: u16) -> Packet {
         let mut pkt = Packet::new(
+            0,
             IpAddr::V4(src_ip),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
+            "lo",
         );
         if let Some(tcp) = pkt.tcp_mut() {
             tcp.src_port = 54321;
@@ -498,9 +500,11 @@ mod tests {
     /// Create a TCP ACK packet for testing
     fn make_ack_packet(src_ip: Ipv4Addr, dst_port: u16) -> Packet {
         let mut pkt = Packet::new(
+            0,
             IpAddr::V4(src_ip),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
+            "lo",
         );
         if let Some(tcp) = pkt.tcp_mut() {
             tcp.src_port = 54321;

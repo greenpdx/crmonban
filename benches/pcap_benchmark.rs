@@ -229,7 +229,7 @@ impl CsvFlowRecord {
             other => IpProtocol::Other(other),
         };
 
-        let mut pkt = Packet::new(self.src_ip, self.dst_ip, protocol);
+        let mut pkt = Packet::new(0,self.src_ip, self.dst_ip, protocol,"lo");
         // Set ports and flags via layer access
         if let Some(tcp) = pkt.tcp_mut() {
             tcp.src_port = self.src_port;
@@ -634,7 +634,7 @@ impl PcapBenchmark {
 
         // Parse packet
         let parse_start = Instant::now();
-        let pkt = match Packet::from_ethernet_bytes(data) {
+        let pkt = match Packet::from_ethernet_bytes(0,data,"") {
             Some(p) => p,
             None => return,
         };
@@ -1095,7 +1095,7 @@ impl PcapBenchmark {
     ) {
         // Parse all packets in parallel
         let parsed: Vec<_> = batch.par_iter()
-            .filter_map(|data| Packet::from_ethernet_bytes(data))
+            .filter_map(|data| Packet::from_ethernet_bytes(0,data,"lo"))
             .collect();
 
         // Update byte counter

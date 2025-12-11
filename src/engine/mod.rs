@@ -42,6 +42,7 @@ pub mod capture;
 pub mod pipeline;
 pub mod workers;
 pub mod actions;
+pub mod flow_buffer;
 
 #[cfg(feature = "profiling")]
 pub mod profiling;
@@ -62,6 +63,7 @@ pub use capture::{PacketCapture, CaptureConfig, CaptureMethod};
 pub use pipeline::{Pipeline, PipelineConfig, PipelineStage};
 pub use workers::{WorkerPool, WorkerConfig};
 pub use actions::{ActionExecutor, Action, ActionConfig};
+pub use flow_buffer::{FlowBuffer, FlowBufferConfig, FlowBatch, FlushTrigger};
 
 #[cfg(feature = "profiling")]
 pub use profiling::{PipelineProfiler, PipelineProfileSnapshot, StageProfile, StageProfileSnapshot};
@@ -250,7 +252,7 @@ impl PacketEngine {
                             break;
                         }
 
-                        match capture.next_packet() {
+                        match capture.next_packet(0) {
                             Ok(Some(packet)) => {
                                 capture_stats.write().packets_captured += 1;
 

@@ -869,10 +869,11 @@ mod tests {
 
     #[test]
     fn test_flow_creation() {
-        let mut pkt = Packet::new(
+        let mut pkt = Packet::new(0,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
+            "lo",
         );
         if let Some(tcp) = pkt.tcp_mut() {
             tcp.src_port = 54321;
@@ -891,10 +892,11 @@ mod tests {
 
     #[test]
     fn test_flow_update() {
-        let mut pkt1 = Packet::new(
+        let mut pkt1 = Packet::new(0,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
+            "lo"
         );
         if let Some(tcp) = pkt1.tcp_mut() {
             tcp.src_port = 54321;
@@ -906,10 +908,11 @@ mod tests {
         let mut flow = Flow::new(1, &pkt1);
 
         // SYN-ACK response
-        let mut pkt2 = Packet::new(
+        let mut pkt2 = Packet::new(0,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             IpProtocol::Tcp,
+            "lo"
         );
         if let Some(tcp) = pkt2.tcp_mut() {
             tcp.src_port = 80;
@@ -927,10 +930,11 @@ mod tests {
 
     #[test]
     fn test_flow_stats() {
-        let mut pkt = Packet::new(
+        let mut pkt = Packet::new(0,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
             IpProtocol::Tcp,
+            "lo"
         );
         if let Some(tcp) = pkt.tcp_mut() {
             tcp.src_port = 54321;

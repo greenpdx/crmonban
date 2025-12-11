@@ -205,10 +205,32 @@ impl Packet {
         }
     }
 
+    /// Parse raw IP packet bytes into a Packet (no Ethernet header)
+    ///
+    /// Use this for WiFi or other non-Ethernet captures where data starts at IP layer.
+    /// Returns `None` if the packet cannot be parsed.
+    pub fn from_ip_bytes(packet_id: u64, data: &[u8], interface: &str) -> Option<Self> {
+        let (layer3, transport_data) = Layer3::from_bytes(data)?;
+        let protocol = layer3.protocol();
+        let layer4 = Layer4::from_bytes(protocol, transport_data)?;
+
+        Some(Self {
+            timestamp: Instant::now(),
+            id: packet_id,
+            ethernet: None,
+            layer3,
+            layer4,
+            flow_id: None,
+            direction: Direction::Unknown,
+            interface: interface.to_string(),
+            raw_len: data.len() as u32,
+        })
+    }
+
     /// Parse raw Ethernet frame bytes into a Packet
     ///
     /// Returns `None` if the packet cannot be parsed (non-IP, malformed, etc.)
-    pub fn from_ethernet_bytes(data: &[u8]) -> Option<Self> {
+    pub fn from_ethernet_bytes(packet_id: u64, data: &[u8], interface: &str) -> Option<Self> {
         let sliced = SlicedPacket::from_ethernet(data).ok()?;
 
         let (src_ip, dst_ip, protocol) = match &sliced.net {
@@ -240,7 +262,7 @@ impl Packet {
             _ => return None, // ARP and other non-IP packets
         };
 
-        let mut pkt = Packet::new(src_ip, dst_ip, protocol);
+        let mut pkt = Packet::new(packet_id, src_ip, dst_ip, protocol, interface);
         pkt.raw_len = data.len() as u32;
 
         // Extract transport layer info
@@ -287,9 +309,9 @@ impl Packet {
         Some(pkt)
     }
 
-    /// Create a new packet with minimal info (backward compatible)
-    pub fn new(src_ip: IpAddr, dst_ip: IpAddr, protocol: IpProtocol) -> Self {
-        use std::net::{Ipv4Addr, Ipv6Addr};
+    /// Create a new packet with minimal info for testing
+    pub fn new(packet_id: u64, src_ip: IpAddr, dst_ip: IpAddr, protocol: IpProtocol, interface: &str) -> Self {
+        use std::net::Ipv4Addr;
 
         let layer3 = match (src_ip, dst_ip) {
             (IpAddr::V4(src), IpAddr::V4(dst)) => Layer3::Ipv4(Ipv4Info {
@@ -326,13 +348,13 @@ impl Packet {
 
         Self {
             timestamp: Instant::now(),
-            id: 0,
+            id: packet_id,
             ethernet: None,
             layer3,
             layer4,
             flow_id: None,
             direction: Direction::Unknown,
-            interface: String::new(),
+            interface: interface.to_string(),
             raw_len: 0,
         }
     }
@@ -586,10 +608,11 @@ mod tests {
 
     #[test]
     fn test_packet_new() {
-        let pkt = Packet::new(
+        let pkt = Packet::new(0,
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
             IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2)),
             IpProtocol::Tcp,
+            "lo"
         );
         assert_eq!(pkt.protocol(), IpProtocol::Tcp);
         assert_eq!(pkt.ttl(), 64);
@@ -628,10 +651,11 @@ mod tests {
 
     #[test]
     fn test_backward_compat_accessors() {
-        let pkt = Packet::new(
+        let pkt = Packet::new(0,
             IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
             IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)),
             IpProtocol::Udp,
+            "lo"
         );
 
         // These should all work even though internally using layer structs

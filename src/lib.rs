@@ -1271,23 +1271,52 @@ async fn start_packet_engine(
 
     info!("Packet engine started, listening for packets...");
 
+    // Create flow buffer for stream reassembly
+    let mut flow_buffer = engine::FlowBuffer::new(engine::FlowBufferConfig::default());
+
+    // Create channel for sending batches to workers
+    let (worker_tx, _worker_rx) = crossbeam_channel::bounded::<engine::FlowBatch>(1000);
+
     let mut packet_count: u64 = 0;
+    let mut batch_count: u64 = 0;
+    let mut last_timeout_check = std::time::Instant::now();
 
     // Main capture loop
     loop {
-        match capture.next_packet() {
-            Ok(Some(_packet)) => {
-                packet_count += 1;
+        packet_count += 1;
+        match capture.next_packet(packet_count) {
+            Ok(Some(packet)) => {
+                ;
 
-                // Log packet count periodically
-                if packet_count % 10000 == 0 {
-                    info!("Packets captured: {}", packet_count);
+                // Push packet to flow buffer, get any ready batches
+                let batches = flow_buffer.push( packet);
+                for batch in batches {
+                    batch_count += 1;
+                    if let Err(e) = worker_tx.send(batch) {
+                        warn!("Failed to send batch to worker: {}", e);
+                    }
                 }
 
-                // TODO: Send packets to WorkerPool for processing
+                // Log stats periodically
+                if packet_count % 10000 == 0 {
+                    info!(
+                        "Packets: {} | Batches: {} | Active flows: {}",
+                        packet_count, batch_count, flow_buffer.flow_count()
+                    );
+                }
             }
             Ok(None) => {
-                // No packet available (timeout)
+                // No packet available - check for timed-out flows
+                if last_timeout_check.elapsed() > std::time::Duration::from_millis(10) {
+                    let batches = flow_buffer.check_timeouts();
+                    for batch in batches {
+                        batch_count += 1;
+                        if let Err(e) = worker_tx.send(batch) {
+                            warn!("Failed to send batch to worker: {}", e);
+                        }
+                    }
+                    last_timeout_check = std::time::Instant::now();
+                }
                 tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
             }
             Err(e) => {

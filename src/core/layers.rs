@@ -91,6 +91,86 @@ impl Layer3 {
             _ => None,
         }
     }
+
+    /// Parse IP header from raw bytes (IPv4 or IPv6)
+    ///
+    /// Detects IP version from first nibble and parses accordingly.
+    /// Returns (Layer3, remaining payload bytes) or None if parsing fails.
+    pub fn from_bytes(data: &[u8]) -> Option<(Self, &[u8])> {
+        if data.is_empty() {
+            return None;
+        }
+
+        // Check IP version from first nibble
+        let version = data[0] >> 4;
+
+        match version {
+            4 => Self::parse_ipv4(data),
+            6 => Self::parse_ipv6(data),
+            _ => None,
+        }
+    }
+
+    /// Parse IPv4 header
+    fn parse_ipv4(data: &[u8]) -> Option<(Self, &[u8])> {
+        // Minimum IPv4 header is 20 bytes
+        if data.len() < 20 {
+            return None;
+        }
+
+        let ihl = (data[0] & 0x0F) as usize;
+        let header_len = ihl * 4;
+
+        if data.len() < header_len {
+            return None;
+        }
+
+        let total_length = u16::from_be_bytes([data[2], data[3]]);
+        let flags_frag = u16::from_be_bytes([data[6], data[7]]);
+
+        let info = Ipv4Info {
+            src_addr: Ipv4Addr::new(data[12], data[13], data[14], data[15]),
+            dst_addr: Ipv4Addr::new(data[16], data[17], data[18], data[19]),
+            protocol: data[9],
+            ttl: data[8],
+            identification: u16::from_be_bytes([data[4], data[5]]),
+            flags: ((flags_frag >> 13) & 0x07) as u8,
+            fragment_offset: flags_frag & 0x1FFF,
+            header_length: ihl as u8,
+            total_length,
+            dscp: (data[1] >> 2) & 0x3F,
+            ecn: data[1] & 0x03,
+        };
+
+        let payload = &data[header_len..];
+        Some((Layer3::Ipv4(info), payload))
+    }
+
+    /// Parse IPv6 header
+    fn parse_ipv6(data: &[u8]) -> Option<(Self, &[u8])> {
+        // IPv6 header is fixed 40 bytes
+        if data.len() < 40 {
+            return None;
+        }
+
+        let mut src_addr = [0u8; 16];
+        let mut dst_addr = [0u8; 16];
+        src_addr.copy_from_slice(&data[8..24]);
+        dst_addr.copy_from_slice(&data[24..40]);
+
+        let info = Ipv6Info {
+            src_addr: Ipv6Addr::from(src_addr),
+            dst_addr: Ipv6Addr::from(dst_addr),
+            next_header: data[6],
+            hop_limit: data[7],
+            traffic_class: ((data[0] & 0x0F) << 4) | ((data[1] & 0xF0) >> 4),
+            flow_label: u32::from_be_bytes([0, data[1] & 0x0F, data[2], data[3]]),
+            payload_length: u16::from_be_bytes([data[4], data[5]]),
+        };
+
+        let payload = &data[40..];
+        Some((Layer3::Ipv6(info), payload))
+    }
 }
 
 /// IPv4 header information
@@ -303,6 +383,108 @@ impl Layer4 {
             Layer4::Icmpv6(_) => 58,
             Layer4::Unknown { protocol } => *protocol,
         }
+    }
+
+    /// Parse transport layer from raw bytes
+    ///
+    /// protocol: IP protocol number (6=TCP, 17=UDP, 1=ICMP, 58=ICMPv6)
+    pub fn from_bytes(protocol: u8, data: &[u8]) -> Option<Self> {
+        match protocol {
+            6 => Self::parse_tcp(data),
+            17 => Self::parse_udp(data),
+            1 => Self::parse_icmp(data),
+            58 => Self::parse_icmpv6(data),
+            other => Some(Layer4::Unknown { protocol: other }),
+        }
+    }
+
+    /// Parse TCP header
+    fn parse_tcp(data: &[u8]) -> Option<Self> {
+        // Minimum TCP header is 20 bytes
+        if data.len() < 20 {
+            return None;
+        }
+
+        let data_offset = ((data[12] >> 4) & 0x0F) as usize;
+        let header_len = data_offset * 4;
+
+        if data.len() < header_len {
+            return None;
+        }
+
+        let flags_byte = data[13];
+
+        let info = TcpInfo {
+            src_port: u16::from_be_bytes([data[0], data[1]]),
+            dst_port: u16::from_be_bytes([data[2], data[3]]),
+            seq: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+            ack: u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
+            flags: TcpFlags {
+                fin: flags_byte & 0x01 != 0,
+                syn: flags_byte & 0x02 != 0,
+                rst: flags_byte & 0x04 != 0,
+                psh: flags_byte & 0x08 != 0,
+                ack: flags_byte & 0x10 != 0,
+                urg: flags_byte & 0x20 != 0,
+                ece: flags_byte & 0x40 != 0,
+                cwr: flags_byte & 0x80 != 0,
+            },
+            window: u16::from_be_bytes([data[14], data[15]]),
+            urgent_ptr: u16::from_be_bytes([data[18], data[19]]),
+            data_offset: data_offset as u8,
+            payload: data[header_len..].to_vec(),
+        };
+
+        Some(Layer4::Tcp(info))
+    }
+
+    /// Parse UDP header
+    fn parse_udp(data: &[u8]) -> Option<Self> {
+        // UDP header is 8 bytes
+        if data.len() < 8 {
+            return None;
+        }
+
+        let info = UdpInfo {
+            src_port: u16::from_be_bytes([data[0], data[1]]),
+            dst_port: u16::from_be_bytes([data[2], data[3]]),
+            length: u16::from_be_bytes([data[4], data[5]]),
+            payload: data[8..].to_vec(),
+        };
+
+        Some(Layer4::Udp(info))
+    }
+
+    /// Parse ICMP header
+    fn parse_icmp(data: &[u8]) -> Option<Self> {
+        // Minimum ICMP header is 8 bytes
+        if data.len() < 4 {
+            return None;
+        }
+
+        let info = IcmpInfo {
+            icmp_type: data[0],
+            code: data[1],
+            payload: if data.len() > 8 { data[8..].to_vec() } else { Vec::new() },
+        };
+
+        Some(Layer4::Icmp(info))
+    }
+
+    /// Parse ICMPv6 header
+    fn parse_icmpv6(data: &[u8]) -> Option<Self> {
+        // Minimum ICMPv6 header is 4 bytes
+        if data.len() < 4 {
+            return None;
+        }
+
+        let info = Icmpv6Info {
+            icmp_type: data[0],
+            code: data[1],
+            payload: if data.len() > 8 { data[8..].to_vec() } else { Vec::new() },
+        };
+
+        Some(Layer4::Icmpv6(info))
     }
 }
 
