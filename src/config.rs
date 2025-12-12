@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::ebpf::EbpfConfig;
+use crate::scan_detect::ScanDetectConfig;
 use crate::shared_whitelist::SharedWhitelistConfig;
 use crate::siem::SiemConfig;
 use crate::zones::ZoneConfig;
@@ -48,6 +49,10 @@ pub struct Config {
 
     #[serde(default)]
     pub port_scan: PortScanConfig,
+
+    /// Scan detection engine configuration
+    #[serde(default)]
+    pub scan_detect: ScanDetectConfig,
 
     #[serde(default)]
     pub dpi: DpiConfig,
@@ -140,6 +145,7 @@ impl Default for Config {
             whitelist: SharedWhitelistConfig::default(),
             ebpf: EbpfConfig::default(),
             port_scan: PortScanConfig::default(),
+            scan_detect: ScanDetectConfig::default(),
             dpi: DpiConfig::default(),
             tls_proxy: TlsProxyConfig::default(),
             port_rules: PortRulesConfig::default(),

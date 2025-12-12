@@ -2,6 +2,11 @@
 //!
 //! Manages multiple worker threads for parallel packet processing.
 //!
+//! ## Architecture
+//!
+//! - `WorkerPool`: Manages one or more `WorkerThread` instances, distributes packets
+//! - `WorkerThread`: Single-threaded packet processor with all detection engines
+//!
 //! ## Pipeline Stage Order (v3 spec)
 //!
 //! 1. Flow Tracking - connection state tracking
@@ -42,7 +47,7 @@ use crate::wasm::{WasmEngine, WasmConfig, StageContext, ScanInfo, IntelInfo};
 
 use super::pipeline::{PipelineConfig, PipelineStage, PipelineMetrics};
 #[cfg(feature = "profiling")]
-use super::profiling::PipelineProfiler;
+use super::profiling::{PipelineProfiler, PipelineProfileSnapshot};
 
 /// Worker pool configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +61,9 @@ pub struct WorkerConfig {
     /// Rules directory for signature matching
     #[serde(default)]
     pub rules_dir: Option<std::path::PathBuf>,
+    /// Scan detection configuration
+    #[serde(default)]
+    pub scan_detect: ScanDetectConfig,
 }
 
 impl Default for WorkerConfig {
@@ -65,6 +73,7 @@ impl Default for WorkerConfig {
             queue_depth: 1000,
             cpu_affinity: false,
             rules_dir: Some("/var/lib/crmonban/data/rules".into()),
+            scan_detect: ScanDetectConfig::default(),
         }
     }
 }
@@ -80,8 +89,11 @@ impl WorkerConfig {
     }
 }
 
-/// Worker pool for parallel packet processing
-pub struct WorkerPool {
+/// Single worker thread that processes packets through the detection pipeline
+///
+/// Each WorkerThread has its own instances of all detection engines.
+/// For parallel processing, create multiple WorkerThread instances via WorkerPool.
+pub struct WorkerThread {
     /// Configuration
     config: WorkerConfig,
     /// Packets processed counter
@@ -140,9 +152,12 @@ pub struct WorkerPool {
     profiler: PipelineProfiler,
 }
 
-impl WorkerPool {
-    /// Create a new worker pool
+impl WorkerThread {
+    /// Create a new worker thread
     pub fn new(config: WorkerConfig) -> Self {
+        // Clone scan_detect config before moving config
+        let scan_detect_config = config.scan_detect.clone();
+
         // Stage 4: Load signature engine if rules_dir is configured
         let signature_engine = config.rules_dir.as_ref()
             .and_then(|dir| SignatureEngine::load_from_dir(dir));
@@ -159,8 +174,8 @@ impl WorkerPool {
             flow_tracker: FlowTracker::new(FlowConfig::default()),
             current_flow: None,
 
-            // Stage 2: Port Scan Detection
-            scan_detect_engine: ScanDetectEngine::new(ScanDetectConfig::default()),
+            // Stage 2: Port Scan Detection (uses config from WorkerConfig)
+            scan_detect_engine: ScanDetectEngine::new(scan_detect_config),
 
             // Stage 2b: DoS/Flood Detection
             dos_detector: DoSDetector::new(),
@@ -761,6 +776,116 @@ impl WorkerPool {
     }
 }
 
+impl Default for WorkerThread {
+    fn default() -> Self {
+        Self::new(WorkerConfig::default())
+    }
+}
+
+/// Worker pool that manages multiple WorkerThread instances for parallel processing
+///
+/// Currently uses a single worker, but designed for future expansion to multiple
+/// workers with flow-based packet distribution.
+pub struct WorkerPool {
+    /// Worker threads
+    workers: Vec<WorkerThread>,
+    /// Configuration
+    config: WorkerConfig,
+    /// Packets processed counter (shared across all workers)
+    packets_processed: Arc<AtomicU64>,
+    /// Events generated counter (shared across all workers)
+    events_generated: Arc<AtomicU64>,
+}
+
+impl WorkerPool {
+    /// Create a new worker pool
+    ///
+    /// Currently creates a single WorkerThread. Future versions will create
+    /// multiple workers based on config.num_workers for parallel processing.
+    pub fn new(config: WorkerConfig) -> Self {
+        // For now, create single worker (future: config.actual_workers())
+        let workers = vec![WorkerThread::new(config.clone())];
+
+        Self {
+            workers,
+            config,
+            packets_processed: Arc::new(AtomicU64::new(0)),
+            events_generated: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Process a packet through the detection pipeline
+    ///
+    /// Currently routes all packets to worker 0. Future versions will
+    /// distribute packets across workers based on flow hash for parallelism.
+    pub fn process(&mut self, packet: Packet, config: &PipelineConfig) -> Vec<DetectionEvent> {
+        // Future: distribute by flow hash to maintain flow affinity
+        // let worker_idx = packet.flow_hash() % self.workers.len();
+        let worker_idx = 0;
+
+        let events = self.workers[worker_idx].process(packet, config);
+
+        self.packets_processed.fetch_add(1, Ordering::Relaxed);
+        self.events_generated.fetch_add(events.len() as u64, Ordering::Relaxed);
+
+        events
+    }
+
+    /// Get number of workers in the pool
+    pub fn num_workers(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// Get number of workers (alias for num_workers for compatibility)
+    pub fn worker_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    /// Get total packets processed across all workers
+    pub fn packets_processed(&self) -> u64 {
+        self.packets_processed.load(Ordering::Relaxed)
+    }
+
+    /// Get total events generated across all workers
+    pub fn events_generated(&self) -> u64 {
+        self.events_generated.load(Ordering::Relaxed)
+    }
+
+    /// Get worker utilization (average across all workers)
+    pub fn utilization(&self) -> f64 {
+        if self.workers.is_empty() {
+            return 0.0;
+        }
+        let total: f64 = self.workers.iter().map(|w| w.utilization()).sum();
+        total / self.workers.len() as f64
+    }
+
+    /// Get per-stage metrics from first worker (for compatibility)
+    pub fn stage_metrics(&self) -> &PipelineMetrics {
+        // Return metrics from first worker
+        // Future: aggregate across all workers
+        self.workers[0].stage_metrics()
+    }
+
+    /// Get profiling snapshot (from first worker)
+    #[cfg(feature = "profiling")]
+    pub fn profile_snapshot(&self) -> PipelineProfileSnapshot {
+        self.workers[0].profile_snapshot()
+    }
+
+    /// Get mutable reference to first worker (for testing)
+    #[cfg(test)]
+    pub fn worker_mut(&mut self) -> &mut WorkerThread {
+        &mut self.workers[0]
+    }
+
+    /// Get reference to first worker (for testing)
+    #[cfg(test)]
+    pub fn worker(&self) -> &WorkerThread {
+        &self.workers[0]
+    }
+}
+
 impl Default for WorkerPool {
     fn default() -> Self {
         Self::new(WorkerConfig::default())
@@ -932,7 +1057,7 @@ mod tests {
         }
 
         // Flow should be created (check internal state)
-        assert!(pool.current_flow.is_some(), "Flow should be created after SYN packet");
+        assert!(pool.worker().current_flow.is_some(), "Flow should be created after SYN packet");
     }
 
     /// Test 2: Scan Detection stage
@@ -1056,7 +1181,7 @@ mod tests {
         {
             // Access internal cache to add test IOC
             let ioc = Ioc::ip(malicious_ip, "test_feed", IntelThreatCategory::C2);
-            pool.intel_engine.add_ioc(ioc);
+            pool.worker_mut().intel_engine.add_ioc(ioc);
         }
 
         // Send packet FROM the malicious IP
@@ -1203,7 +1328,7 @@ mod tests {
         let malicious_ip: IpAddr = "203.0.113.1".parse().unwrap();
         {
             let ioc = Ioc::ip(malicious_ip, "test_feed", IntelThreatCategory::Botnet);
-            pool.intel_engine.add_ioc(ioc);
+            pool.worker_mut().intel_engine.add_ioc(ioc);
         }
 
         // Test 1: Normal traffic (should pass through without alerts)

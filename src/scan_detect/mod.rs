@@ -26,6 +26,6 @@ pub mod rules;
 // Re-exports
 pub use behavior::{SourceBehavior, ConnectionState, Classification};
 pub use config::{ScanDetectConfig, ScoreThresholds, RuleWeights};
-pub use engine::{ScanDetectEngine, ScanAlert, AlertType, NetworkHealth};
+pub use engine::{ScanDetectEngine, ScanAlert, AlertType, NetworkHealth, PendingAlert};
 pub use rules::{DetectionRule, RuleResult, RuleCategory, EvaluationContext};
 pub use rules::{GeoInfo, ReputationData, NetworkHealthContext};

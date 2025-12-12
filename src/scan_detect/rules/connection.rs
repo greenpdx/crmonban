@@ -7,6 +7,11 @@ use super::{DetectionRule, EvaluationContext, RuleCategory, RuleResult};
 
 /// R1: Half-open SYN to different port
 /// Triggered when a SYN is sent but handshake doesn't complete
+///
+/// Improved logic to reduce false positives:
+/// - Only triggers for NEW ports (not reconnections to same port)
+/// - Requires minimum half-open count (3) AND unique ports (5)
+/// - Considers completion ratio (legitimate traffic completes most connections)
 pub struct HalfOpenSynRule;
 
 impl DetectionRule for HalfOpenSynRule {
@@ -27,19 +32,49 @@ impl DetectionRule for HalfOpenSynRule {
             return None;
         }
 
-        // Count existing half-open connections
-        let half_open = ctx.behavior.half_open_count();
-
-        if half_open >= 1 {
-            let weight = ctx.config.weights.half_open_syn;
-            Some(RuleResult::new(
-                self.id(),
-                weight,
-                &format!("SYN to port {} ({} half-open)", flow_key.dst_port, half_open + 1),
-            ).with_tag("half-open"))
-        } else {
-            None
+        // Skip if we've already seen this port (reconnection is normal)
+        if ctx.behavior.touched_ports.contains(&flow_key.dst_port) {
+            return None;
         }
+
+        // Count existing half-open connections, RSTs, and unique ports
+        let half_open = ctx.behavior.half_open_count();
+        let rst_count = ctx.behavior.rst_received_count();
+        let unique_ports = ctx.behavior.touched_ports.len();
+        let completed = ctx.behavior.completed_count();
+
+        // Require meaningful scan behavior:
+        // - At least 5 unique ports touched
+        // - Either: 3+ half-open OR 5+ RST responses (closed ports probed)
+        if unique_ports < 5 {
+            return None;
+        }
+
+        let suspicious_probes = half_open + rst_count;
+        if suspicious_probes < 3 {
+            return None;
+        }
+
+        // Calculate completion ratio (what fraction complete vs probed)
+        let total_probes = half_open + rst_count + completed;
+        let completion_ratio = if total_probes > 0 {
+            completed as f32 / total_probes as f32
+        } else {
+            1.0
+        };
+
+        // If most connections complete (>70%), probably legitimate
+        if completion_ratio > 0.7 {
+            return None;
+        }
+
+        let weight = ctx.config.weights.half_open_syn;
+        Some(RuleResult::new(
+            self.id(),
+            weight,
+            &format!("SYN to new port {} ({} half-open, {} RST, {} unique, {:.0}% complete)",
+                flow_key.dst_port, half_open, rst_count, unique_ports, completion_ratio * 100.0),
+        ).with_tag("half-open"))
     }
 }
 

@@ -149,10 +149,11 @@ pub struct ScoreThresholds {
     pub confirmed_scan: f32,
 }
 
-fn default_suspicious() -> f32 { 3.0 }
-fn default_probable_scan() -> f32 { 5.0 }
-fn default_likely_attack() -> f32 { 8.0 }
-fn default_confirmed_scan() -> f32 { 12.0 }
+// Thresholds tuned for once-only rules (max single-fire score ~25-30)
+fn default_suspicious() -> f32 { 5.0 }
+fn default_probable_scan() -> f32 { 10.0 }
+fn default_likely_attack() -> f32 { 15.0 }
+fn default_confirmed_scan() -> f32 { 20.0 }
 
 impl Default for ScoreThresholds {
     fn default() -> Self {
@@ -296,11 +297,11 @@ pub struct RuleWeights {
     pub partner_vendor: f32,
 }
 
-// Default weight functions
-fn default_half_open_syn() -> f32 { 1.0 }
-fn default_targeted_port_bonus() -> f32 { 0.5 }
-fn default_sequential_scan() -> f32 { 2.0 }
-fn default_rapid_rate() -> f32 { 3.0 }
+// Default weight functions (increased for once-only rules)
+fn default_half_open_syn() -> f32 { 5.0 }      // R1: fires once when scan pattern detected
+fn default_targeted_port_bonus() -> f32 { 2.0 } // R2: fires once for targeted port
+fn default_sequential_scan() -> f32 { 8.0 }    // R3: fires once when sequential pattern found
+fn default_rapid_rate() -> f32 { 6.0 }         // R4: fires once when rate crosses threshold
 fn default_closed_port_rst() -> f32 { 0.5 }
 fn default_scanner_fingerprint() -> f32 { 5.0 }
 fn default_unusual_ttl() -> f32 { 1.0 }
@@ -405,8 +406,8 @@ mod tests {
     fn test_default_config() {
         let config = ScanDetectConfig::default();
         assert!(config.enabled);
-        assert_eq!(config.thresholds.suspicious, 3.0);
-        assert_eq!(config.thresholds.confirmed_scan, 12.0);
+        assert_eq!(config.thresholds.suspicious, 5.0);
+        assert_eq!(config.thresholds.confirmed_scan, 20.0);
         assert_eq!(config.window_secs, 600);
     }
 

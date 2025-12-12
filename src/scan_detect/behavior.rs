@@ -208,6 +208,12 @@ pub struct SourceBehavior {
 
     /// Stealth scan type counts (null, fin, xmas, maimon, ack_only)
     pub stealth_scan_counts: HashMap<String, u32>,
+
+    /// Rules that have already triggered (to prevent repeated scoring)
+    pub triggered_rules: HashSet<String>,
+
+    /// Count of RST responses received (indicates closed ports probed)
+    pub rst_count: usize,
 }
 
 /// Result of active verification (nmap probe)
@@ -244,7 +250,19 @@ impl SourceBehavior {
             verification_result: None,
             tags: HashSet::new(),
             stealth_scan_counts: HashMap::new(),
+            triggered_rules: HashSet::new(),
+            rst_count: 0,
         }
+    }
+
+    /// Check if a rule has already triggered (to avoid repeated scoring)
+    pub fn has_rule_triggered(&self, rule_id: &str) -> bool {
+        self.triggered_rules.contains(rule_id)
+    }
+
+    /// Mark a rule as triggered
+    pub fn mark_rule_triggered(&mut self, rule_id: &str) {
+        self.triggered_rules.insert(rule_id.to_string());
     }
 
     /// Record a stealth scan packet type
@@ -254,9 +272,13 @@ impl SourceBehavior {
 
     /// Record a SYN packet with full flow key
     pub fn record_syn(&mut self, flow_key: FlowKey) {
-        let now = Instant::now();
-        self.last_seen = now;
-        self.syn_timestamps.push_back(now);
+        self.record_syn_at(flow_key, Instant::now());
+    }
+
+    /// Record a SYN packet with explicit timestamp (for testing)
+    pub fn record_syn_at(&mut self, flow_key: FlowKey, timestamp: Instant) {
+        self.last_seen = timestamp;
+        self.syn_timestamps.push_back(timestamp);
         self.port_sequence.push(flow_key.dst_port);
         self.touched_ports.insert(flow_key.dst_port);
 
@@ -288,12 +310,23 @@ impl SourceBehavior {
         }
     }
 
-    /// Record RST received (closed port or connection reset)
+    /// Record RST packet seen on our flow (updates connection state)
     pub fn record_rst(&mut self, flow_key: FlowKey) {
         self.last_seen = Instant::now();
         if let Some(conn) = self.connections.get_mut(&flow_key) {
             conn.state = ConnectionState::Reset;
         }
+        // Note: don't increment rst_count here - that's for received RSTs
+    }
+
+    /// Record RST received back (we sent SYN, got RST - indicates closed port probed)
+    pub fn record_rst_received(&mut self) {
+        self.rst_count += 1;
+    }
+
+    /// Get count of RST responses received (indicates closed ports probed)
+    pub fn rst_received_count(&self) -> usize {
+        self.rst_count
     }
 
     /// Check if a flow exists (for rule lookups)
@@ -462,6 +495,9 @@ impl SourceBehavior {
         self.syn_timestamps.clear();
         self.port_sequence.clear();
         self.tags.clear();
+        self.triggered_rules.clear();
+        self.stealth_scan_counts.clear();
+        self.rst_count = 0;
         // Keep verification state
     }
 }

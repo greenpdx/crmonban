@@ -386,3 +386,33 @@ ban_duration = 3600
 
 # Auto-ban on signature match
 auto_ban = true
+
+# Pipeline stage configuration
+[pipeline]
+enable_flows = true
+enable_scan_detect = true
+enable_dos = false
+enable_brute_force = false
+enable_signatures = false
+enable_intel = false
+enable_protocols = false
+enable_wasm = false
+enable_ml = false
+enable_correlation = false
+
+# Scan Detection Configuration
+[scan_detect]
+enabled = true
+window_secs = 600
+
+[scan_detect.thresholds]
+suspicious = 5.0
+probable_scan = 10.0
+likely_attack = 15.0
+confirmed_scan = 20.0
+
+[scan_detect.weights]
+half_open_syn = 5.0
+targeted_port_bonus = 2.0
+sequential_scan = 8.0
+rapid_rate = 6.0
