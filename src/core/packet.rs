@@ -4,7 +4,7 @@
 //! Uses strongly-typed layer structs from `layers.rs`.
 
 use std::net::IpAddr;
-use std::time::Instant;
+use chrono::{DateTime, Utc};
 use etherparse::SlicedPacket;
 use serde::{Deserialize, Serialize};
 
@@ -134,6 +134,21 @@ impl std::fmt::Display for TcpFlags {
     }
 }
 
+/// TLS protocol information
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TlsInfo {
+    /// Server Name Indication (SNI)
+    pub sni: Option<String>,
+    /// JA3 fingerprint hash
+    pub ja3_hash: Option<String>,
+    /// TLS version string (e.g., "TLS 1.2", "TLS 1.3")
+    pub version: Option<String>,
+    /// Is this a TLS handshake?
+    pub is_handshake: bool,
+    /// Handshake type (1=ClientHello, 2=ServerHello, etc.)
+    pub handshake_type: Option<u8>,
+}
+
 /// Packet direction relative to connection initiator
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Direction {
@@ -161,10 +176,12 @@ impl Default for Direction {
 /// Provides backward-compatible accessor methods for common fields.
 #[derive(Debug, Clone)]
 pub struct Packet {
-    /// Packet arrival timestamp
-    pub timestamp: Instant,
+    /// Packet arrival timestamp (absolute)
+    pub timestamp: DateTime<Utc>,
     /// Unique packet ID
     pub id: u64,
+    /// IP Time-To-Live / Hop Limit
+    pub ttl: u8,
 
     // Layer 2 (optional)
     /// Ethernet frame info
@@ -177,6 +194,10 @@ pub struct Packet {
     // Layer 4
     /// Transport layer (TCP, UDP, ICMP, etc.)
     pub layer4: Layer4,
+
+    // Layer 7 (optional)
+    /// TLS info if detected
+    pub tls: Option<TlsInfo>,
 
     // Metadata
     /// Associated flow ID
@@ -192,12 +213,15 @@ pub struct Packet {
 impl Packet {
     /// Create a new packet from layer info
     pub fn from_layers(packet_id: u64, layer3: Layer3, layer4: Layer4, interface: String) -> Self {
+        let ttl = layer3.ttl();
         Self {
-            timestamp: Instant::now(),
+            timestamp: Utc::now(),
             id: packet_id,
+            ttl,
             ethernet: None,
             layer3,
             layer4,
+            tls: None,
             flow_id: None,
             direction: Direction::Unknown,
             interface,
@@ -212,14 +236,17 @@ impl Packet {
     pub fn from_ip_bytes(packet_id: u64, data: &[u8], interface: &str) -> Option<Self> {
         let (layer3, transport_data) = Layer3::from_bytes(data)?;
         let protocol = layer3.protocol();
+        let ttl = layer3.ttl();
         let layer4 = Layer4::from_bytes(protocol, transport_data)?;
 
         Some(Self {
-            timestamp: Instant::now(),
+            timestamp: Utc::now(),
             id: packet_id,
+            ttl,
             ethernet: None,
             layer3,
             layer4,
+            tls: None,
             flow_id: None,
             direction: Direction::Unknown,
             interface: interface.to_string(),
@@ -347,11 +374,13 @@ impl Packet {
         };
 
         Self {
-            timestamp: Instant::now(),
+            timestamp: Utc::now(),
             id: packet_id,
+            ttl: 64,
             ethernet: None,
             layer3,
             layer4,
+            tls: None,
             flow_id: None,
             direction: Direction::Unknown,
             interface: interface.to_string(),
@@ -380,7 +409,7 @@ impl Packet {
 
     /// Get TTL/hop limit
     pub fn ttl(&self) -> u8 {
-        self.layer3.ttl()
+        self.ttl
     }
 
     /// Get IP flags (IPv4 only, returns 0 for IPv6)
