@@ -45,7 +45,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::core::analysis::PacketAnalysis;
 use crate::core::event::{DetectionEvent, DetectionType, Severity};
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 pub use rules::{CorrelationRule, RuleMatch, RuleType};
 pub use chains::{AttackChain, AttackStage, ChainDetector, MitreTactic};
@@ -168,7 +170,7 @@ impl CorrelationEngine {
 
     /// Process a new detection event
     #[inline]
-    pub fn process(&mut self, event: DetectionEvent) -> CorrelationResult {
+    pub fn process_event(&mut self, event: DetectionEvent) -> CorrelationResult {
         self.stats.events_processed += 1;
 
         // 1. Check for duplicates
@@ -351,6 +353,7 @@ impl CorrelationEngine {
         // Use discriminant name matching without format! allocation for common types
         let type_name: &str = match event_type {
             DetectionType::SignatureMatch => "SignatureMatch",
+            DetectionType::Signature => "Signature",
             DetectionType::ProtocolAnomaly => "ProtocolAnomaly",
             DetectionType::MalformedPacket => "MalformedPacket",
             DetectionType::PortScan => "PortScan",
@@ -361,22 +364,33 @@ impl CorrelationEngine {
             DetectionType::Beaconing => "Beaconing",
             DetectionType::LateralMovement => "LateralMovement",
             DetectionType::ThreatIntelMatch => "ThreatIntelMatch",
+            DetectionType::ThreatIntel => "ThreatIntel",
             DetectionType::MaliciousIp => "MaliciousIp",
             DetectionType::MaliciousDomain => "MaliciousDomain",
             DetectionType::MaliciousUrl => "MaliciousUrl",
             DetectionType::MaliciousHash => "MaliciousHash",
             DetectionType::MaliciousJa3 => "MaliciousJa3",
+            DetectionType::C2 => "C2",
+            DetectionType::Phishing => "Phishing",
+            DetectionType::Spam => "Spam",
+            DetectionType::TorTraffic => "TorTraffic",
+            DetectionType::VpnTraffic => "VpnTraffic",
+            DetectionType::ProxyTraffic => "ProxyTraffic",
             DetectionType::AnomalyDetection => "AnomalyDetection",
             DetectionType::BehaviorAnomaly => "BehaviorAnomaly",
             DetectionType::TrafficAnomaly => "TrafficAnomaly",
             DetectionType::PolicyViolation => "PolicyViolation",
             DetectionType::ExploitAttempt => "ExploitAttempt",
+            DetectionType::Intrusion => "Intrusion",
+            DetectionType::WebAttack => "WebAttack",
             DetectionType::Shellcode => "Shellcode",
             DetectionType::Overflow => "Overflow",
+            DetectionType::Malware => "Malware",
             DetectionType::MalwareDownload => "MalwareDownload",
             DetectionType::MalwareCallback => "MalwareCallback",
             DetectionType::CnC => "CnC",
             DetectionType::UnauthorizedAccess => "UnauthorizedAccess",
+            DetectionType::CorrelatedThreat => "CorrelatedThreat",
             DetectionType::Custom(_) => "Custom",
         };
         type_strs.iter().any(|t| type_name.contains(t.as_str()))
@@ -604,6 +618,60 @@ impl Default for CorrelationEngine {
     }
 }
 
+impl StageProcessor for CorrelationEngine {
+    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        // Correlation processes the events already collected in PacketAnalysis
+        // This is the final stage - it correlates events from all previous stages
+
+        // Take events out to process them
+        let events = analysis.take_events();
+
+        let mut final_events = Vec::new();
+        for event in events {
+            match self.process_event(event.clone()) {
+                CorrelationResult::NewIncident(incident) => {
+                    // Create a high-severity event for new incident
+                    let incident_event = DetectionEvent::new(
+                        DetectionType::CorrelatedThreat,
+                        incident.severity,
+                        incident.events.first().map(|e| e.src_ip).unwrap_or(event.src_ip),
+                        incident.events.first().map(|e| e.dst_ip).unwrap_or(event.dst_ip),
+                        format!(
+                            "New incident: {} - {} events, {} hosts",
+                            incident.name,
+                            incident.events.len(),
+                            incident.affected_hosts.len(),
+                        ),
+                    )
+                    .with_detector("correlation");
+
+                    final_events.push(incident_event);
+                }
+                CorrelationResult::UpdatedIncident(_incident) => {
+                    // Don't add extra events for updates - original event is enough
+                    final_events.push(event);
+                }
+                CorrelationResult::Suppressed => {
+                    // Event was duplicate/noise - don't add
+                }
+                CorrelationResult::Standalone(e) => {
+                    // No correlation found - pass through
+                    final_events.push(e);
+                }
+            }
+        }
+
+        // Re-add the final events
+        analysis.add_events(final_events);
+
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::Correlation
+    }
+}
+
 /// Default correlation rules
 fn default_correlation_rules() -> Vec<CorrelationRule> {
     vec![
@@ -703,11 +771,11 @@ mod tests {
         let event = make_event("192.168.1.1", "10.0.0.1", DetectionType::PortScan);
 
         // First event should not be duplicate
-        let result = engine.process(event.clone());
+        let result = engine.process_event(event.clone());
         assert!(!matches!(result, CorrelationResult::Suppressed));
 
         // Same event should be duplicate
-        let result = engine.process(event);
+        let result = engine.process_event(event);
         assert!(matches!(result, CorrelationResult::Suppressed));
     }
 
@@ -718,7 +786,7 @@ mod tests {
         // Process multiple events from same source to trigger rule
         for _ in 0..10 {
             let event = make_event("192.168.1.1", "10.0.0.1", DetectionType::PortScan);
-            engine.process(event);
+            engine.process_event(event);
         }
 
         // Check that an incident was created

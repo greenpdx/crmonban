@@ -55,6 +55,7 @@ impl From<u8> for Severity {
 pub enum DetectionType {
     // Signature-based
     SignatureMatch,
+    Signature,
 
     // Protocol anomalies
     ProtocolAnomaly,
@@ -71,11 +72,18 @@ pub enum DetectionType {
 
     // Threat intelligence
     ThreatIntelMatch,
+    ThreatIntel,
     MaliciousIp,
     MaliciousDomain,
     MaliciousUrl,
     MaliciousHash,
     MaliciousJa3,
+    C2,
+    Phishing,
+    Spam,
+    TorTraffic,
+    VpnTraffic,
+    ProxyTraffic,
 
     // ML/Anomaly
     AnomalyDetection,
@@ -88,13 +96,19 @@ pub enum DetectionType {
 
     // Exploits
     ExploitAttempt,
+    Intrusion,
+    WebAttack,
     Shellcode,
     Overflow,
 
     // Malware
+    Malware,
     MalwareDownload,
     MalwareCallback,
     CnC,
+
+    // Correlation
+    CorrelatedThreat,
 
     // Other
     Custom(String),
@@ -110,6 +124,7 @@ impl std::fmt::Display for DetectionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DetectionType::SignatureMatch => write!(f, "signature_match"),
+            DetectionType::Signature => write!(f, "signature"),
             DetectionType::ProtocolAnomaly => write!(f, "protocol_anomaly"),
             DetectionType::MalformedPacket => write!(f, "malformed_packet"),
             DetectionType::PortScan => write!(f, "port_scan"),
@@ -120,22 +135,33 @@ impl std::fmt::Display for DetectionType {
             DetectionType::Beaconing => write!(f, "beaconing"),
             DetectionType::LateralMovement => write!(f, "lateral_movement"),
             DetectionType::ThreatIntelMatch => write!(f, "threat_intel_match"),
+            DetectionType::ThreatIntel => write!(f, "threat_intel"),
             DetectionType::MaliciousIp => write!(f, "malicious_ip"),
             DetectionType::MaliciousDomain => write!(f, "malicious_domain"),
             DetectionType::MaliciousUrl => write!(f, "malicious_url"),
             DetectionType::MaliciousHash => write!(f, "malicious_hash"),
             DetectionType::MaliciousJa3 => write!(f, "malicious_ja3"),
+            DetectionType::C2 => write!(f, "c2"),
+            DetectionType::Phishing => write!(f, "phishing"),
+            DetectionType::Spam => write!(f, "spam"),
+            DetectionType::TorTraffic => write!(f, "tor_traffic"),
+            DetectionType::VpnTraffic => write!(f, "vpn_traffic"),
+            DetectionType::ProxyTraffic => write!(f, "proxy_traffic"),
             DetectionType::AnomalyDetection => write!(f, "anomaly_detection"),
             DetectionType::BehaviorAnomaly => write!(f, "behavior_anomaly"),
             DetectionType::TrafficAnomaly => write!(f, "traffic_anomaly"),
             DetectionType::PolicyViolation => write!(f, "policy_violation"),
             DetectionType::UnauthorizedAccess => write!(f, "unauthorized_access"),
             DetectionType::ExploitAttempt => write!(f, "exploit_attempt"),
+            DetectionType::Intrusion => write!(f, "intrusion"),
+            DetectionType::WebAttack => write!(f, "web_attack"),
             DetectionType::Shellcode => write!(f, "shellcode"),
             DetectionType::Overflow => write!(f, "overflow"),
+            DetectionType::Malware => write!(f, "malware"),
             DetectionType::MalwareDownload => write!(f, "malware_download"),
             DetectionType::MalwareCallback => write!(f, "malware_callback"),
             DetectionType::CnC => write!(f, "cnc"),
+            DetectionType::CorrelatedThreat => write!(f, "correlated_threat"),
             DetectionType::Custom(s) => write!(f, "custom:{}", s),
         }
     }

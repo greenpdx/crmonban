@@ -8,8 +8,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
+use crate::core::analysis::PacketAnalysis;
 use crate::core::flow::{Flow, FlowKey, FlowStats};
 use crate::core::packet::{Direction, Packet};
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 use super::table::FlowTable;
 use super::{FlowConfig, TrackerStats};
 
@@ -161,6 +163,57 @@ impl FlowTracker {
     /// Iterate over all active flows
     pub fn iter(&self) -> impl Iterator<Item = &Flow> {
         self.table.iter()
+    }
+
+    /// Process a packet via PacketAnalysis (for pipeline integration)
+    ///
+    /// Updates flow state and sets the flow on the analysis.
+    pub fn process_analysis(&mut self, mut analysis: PacketAnalysis) -> PacketAnalysis {
+        self.stats.packets_processed += 1;
+        self.stats.bytes_processed += analysis.packet.raw_len as u64;
+
+        // Get or create flow
+        let (flow, is_new) = self.table.get_or_create(&analysis.packet);
+
+        // Track new flows
+        if is_new {
+            self.stats.flows_created += 1;
+        }
+
+        // Update flow with packet (if not the first packet)
+        let direction = if is_new {
+            Direction::ToServer
+        } else {
+            flow.update(&analysis.packet)
+        };
+
+        // Accumulate payload if reassembly is enabled
+        if flow.is_reassembly_enabled() {
+            let is_forward = direction == Direction::ToServer;
+            flow.accumulate_payload(analysis.packet.payload(), is_forward);
+        }
+
+        // Update packet with flow info
+        analysis.packet.flow_id = Some(flow.id);
+        analysis.packet.direction = direction;
+
+        // Clone flow into analysis
+        analysis.set_flow(flow.clone());
+
+        // Periodic cleanup
+        self.maybe_cleanup();
+
+        analysis
+    }
+}
+
+impl StageProcessor for FlowTracker {
+    fn process(&mut self, analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        self.process_analysis(analysis)
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::FlowTracker
     }
 }
 

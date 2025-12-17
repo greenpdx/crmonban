@@ -55,8 +55,10 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
+use crate::core::analysis::PacketAnalysis;
 use crate::core::event::{DetectionEvent, DetectionType, Severity};
 use crate::core::packet::Packet;
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 /// WASM Engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +138,7 @@ impl WasmEngine {
     }
 
     /// Process a packet through all plugins
-    pub fn process(&mut self, packet: &Packet, context: &StageContext) -> Vec<WasmResult> {
+    pub fn process_packet(&mut self, packet: &Packet, context: &StageContext) -> Vec<WasmResult> {
         if !self.config.enabled {
             return Vec::new();
         }
@@ -243,6 +245,43 @@ impl Default for WasmEngine {
     }
 }
 
+impl StageProcessor for WasmEngine {
+    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        // Build stage context from analysis
+        let mut context = StageContext::new();
+
+        // Add flow info if available
+        if let Some(ref flow) = analysis.flow {
+            let duration = flow.duration();
+            context = context.with_flow(FlowInfo {
+                flow_id: flow.id,
+                packets_to_server: flow.fwd_packets as u64,
+                packets_to_client: flow.bwd_packets as u64,
+                bytes_to_server: flow.fwd_bytes as u64,
+                bytes_to_client: flow.bwd_bytes as u64,
+                state: format!("{:?}", flow.state),
+                duration_ms: duration.as_millis() as u64,
+                to_server: analysis.packet.direction == crate::core::packet::Direction::ToServer,
+            });
+        }
+
+        // Process through WASM plugins
+        let results = self.process_packet(&analysis.packet, &context);
+
+        // Convert results to detection events
+        let events = self.results_to_events(&analysis.packet, &results);
+        for event in events {
+            analysis.add_event(event);
+        }
+
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::WasmPlugins
+    }
+}
+
 /// WASM engine statistics
 #[derive(Debug, Clone, Default)]
 pub struct WasmStats {
@@ -290,7 +329,7 @@ mod tests {
 
         let packet = make_test_packet();
         let context = StageContext::new();
-        let results = engine.process(&packet, &context);
+        let results = engine.process_packet(&packet, &context);
         assert!(results.is_empty());
     }
 
@@ -308,7 +347,7 @@ mod tests {
                 sequential_pattern: true,
             });
 
-        let results = engine.process(&packet, &context);
+        let results = engine.process_packet(&packet, &context);
         assert!(!results.is_empty());
 
         let stats = engine.stats();

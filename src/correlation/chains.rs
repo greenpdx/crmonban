@@ -143,11 +143,28 @@ impl MitreTactic {
                 Some(MitreTactic::PrivilegeEscalation)
             }
             // Threat Intel matches
-            DetectionType::ThreatIntelMatch | DetectionType::MaliciousIp |
-            DetectionType::MaliciousDomain | DetectionType::MaliciousUrl |
-            DetectionType::MaliciousHash | DetectionType::MaliciousJa3 => {
+            DetectionType::ThreatIntelMatch | DetectionType::ThreatIntel |
+            DetectionType::MaliciousIp | DetectionType::MaliciousDomain |
+            DetectionType::MaliciousUrl | DetectionType::MaliciousHash |
+            DetectionType::MaliciousJa3 | DetectionType::C2 => {
                 Some(MitreTactic::CommandAndControl)
             }
+            // Malware / Intrusion
+            DetectionType::Malware | DetectionType::Intrusion | DetectionType::WebAttack => {
+                Some(MitreTactic::Execution)
+            }
+            // Signatures
+            DetectionType::Signature => Some(MitreTactic::InitialAccess),
+            // Phishing / Spam
+            DetectionType::Phishing | DetectionType::Spam => {
+                Some(MitreTactic::InitialAccess)
+            }
+            // Anonymization
+            DetectionType::TorTraffic | DetectionType::VpnTraffic | DetectionType::ProxyTraffic => {
+                Some(MitreTactic::DefenseEvasion)
+            }
+            // Correlation
+            DetectionType::CorrelatedThreat => None,
             // Anomalies
             DetectionType::AnomalyDetection | DetectionType::BehaviorAnomaly |
             DetectionType::TrafficAnomaly | DetectionType::MalformedPacket => None,

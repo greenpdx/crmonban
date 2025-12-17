@@ -39,7 +39,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use crate::core::analysis::PacketAnalysis;
+use crate::core::event::{DetectionEvent, DetectionType, Severity};
 use crate::core::flow::Flow;
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 pub use features::{FeatureVector, FeatureExtractor, NUM_FEATURES, FEATURE_NAMES};
 pub use baseline::{Baseline, FeatureStats, BaselineSummary};
@@ -433,6 +436,55 @@ impl MLEngine {
 impl Default for MLEngine {
     fn default() -> Self {
         Self::new(MLConfig::default())
+    }
+}
+
+impl StageProcessor for MLEngine {
+    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        // ML engine works on flows - need flow to process
+        if let Some(ref flow) = analysis.flow {
+            if let Some(score) = self.process_flow(flow) {
+                // Convert anomaly score to detection event
+                let severity = if score.score >= 0.9 {
+                    Severity::Critical
+                } else if score.score >= 0.7 {
+                    Severity::High
+                } else if score.score >= 0.5 {
+                    Severity::Medium
+                } else {
+                    Severity::Low
+                };
+
+                let category_str = score.category
+                    .map(|c| format!("{:?}", c))
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let event = DetectionEvent::new(
+                    DetectionType::AnomalyDetection,
+                    severity,
+                    analysis.packet.src_ip(),
+                    analysis.packet.dst_ip(),
+                    format!(
+                        "ML anomaly detected ({}): score={:.2}, confidence={:.2}{}",
+                        category_str,
+                        score.score,
+                        score.confidence,
+                        score.explanation.as_ref().map(|e| format!(", {}", e)).unwrap_or_default(),
+                    ),
+                )
+                .with_detector("ml")
+                .with_confidence(score.confidence)
+                .with_ports(analysis.packet.src_port(), analysis.packet.dst_port());
+
+                analysis.add_event(event);
+            }
+        }
+
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::MLDetection
     }
 }
 

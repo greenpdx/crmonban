@@ -16,7 +16,10 @@ use rayon::prelude::*;
 
 use super::ast::*;
 use super::{SignatureConfig, RuleStats};
+use crate::core::analysis::PacketAnalysis;
+use crate::core::event::{DetectionEvent, DetectionType, Severity};
 use crate::core::packet::Packet;
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 /// Result of a signature match
 #[derive(Debug, Clone)]
@@ -1580,6 +1583,82 @@ impl SignatureEngine {
     /// Check if storage loading is enabled
     pub fn storage_enabled(&self) -> bool {
         self.config.load_from_storage
+    }
+
+    /// Convert MatchResult to DetectionEvent
+    fn match_to_event(&self, m: &MatchResult, packet: &Packet) -> DetectionEvent {
+        let severity = match m.priority {
+            1 => Severity::Critical,
+            2 => Severity::High,
+            3 => Severity::Medium,
+            _ => Severity::Low,
+        };
+
+        let detection_type = match m.classtype.as_deref() {
+            Some("attempted-admin") | Some("attempted-user") | Some("successful-admin") => {
+                DetectionType::Intrusion
+            }
+            Some("trojan-activity") | Some("attempted-recon") => DetectionType::Malware,
+            Some("policy-violation") | Some("not-suspicious") => DetectionType::PolicyViolation,
+            Some("web-application-attack") => DetectionType::WebAttack,
+            Some("attempted-dos") => DetectionType::DoS,
+            _ => DetectionType::Signature,
+        };
+
+        DetectionEvent::new(
+            detection_type,
+            severity,
+            packet.src_ip(),
+            packet.dst_ip(),
+            format!("SID:{} {}", m.sid, m.msg),
+        )
+        .with_detector("signatures")
+        .with_ports(packet.src_port(), packet.dst_port())
+    }
+}
+
+impl StageProcessor for SignatureEngine {
+    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        // Build flow state from analysis
+        let flow_state = if let Some(ref flow) = analysis.flow {
+            FlowState {
+                established: flow.is_established(),
+                to_server: analysis.packet.direction == crate::core::packet::Direction::ToServer,
+            }
+        } else {
+            FlowState::default()
+        };
+
+        // Build protocol context (for now, use None - ProtocolDetector would populate this)
+        let proto_ctx = ProtocolContext::None;
+
+        // Get reassembled stream data if available
+        let (fwd_stream, bwd_stream) = if let Some(ref flow) = analysis.flow {
+            (flow.fwd_stream(), flow.bwd_stream())
+        } else {
+            (None, None)
+        };
+
+        // Match packet against signatures
+        let matches = self.match_packet_with_stream(
+            &analysis.packet,
+            &proto_ctx,
+            &flow_state,
+            fwd_stream,
+            bwd_stream,
+        );
+
+        // Convert matches to events
+        for m in &matches {
+            let event = self.match_to_event(m, &analysis.packet);
+            analysis.add_event(event);
+        }
+
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::SignatureMatching
     }
 }
 

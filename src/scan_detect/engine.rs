@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
+use crate::core::analysis::PacketAnalysis;
+use crate::core::event::{DetectionEvent, DetectionType, Severity};
 use crate::core::packet::Packet;
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 use super::behavior::{Classification, FlowKey, SourceBehavior};
 use super::config::ScanDetectConfig;
 use super::rules::{EvaluationContext, RuleRegistry};
@@ -211,7 +214,7 @@ impl ScanDetectEngine {
     ///
     /// This is the main entry point - extracts all needed info from the Packet.
     /// Only processes TCP packets; returns None for non-TCP.
-    pub fn process(&mut self, packet: &Packet) -> Option<ScanAlert> {
+    pub fn process_packet(&mut self, packet: &Packet) -> Option<ScanAlert> {
         // Only process TCP packets for scan detection
         let flags = packet.tcp_flags()?;
 
@@ -614,6 +617,66 @@ impl ScanDetectEngine {
         self.total_alerts = 0;
         self.network_health = NetworkHealth::default();
     }
+
+    /// Convert a ScanAlert to a DetectionEvent
+    fn alert_to_event(&self, alert: &ScanAlert, packet: &Packet) -> DetectionEvent {
+        let severity = match alert.severity() {
+            s if s >= 8 => Severity::Critical,
+            s if s >= 6 => Severity::High,
+            s if s >= 4 => Severity::Medium,
+            _ => Severity::Low,
+        };
+
+        let classification_str = match alert.classification {
+            Classification::Normal => "normal",
+            Classification::Suspicious => "suspicious",
+            Classification::ProbableScan => "probable scan",
+            Classification::LikelyAttack => "likely attack",
+            Classification::ConfirmedScan => "confirmed scan",
+            Classification::NetworkIssue => "network issue",
+            Classification::Unverifiable => "unverifiable",
+        };
+
+        let (alert_type_str, score) = match &alert.alert_type {
+            AlertType::Suspicious { score } => ("suspicious activity", *score),
+            AlertType::ProbableScan { score, .. } => ("probable port scan", *score),
+            AlertType::LikelyAttack { score, .. } => ("likely attack", *score),
+            AlertType::ConfirmedScan { score, .. } => ("confirmed scan", *score),
+            AlertType::VerifiedAttack { score, .. } => ("verified attack", *score),
+            AlertType::NetworkIssue { .. } => ("network issue", 0.0),
+        };
+
+        let evidence = alert.top_rules.first()
+            .map(|(rule, _)| rule.clone())
+            .unwrap_or_default();
+
+        DetectionEvent::new(
+            DetectionType::PortScan,
+            severity,
+            alert.src_ip,
+            packet.dst_ip(),
+            format!("{} {} ({}): {} unique ports, score={:.1}",
+                classification_str, alert_type_str, evidence,
+                alert.unique_ports, score),
+        )
+        .with_detector("scan_detect")
+        .with_ports(packet.src_port(), packet.dst_port())
+    }
+}
+
+impl StageProcessor for ScanDetectEngine {
+    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        // Process the packet through scan detection
+        if let Some(alert) = self.process_packet(&analysis.packet) {
+            let event = self.alert_to_event(&alert, &analysis.packet);
+            analysis.add_event(event);
+        }
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::ScanDetection
+    }
 }
 
 #[cfg(test)]
@@ -674,7 +737,7 @@ mod tests {
         // Process multiple SYNs to different ports
         for port in 1..=5 {
             let pkt = make_syn_packet(src_ip, port);
-            engine.process(&pkt);
+            engine.process_packet(&pkt);
         }
 
         assert_eq!(engine.tracked_sources(), 1);
@@ -693,10 +756,10 @@ mod tests {
 
         // SYN
         let syn_pkt = make_syn_packet(src_ip, 80);
-        engine.process(&syn_pkt);
+        engine.process_packet(&syn_pkt);
         // ACK (handshake complete)
         let ack_pkt = make_ack_packet(src_ip, 80);
-        engine.process(&ack_pkt);
+        engine.process_packet(&ack_pkt);
 
         let ip = IpAddr::V4(src_ip);
         let behavior = engine.get_behavior(&ip).unwrap();
@@ -716,7 +779,7 @@ mod tests {
         // Process many SYNs to targeted ports without completing handshakes
         for port in [22, 23, 80, 443, 3389] {
             let pkt = make_syn_packet(src_ip, port);
-            engine.process(&pkt);
+            engine.process_packet(&pkt);
         }
 
         let ip = IpAddr::V4(src_ip);
@@ -735,7 +798,7 @@ mod tests {
         for i in 0..20 {
             let src_ip = Ipv4Addr::new(192, 168, 1, i as u8);
             let pkt = make_syn_packet(src_ip, 80);
-            engine.process(&pkt);
+            engine.process_packet(&pkt);
         }
 
         engine.update_network_health();
@@ -803,7 +866,7 @@ mod tests {
 
         for port in 1..=num_ports {
             let pkt = make_scan_packet(src_ip, 50000 + port as u16, port as u16, scan_type);
-            if engine.process(&pkt).is_some() {
+            if engine.process_packet(&pkt).is_some() {
                 alerts += 1;
             }
         }
@@ -913,7 +976,7 @@ mod tests {
         // Scan increasing number of ports and track score progression
         for port in 1..=100 {
             let pkt = make_scan_packet(src_ip, 50000, port, ScanType::Syn);
-            engine.process(&pkt);
+            engine.process_packet(&pkt);
 
             if port % 10 == 0 {
                 let ip = IpAddr::V4(src_ip);
@@ -953,7 +1016,7 @@ mod tests {
 
         for (i, scan_type) in scan_types.iter().enumerate() {
             let pkt = make_scan_packet(src_ip, 50000 + i as u16, 100 + i as u16, *scan_type);
-            engine.process(&pkt);
+            engine.process_packet(&pkt);
         }
 
         let ip = IpAddr::V4(src_ip);
@@ -1074,16 +1137,16 @@ mod tests {
         let mut alerts = 0;
 
         // 3-way handshake: SYN -> SYN-ACK -> ACK
-        if engine.process(&make_syn(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
+        if engine.process_packet(&make_syn(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
         // Note: SYN-ACK comes from server, but we're tracking client behavior
-        if engine.process(&make_ack(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
+        if engine.process_packet(&make_ack(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
 
         // Data exchange
-        if engine.process(&make_data(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
-        if engine.process(&make_data(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
+        if engine.process_packet(&make_data(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
+        if engine.process_packet(&make_data(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
 
         // Connection close: FIN-ACK
-        if engine.process(&make_fin_ack(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
+        if engine.process_packet(&make_fin_ack(src_ip, src_port, dst_port)).is_some() { alerts += 1; }
 
         alerts
     }
@@ -1175,7 +1238,7 @@ mod tests {
 
             let mut alerts = 0;
             for port in 1..=20 {
-                if engine.process(&make_syn(src_ip, 50000, port)).is_some() { alerts += 1; }
+                if engine.process_packet(&make_syn(src_ip, 50000, port)).is_some() { alerts += 1; }
             }
 
             let behavior = engine.get_behavior(&IpAddr::V4(src_ip)).unwrap();
@@ -1229,7 +1292,7 @@ mod tests {
             }
             // 15 SYN-only (half-open)
             for port in 6..=20 {
-                if engine.process(&make_syn(src_ip, 50000, port)).is_some() { alerts += 1; }
+                if engine.process_packet(&make_syn(src_ip, 50000, port)).is_some() { alerts += 1; }
             }
 
             let behavior = engine.get_behavior(&IpAddr::V4(src_ip)).unwrap();
@@ -1333,7 +1396,7 @@ mod tests {
                 let src_ip = Ipv4Addr::new(10, 10, 0, 4);
                 let mut alerts = 0;
                 for port in 1..=20 {
-                    if engine.process(&make_syn(src_ip, 50000, port)).is_some() { alerts += 1; }
+                    if engine.process_packet(&make_syn(src_ip, 50000, port)).is_some() { alerts += 1; }
                 }
                 let b = engine.get_behavior(&IpAddr::V4(src_ip)).unwrap();
                 (alerts, b.score, b.classification, b.completed_count())

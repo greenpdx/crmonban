@@ -7,6 +7,7 @@
 //! - `layers`: Strongly-typed network layer structs
 //! - `parser`: Modular packet parsing functions
 
+pub mod analysis;
 pub mod layers;
 pub mod packet;
 pub mod flow;
@@ -22,6 +23,7 @@ pub use packet::{Packet, TcpFlags, IpProtocol, Direction};
 pub use flow::{Flow, FlowState, FlowKey, FlowStats};
 pub use event::{DetectionEvent, DetectionType, DetectionAction, Severity};
 pub use parser::{parse_ethernet_packet, parse_ip_packet, IpInfo, TransportInfo};
+pub use analysis::{PacketAnalysis, FlowControl};
 
 /// Common trait for protocol-specific metadata
 pub trait ProtocolMetadata: Send + Sync + std::fmt::Debug {

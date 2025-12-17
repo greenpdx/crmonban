@@ -29,6 +29,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::analysis::PacketAnalysis;
+use crate::core::event::{DetectionEvent, DetectionType, Severity};
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
+
 /// Configuration for brute force detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BruteForceConfig {
@@ -384,6 +388,79 @@ impl BruteForceTracker {
 impl Default for BruteForceTracker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl BruteForceTracker {
+    /// Process a packet and detect brute force patterns
+    ///
+    /// This method examines TCP flags to track session lifecycle:
+    /// - SYN: Start a new session
+    /// - FIN/RST: End a session and check for brute force pattern
+    /// - Other: Update packet count for active session
+    pub fn process_packet(&mut self, packet: &crate::core::packet::Packet) -> Option<BruteForceAlert> {
+        // Only process TCP packets
+        let flags = packet.tcp_flags()?;
+        let src_ip = packet.src_ip();
+        let dst_ip = packet.dst_ip();
+        let dst_port = packet.dst_port();
+        let payload_len = packet.payload().len();
+
+        // SYN without ACK = new connection
+        if flags.syn && !flags.ack {
+            self.session_start(src_ip, dst_ip, dst_port);
+            return None;
+        }
+
+        // FIN or RST = session end
+        if flags.fin || flags.rst {
+            return self.session_end(src_ip, dst_ip, dst_port, flags.rst);
+        }
+
+        // Other packets = update session
+        self.session_packet(src_ip, dst_ip, dst_port, payload_len);
+        None
+    }
+
+    /// Convert an alert to a DetectionEvent
+    pub fn alert_to_event(&self, alert: &BruteForceAlert) -> DetectionEvent {
+        let severity = match alert.severity() {
+            s if s >= 8 => Severity::Critical,
+            s if s >= 6 => Severity::High,
+            s if s >= 4 => Severity::Medium,
+            _ => Severity::Low,
+        };
+
+        DetectionEvent::new(
+            DetectionType::BruteForce,
+            severity,
+            alert.src_ip,
+            alert.dst_ip,
+            format!(
+                "{} brute force: {} attempts in {}s on port {} ({})",
+                alert.service,
+                alert.attempt_count,
+                alert.window_seconds,
+                alert.dst_port,
+                alert.service,
+            ),
+        )
+        .with_detector("brute_force")
+        .with_ports(0, alert.dst_port)
+    }
+}
+
+impl StageProcessor for BruteForceTracker {
+    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        if let Some(alert) = self.process_packet(&analysis.packet) {
+            let event = self.alert_to_event(&alert);
+            analysis.add_event(event);
+        }
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::BruteForceDetection
     }
 }
 

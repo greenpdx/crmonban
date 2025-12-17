@@ -15,8 +15,10 @@ pub mod syn_flood;
 use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
+use crate::core::analysis::PacketAnalysis;
 use crate::core::packet::Packet;
 use crate::core::event::{DetectionEvent, DetectionType, Severity};
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 pub use syn_flood::{
     SynFloodDetector, SynFloodConfig, SynFloodAlert, FloodType,
@@ -143,7 +145,7 @@ impl DoSDetector {
     /// Returns alerts from any detector that triggers. Multiple alerts
     /// can be generated for a single packet if it triggers multiple
     /// detection engines.
-    pub fn process(&mut self, packet: &Packet) -> Vec<DoSAlert> {
+    pub fn process_packet(&mut self, packet: &Packet) -> Vec<DoSAlert> {
         if !self.config.enabled {
             return Vec::new();
         }
@@ -214,6 +216,21 @@ impl Default for DoSDetector {
     }
 }
 
+impl StageProcessor for DoSDetector {
+    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        let alerts = self.process_packet(&analysis.packet);
+        for alert in alerts {
+            let event = alert.to_detection_event(&analysis.packet);
+            analysis.add_event(event);
+        }
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::DoSDetection
+    }
+}
+
 /// DoS detection statistics
 #[derive(Debug, Clone, Default)]
 pub struct DoSStats {
@@ -267,7 +284,7 @@ mod tests {
         let mut detector = DoSDetector::with_config(config);
 
         let pkt = make_syn_packet(Ipv4Addr::new(192, 168, 1, 100), 80, 50000);
-        let alerts = detector.process(&pkt);
+        let alerts = detector.process_packet(&pkt);
         assert!(alerts.is_empty());
     }
 
@@ -276,7 +293,7 @@ mod tests {
         let mut detector = DoSDetector::new();
 
         let pkt = make_syn_packet(Ipv4Addr::new(192, 168, 1, 100), 80, 50000);
-        let _ = detector.process(&pkt);
+        let _ = detector.process_packet(&pkt);
 
         let stats = detector.stats();
         assert_eq!(stats.packets_processed, 1);

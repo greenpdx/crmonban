@@ -60,7 +60,7 @@ use crate::core::packet::Packet;
 use crate::database::BatchedWriterHandle;
 
 pub use capture::{PacketCapture, CaptureConfig, CaptureMethod};
-pub use pipeline::{Pipeline, PipelineConfig, PipelineStage};
+pub use pipeline::{Pipeline, PipelineConfig, PipelineStage, StageProcessor};
 pub use workers::{WorkerPool, WorkerThread, WorkerConfig};
 pub use actions::{ActionExecutor, Action, ActionConfig};
 pub use flow_buffer::{FlowBuffer, FlowBufferConfig, FlowBatch, FlushTrigger};

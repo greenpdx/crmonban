@@ -191,7 +191,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         // 4. Scan detection
-        let scan_alert = scan_detect_engine.process(&pkt);
+        let scan_alert = scan_detect_engine.process_packet(&pkt);
         if let Some(ref alert) = scan_alert {
             if matches!(alert.classification, Classification::ConfirmedScan | Classification::LikelyAttack) {
                 if attacker_ips.contains(&src_ip) {

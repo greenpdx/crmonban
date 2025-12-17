@@ -2,8 +2,11 @@
 //!
 //! Automatically detects application protocol and routes to appropriate analyzer.
 
+use crate::core::analysis::PacketAnalysis;
+use crate::core::event::{DetectionEvent, DetectionType, Severity};
 use crate::core::flow::Flow;
 use crate::core::packet::Packet;
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 use super::AppProtocol;
 use super::{
     ProtocolAnalyzer, ProtocolConfig, ProtocolEvent,
@@ -117,6 +120,38 @@ impl ProtocolDetector {
     /// Get TLS analyzer
     pub fn tls(&self) -> &TlsAnalyzer {
         &self.tls
+    }
+
+    /// Convert protocol event to detection event (for anomalies/alerts)
+    /// Note: Current ProtocolEvent doesn't have anomaly variants, so this always returns None.
+    /// Anomalies would need to be detected by analyzers and stored in ProtocolEvent.
+    #[allow(dead_code, unused_variables)]
+    fn event_to_detection(&self, pe: &ProtocolEvent, packet: &Packet) -> Option<DetectionEvent> {
+        // Currently ProtocolEvent doesn't have anomaly variants
+        // When anomaly variants are added, match on them here
+        None
+    }
+}
+
+impl StageProcessor for ProtocolDetector {
+    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+        // Need a mutable flow to analyze
+        if let Some(ref mut flow) = analysis.flow {
+            let events = self.analyze(&analysis.packet, flow);
+
+            // Convert any anomaly events to detection events
+            for pe in &events {
+                if let Some(event) = self.event_to_detection(pe, &analysis.packet) {
+                    analysis.add_event(event);
+                }
+            }
+        }
+
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::ProtocolAnalysis
     }
 }
 

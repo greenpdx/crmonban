@@ -152,7 +152,7 @@ fn main() -> anyhow::Result<()> {
         pkt.raw_len = packet.data.len() as u32;
 
         // Process through scan detection
-        if let Some(alert) = engine.process(&pkt) {
+        if let Some(alert) = engine.process_packet(&pkt) {
             stats.total_alerts += 1;
             stats.flagged_ips.insert(src_ip);
             *stats.alerts_per_ip.entry(src_ip).or_insert(0) += 1;

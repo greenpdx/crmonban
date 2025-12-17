@@ -19,6 +19,10 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, RwLock as TokioRwLock};
 use tracing::{debug, info, warn, error};
 
+use crate::core::analysis::PacketAnalysis;
+use crate::core::event::{DetectionEvent, DetectionType};
+use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
+
 pub use ioc::{Ioc, IocType, ThreatCategory, Severity, ThreatMatch, MatchContext};
 pub use cache::{IocCache, CacheStats};
 pub use feeds::{ThreatFeed, FeedType, FeedManager, FeedConfig, FeedStatus, UpdateStats};
@@ -245,6 +249,81 @@ impl IntelEngine {
     /// Insert an IOC directly (public for integration tests)
     pub fn add_ioc(&self, ioc: Ioc) {
         self.cache.write().insert(ioc);
+    }
+
+    /// Convert a threat match to a detection event
+    fn match_to_event(&self, m: &ThreatMatch, packet: &crate::core::packet::Packet, is_src: bool) -> DetectionEvent {
+        let severity = match m.ioc.severity {
+            Severity::Critical => crate::core::event::Severity::Critical,
+            Severity::High => crate::core::event::Severity::High,
+            Severity::Medium => crate::core::event::Severity::Medium,
+            Severity::Low => crate::core::event::Severity::Low,
+            Severity::Info => crate::core::event::Severity::Info,
+        };
+
+        let detection_type = match m.ioc.category {
+            ThreatCategory::C2 => DetectionType::C2,
+            ThreatCategory::Botnet => DetectionType::Malware,
+            ThreatCategory::Malware => DetectionType::Malware,
+            ThreatCategory::Phishing => DetectionType::Phishing,
+            ThreatCategory::Spam => DetectionType::Spam,
+            ThreatCategory::Scanner => DetectionType::PortScan,
+            ThreatCategory::Ransomware => DetectionType::Malware,
+            ThreatCategory::Apt => DetectionType::Intrusion,
+            ThreatCategory::TorExit => DetectionType::TorTraffic,
+            ThreatCategory::Proxy => DetectionType::ProxyTraffic,
+            _ => DetectionType::ThreatIntel,
+        };
+
+        let direction = if is_src { "source" } else { "destination" };
+
+        DetectionEvent::new(
+            detection_type,
+            severity,
+            packet.src_ip(),
+            packet.dst_ip(),
+            format!(
+                "Threat intel hit ({}): {} - {} (feed: {})",
+                direction,
+                m.ioc.value,
+                m.ioc.category.as_str(),
+                m.ioc.source,
+            ),
+        )
+        .with_detector("threat_intel")
+        .with_ports(packet.src_port(), packet.dst_port())
+    }
+}
+
+impl StageProcessor for IntelEngine {
+    fn process(&mut self, mut analysis: PacketAnalysis, config: &PipelineConfig) -> PacketAnalysis {
+        // Check source IP
+        if let Some(m) = self.check_ip(&analysis.packet.src_ip()) {
+            let event = self.match_to_event(&m, &analysis.packet, true);
+            analysis.add_event(event);
+
+            // If critical threat intel hit, optionally stop processing
+            if m.ioc.severity == Severity::Critical {
+                // Could set analysis.control.stop_processing = true here
+                debug!("Critical threat intel hit on source IP: {}", analysis.packet.src_ip());
+            }
+        }
+
+        // Check destination IP
+        if let Some(m) = self.check_ip(&analysis.packet.dst_ip()) {
+            let event = self.match_to_event(&m, &analysis.packet, false);
+            analysis.add_event(event);
+
+            if m.ioc.severity == Severity::Critical {
+                debug!("Critical threat intel hit on dest IP: {}", analysis.packet.dst_ip());
+            }
+        }
+
+        analysis
+    }
+
+    fn stage(&self) -> PipelineStage {
+        PipelineStage::ThreatIntel
     }
 }
 

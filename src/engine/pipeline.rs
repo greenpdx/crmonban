@@ -28,12 +28,39 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::debug;
 
+use crate::core::analysis::PacketAnalysis;
 use crate::core::event::DetectionEvent;
 use crate::core::packet::Packet;
 use crate::database::{BatchedWriterHandle, IntervalStats};
 
 use super::workers::{WorkerPool, WorkerConfig};
 use super::EngineStats;
+
+/// Trait for pipeline stage processors
+///
+/// Each stage implements this trait with a uniform interface:
+/// - Receives `PacketAnalysis` containing packet, flow, events, and control flags
+/// - Returns the modified `PacketAnalysis` for the next stage
+///
+/// This enables a clean functional pipeline: stage1 -> stage2 -> ... -> stageN
+pub trait StageProcessor {
+    /// Process the packet analysis through this stage
+    ///
+    /// The stage may:
+    /// - Add detection events via `analysis.add_event()`
+    /// - Update flow state via `analysis.flow_mut()`
+    /// - Set control flags (stop_processing, suppress_events)
+    /// - Mark the packet as suspicious
+    fn process(&mut self, analysis: PacketAnalysis, config: &PipelineConfig) -> PacketAnalysis;
+
+    /// Get the pipeline stage type this processor handles
+    fn stage(&self) -> PipelineStage;
+
+    /// Check if this stage is enabled in the config
+    fn is_enabled(&self, config: &PipelineConfig) -> bool {
+        config.is_stage_enabled(self.stage())
+    }
+}
 
 /// Pipeline configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -426,10 +453,12 @@ mod tests {
     #[test]
     fn test_pipeline_config_default() {
         let config = PipelineConfig::default();
+        // Check defaults
         assert!(config.enable_flows);
-        assert!(config.enable_signatures);
-        assert!(config.enable_dos);
-        assert!(config.enable_wasm);
+        assert!(config.enable_scan_detect);
+        assert!(!config.enable_signatures);  // Off by default
+        assert!(!config.enable_dos);         // Off by default
+        assert!(!config.enable_wasm);        // Off by default
         assert_eq!(config.buffer_size, 10_000);
         // Default stage order should have 10 stages
         assert_eq!(config.stage_order.len(), 10);

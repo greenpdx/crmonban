@@ -748,7 +748,7 @@ impl PcapBenchmark {
         }
 
         // Port scan tracking - detect when a source touches many different destination ports
-        let scan_alert = self.scan_detect_engine.process(&pkt);
+        let scan_alert = self.scan_detect_engine.process_packet(&pkt);
 
         // Brute force tracking - detect repeated failed login attempts
         let is_syn = pkt.tcp_flags().as_ref().map(|f| f.syn && !f.ack).unwrap_or(false);
