@@ -11,7 +11,7 @@ categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
 # nftables JSON API
-nftables = { git = "https://github.com/nftables-rs/nftables-rs" }
+nftables = { version = "0.6.4", registry = "kellnr" }
 
 # CLI
 clap = { version = "*", features = ["derive", "env"] }
