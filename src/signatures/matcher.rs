@@ -16,9 +16,7 @@ use rayon::prelude::*;
 
 use super::ast::*;
 use super::{SignatureConfig, RuleStats};
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
-use crate::core::packet::Packet;
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 /// Result of a signature match
@@ -194,8 +192,8 @@ impl ProtocolContext {
 }
 
 /// Convert IpProtocol to signature Protocol
-fn ip_protocol_to_sig_protocol(ip_proto: crate::core::packet::IpProtocol) -> Protocol {
-    use crate::core::packet::IpProtocol;
+fn ip_protocol_to_sig_protocol(ip_proto: crate::core::IpProtocol) -> Protocol {
+    use crate::core::IpProtocol;
     match ip_proto {
         IpProtocol::Tcp => Protocol::Tcp,
         IpProtocol::Udp => Protocol::Udp,
@@ -1207,7 +1205,7 @@ impl SignatureEngine {
     fn check_tcp_flags_direct(
         &self,
         rule: &Rule,
-        packet_flags: Option<crate::core::packet::TcpFlags>,
+        packet_flags: Option<crate::core::TcpFlags>,
     ) -> bool {
         // Find Flags option in rule
         for opt in &rule.options {
@@ -1623,7 +1621,7 @@ impl StageProcessor for SignatureEngine {
         let flow_state = if let Some(ref flow) = analysis.flow {
             FlowState {
                 established: flow.is_established(),
-                to_server: analysis.packet.direction == crate::core::packet::Direction::ToServer,
+                to_server: analysis.packet.direction == crate::core::Direction::ToServer,
             }
         } else {
             FlowState::default()
@@ -1665,8 +1663,7 @@ impl StageProcessor for SignatureEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::packet::{Packet, IpProtocol, TcpFlags};
-    use crate::core::layers::{Layer3, Layer4, Ipv4Info, TcpInfo, UdpInfo};
+    use crate::core::{Packet, IpProtocol, TcpFlags, Layer3, Layer4, Ipv4Info, TcpInfo, UdpInfo};
     use std::net::{IpAddr, Ipv4Addr};
 
     // =========================================================================

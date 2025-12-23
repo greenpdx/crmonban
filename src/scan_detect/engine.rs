@@ -6,9 +6,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn};
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
-use crate::core::packet::Packet;
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 use super::behavior::{Classification, FlowKey, SourceBehavior};
 use super::config::ScanDetectConfig;
@@ -683,7 +681,7 @@ impl StageProcessor for ScanDetectEngine {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
-    use crate::core::packet::{IpProtocol, TcpFlags};
+    use crate::core::{IpProtocol, TcpFlags};
 
     /// Create a TCP SYN packet for testing
     fn make_syn_packet(src_ip: Ipv4Addr, dst_port: u16) -> Packet {

@@ -1238,7 +1238,7 @@ async fn start_packet_engine(
     _crmonban: Arc<RwLock<Crmonban>>,
 ) -> Result<()> {
     use engine::capture::{CaptureConfig, CaptureMethod, create_capture};
-    use core::packet::IpProtocol;
+    use crate::core::IpProtocol;
 
     info!("Starting packet engine on interface: {:?}", config.interface);
 

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use tracing::{debug, info, warn, error};
 
-use crate::core::packet::Packet;
+use crate::core::Packet;
 use super::plugin::{WasmPlugin, PluginConfig, PluginError, RustPlugin};
 use super::types::{StageContext, WasmResult};
 
@@ -259,7 +259,7 @@ mod tests {
     use super::*;
     use super::super::plugin::PortDiversityPlugin;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::core::packet::IpProtocol;
+    use crate::core::IpProtocol;
 
     fn make_test_packet() -> Packet {
         Packet::new(

@@ -35,8 +35,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 // Re-export core flow types
-pub use crate::core::flow::{Flow, FlowKey, FlowState, FlowStats};
-pub use crate::core::packet::Direction;
+pub use crate::core::{Flow, FlowKey, FlowState, FlowStats, Direction};
 
 /// Minimum reassembly buffer size (64 KB)
 pub const MIN_REASSEMBLY_BUFFER_KB: usize = 64;
@@ -118,7 +117,7 @@ impl FlowConfig {
 
     /// Get timeout for a flow based on protocol and state
     pub fn timeout_for(&self, flow: &Flow) -> Duration {
-        use crate::core::packet::IpProtocol;
+        use crate::core::IpProtocol;
 
         match flow.protocol {
             IpProtocol::Tcp => {

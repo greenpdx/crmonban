@@ -45,8 +45,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 pub use rules::{CorrelationRule, RuleMatch, RuleType};
@@ -729,18 +728,6 @@ fn default_correlation_rules() -> Vec<CorrelationRule> {
     ]
 }
 
-// Extension for Severity
-impl Severity {
-    fn elevated(&self) -> Severity {
-        match self {
-            Severity::Info => Severity::Low,
-            Severity::Low => Severity::Medium,
-            Severity::Medium => Severity::High,
-            Severity::High => Severity::Critical,
-            Severity::Critical => Severity::Critical,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

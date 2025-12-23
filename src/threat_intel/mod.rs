@@ -19,8 +19,7 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, RwLock as TokioRwLock};
 use tracing::{debug, info, warn, error};
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType};
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Packet, Severity as CoreSeverity};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 pub use ioc::{Ioc, IocType, ThreatCategory, Severity, ThreatMatch, MatchContext};
@@ -252,13 +251,13 @@ impl IntelEngine {
     }
 
     /// Convert a threat match to a detection event
-    fn match_to_event(&self, m: &ThreatMatch, packet: &crate::core::packet::Packet, is_src: bool) -> DetectionEvent {
+    fn match_to_event(&self, m: &ThreatMatch, packet: &Packet, is_src: bool) -> DetectionEvent {
         let severity = match m.ioc.severity {
-            Severity::Critical => crate::core::event::Severity::Critical,
-            Severity::High => crate::core::event::Severity::High,
-            Severity::Medium => crate::core::event::Severity::Medium,
-            Severity::Low => crate::core::event::Severity::Low,
-            Severity::Info => crate::core::event::Severity::Info,
+            Severity::Critical => CoreSeverity::Critical,
+            Severity::High => CoreSeverity::High,
+            Severity::Medium => CoreSeverity::Medium,
+            Severity::Low => CoreSeverity::Low,
+            Severity::Info => CoreSeverity::Info,
         };
 
         let detection_type = match m.ioc.category {

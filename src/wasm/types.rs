@@ -5,7 +5,7 @@
 use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
-use crate::core::event::DetectionType;
+use crate::core::DetectionType;
 use crate::engine::pipeline::PipelineStage;
 
 /// Stage-specific context populated by earlier pipeline stages

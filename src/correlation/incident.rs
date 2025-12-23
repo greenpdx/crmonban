@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::chains::AttackChain;
-use crate::core::event::{DetectionEvent, Severity};
+use crate::core::{DetectionEvent, Severity};
 
 /// Status of an incident
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,7 +277,7 @@ impl Default for Incident {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::event::DetectionType;
+    use crate::core::DetectionType;
 
     fn make_event(severity: Severity) -> DetectionEvent {
         DetectionEvent::new(

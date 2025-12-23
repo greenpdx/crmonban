@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
+use crate::core::{DetectionEvent, DetectionType, Severity};
 
 /// Alert aggregator
 pub struct Aggregator {

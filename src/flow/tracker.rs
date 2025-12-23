@@ -8,9 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::flow::{Flow, FlowKey, FlowStats};
-use crate::core::packet::{Direction, Packet};
+use crate::core::{PacketAnalysis, Flow, FlowKey, FlowStats, Direction, Packet};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 use super::table::FlowTable;
 use super::{FlowConfig, TrackerStats};
@@ -276,7 +274,7 @@ impl Clone for SharedFlowTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::packet::{IpProtocol, TcpFlags};
+    use crate::core::{IpProtocol, TcpFlags};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn make_syn_packet(src_port: u16, dst_port: u16) -> Packet {

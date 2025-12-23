@@ -20,7 +20,7 @@ use super::Database;
 
 // Re-export the canonical event types from core
 #[cfg(feature = "flow-tracking")]
-pub use crate::core::event::{DetectionEvent, DetectionType, Severity};
+pub use crate::core::{DetectionEvent, DetectionType, Severity};
 
 /// Aggregated statistics for a time interval
 #[derive(Debug, Clone, Default)]

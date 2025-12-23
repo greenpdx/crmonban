@@ -12,7 +12,7 @@ use clap::Parser;
 use etherparse::SlicedPacket;
 use pcap::Capture;
 
-use crmonban::core::packet::{IpProtocol, Packet, TcpFlags};
+use crmonban::core::{IpProtocol, Packet, TcpFlags};
 use crmonban::flow::{FlowConfig, FlowTracker};
 use crmonban::brute_force::BruteForceTracker;
 use crmonban::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification};

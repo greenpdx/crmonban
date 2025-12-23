@@ -6,8 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use crate::core::flow::FlowKey;
-use crate::core::packet::Packet;
+use crate::core::{FlowKey, Packet};
 
 /// Configuration for flow buffering
 #[derive(Debug, Clone)]
@@ -244,7 +243,7 @@ impl FlowBuffer {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::core::packet::IpProtocol;
+    use crate::core::IpProtocol;
 
     fn make_test_packet() -> Packet {
         Packet::new(

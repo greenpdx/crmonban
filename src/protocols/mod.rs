@@ -31,8 +31,7 @@ pub use dns::{DnsAnalyzer, DnsMessage, DnsQuery, DnsAnswer};
 pub use tls::{TlsAnalyzer, TlsHandshake, Ja3Fingerprint};
 
 use serde::{Deserialize, Serialize};
-use crate::core::flow::Flow;
-use crate::core::packet::Packet;
+use crmonban_types::{Flow, Packet};
 
 /// Protocol analyzer trait
 pub trait ProtocolAnalyzer: Send + Sync {

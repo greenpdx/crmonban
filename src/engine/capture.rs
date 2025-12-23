@@ -12,8 +12,7 @@ use pcap::{Capture, Active, Offline};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::core::packet::{Packet, IpProtocol};
-use crate::core::parser::parse_ethernet_packet;
+use crate::core::{Packet, IpProtocol, parse_ethernet_packet};
 
 /// Capture method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

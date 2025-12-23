@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::incident::Incident;
-use crate::core::event::DetectionType;
+use crate::core::DetectionType;
 
 /// MITRE ATT&CK Tactic
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

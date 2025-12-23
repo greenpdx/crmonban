@@ -5,8 +5,7 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::core::flow::Flow;
-use crate::core::packet::{Direction, Packet};
+use crate::core::{Flow, Direction, Packet};
 use super::{HttpConfig, ProtocolAnalyzer, ProtocolEvent};
 
 /// HTTP request

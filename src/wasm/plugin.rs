@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::packet::Packet;
+use crate::core::Packet;
 use super::types::{StageContext, WasmResult};
 
 /// Plugin configuration
@@ -300,7 +300,7 @@ impl RustPlugin for MultiSignalPlugin {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::core::packet::IpProtocol;
+    use crate::core::IpProtocol;
 
     fn make_test_packet() -> Packet {
         Packet::new(

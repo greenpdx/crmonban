@@ -30,9 +30,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{trace, debug};
 
 use crate::brute_force::BruteForceTracker;
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
-use crate::core::packet::Packet;
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet};
 use crate::correlation::{CorrelationEngine, CorrelationConfig, CorrelationResult};
 use crate::dos::DoSDetector;
 use crate::flow::{FlowTracker, FlowConfig};
@@ -382,7 +380,7 @@ impl WorkerThread {
                     // Build flow state from analysis
                     let flow_state = if let Some(ref flow) = analysis.flow {
                         FlowState {
-                            established: flow.state == crate::core::flow::FlowState::Established,
+                            established: flow.state == crate::core::FlowState::Established,
                             to_server: flow.fwd_packets > flow.bwd_packets,
                         }
                     } else {
@@ -853,8 +851,7 @@ pub struct WorkerStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::packet::{IpProtocol, TcpFlags};
-    use crate::core::event::DetectionType;
+    use crate::core::{IpProtocol, TcpFlags, DetectionType};
     use crate::threat_intel::{Ioc, ThreatCategory as IntelThreatCategory};
     use std::net::IpAddr;
 

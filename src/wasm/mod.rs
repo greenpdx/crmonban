@@ -55,9 +55,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
-use crate::core::packet::Packet;
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet, Direction};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 /// WASM Engine configuration
@@ -261,7 +259,7 @@ impl StageProcessor for WasmEngine {
                 bytes_to_client: flow.bwd_bytes as u64,
                 state: format!("{:?}", flow.state),
                 duration_ms: duration.as_millis() as u64,
-                to_server: analysis.packet.direction == crate::core::packet::Direction::ToServer,
+                to_server: analysis.packet.direction == Direction::ToServer,
             });
         }
 
@@ -299,7 +297,7 @@ pub struct WasmStats {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::core::packet::IpProtocol;
+    use crate::core::IpProtocol;
 
     fn make_test_packet() -> Packet {
         Packet::new(

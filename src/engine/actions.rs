@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::core::event::{DetectionEvent, DetectionAction, Severity};
+use crate::core::{DetectionEvent, DetectionAction, Severity};
 
 /// Action configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -354,7 +354,7 @@ impl Default for ActionExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::event::DetectionType;
+    use crate::core::DetectionType;
 
     fn make_event(severity: Severity) -> DetectionEvent {
         DetectionEvent::new(

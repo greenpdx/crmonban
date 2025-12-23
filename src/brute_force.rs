@@ -29,8 +29,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 /// Configuration for brute force detection
@@ -398,7 +397,7 @@ impl BruteForceTracker {
     /// - SYN: Start a new session
     /// - FIN/RST: End a session and check for brute force pattern
     /// - Other: Update packet count for active session
-    pub fn process_packet(&mut self, packet: &crate::core::packet::Packet) -> Option<BruteForceAlert> {
+    pub fn process_packet(&mut self, packet: &crate::core::Packet) -> Option<BruteForceAlert> {
         // Only process TCP packets
         let flags = packet.tcp_flags()?;
         let src_ip = packet.src_ip();

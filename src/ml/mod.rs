@@ -39,9 +39,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
-use crate::core::flow::Flow;
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Flow};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 pub use features::{FeatureVector, FeatureExtractor, NUM_FEATURES, FEATURE_NAMES};
@@ -492,7 +490,7 @@ impl StageProcessor for MLEngine {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::core::packet::{Packet, IpProtocol};
+    use crate::core::{Packet, IpProtocol};
 
     fn make_test_flow(id: u64) -> Flow {
         let mut pkt = Packet::new(

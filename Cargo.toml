@@ -10,6 +10,9 @@ keywords = ["firewall", "nftables", "security", "intrusion-prevention", "fail2ba
 categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
+# Core types library
+crmonban-types = { path = "../crmonban-types" }
+
 # nftables JSON API
 nftables = { version = "0.6.4", registry = "kellnr" }
 

@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::packet::Packet;
+use crate::core::Packet;
 
 /// SYN flood detector configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -555,7 +555,7 @@ impl SynFloodDetector {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
-    use crate::core::packet::{IpProtocol, TcpFlags};
+    use crate::core::{IpProtocol, TcpFlags};
 
     fn make_syn_packet(src_ip: Ipv4Addr, dst_port: u16, src_port: u16) -> Packet {
         let mut pkt = Packet::new(

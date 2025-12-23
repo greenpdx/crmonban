@@ -15,9 +15,7 @@ pub mod syn_flood;
 use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::packet::Packet;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
+use crate::core::{PacketAnalysis, Packet, DetectionEvent, DetectionType, Severity};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 
 pub use syn_flood::{
@@ -248,7 +246,7 @@ pub struct DoSStats {
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::core::packet::{IpProtocol, TcpFlags};
+    use crate::core::{IpProtocol, TcpFlags};
 
     fn make_syn_packet(src_ip: Ipv4Addr, dst_port: u16, src_port: u16) -> Packet {
         let mut pkt = Packet::new(

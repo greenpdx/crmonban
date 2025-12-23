@@ -5,8 +5,7 @@
 use std::net::{Ipv4Addr, Ipv6Addr};
 use serde::{Deserialize, Serialize};
 
-use crate::core::flow::Flow;
-use crate::core::packet::Packet;
+use crate::core::{Flow, Packet};
 use super::{DnsConfig, ProtocolAnalyzer, ProtocolEvent};
 
 /// DNS record types

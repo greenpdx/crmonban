@@ -55,8 +55,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::core::event::DetectionEvent;
-use crate::core::packet::Packet;
+use crate::core::{DetectionEvent, Packet};
 use crate::database::BatchedWriterHandle;
 
 pub use capture::{PacketCapture, CaptureConfig, CaptureMethod};

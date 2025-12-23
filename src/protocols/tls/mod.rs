@@ -4,8 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::flow::Flow;
-use crate::core::packet::{Direction, Packet};
+use crate::core::{Flow, Direction, Packet};
 use super::{TlsConfig, ProtocolAnalyzer, ProtocolEvent, TlsEvent};
 
 /// JA3 fingerprint

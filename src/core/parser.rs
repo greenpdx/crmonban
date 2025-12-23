@@ -10,8 +10,8 @@
 use std::net::IpAddr;
 use etherparse::SlicedPacket;
 
-use super::packet::{Packet, IpProtocol, TcpFlags};
-use super::layers::{
+use crmonban_types::{
+    Packet, IpProtocol, TcpFlags,
     Layer3, Layer4, EthernetInfo,
     Ipv4Info, Ipv6Info,
     TcpInfo as LayerTcpInfo, UdpInfo, IcmpInfo, Icmpv6Info,

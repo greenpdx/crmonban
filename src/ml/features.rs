@@ -9,8 +9,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::core::flow::Flow;
-use crate::core::packet::IpProtocol;
+use crate::core::{Flow, IpProtocol};
 use crate::protocols::AppProtocol;
 
 /// Standard feature names (subset of CICIDS2017 features applicable to flow data)
@@ -517,7 +516,7 @@ pub fn standardize_features(features: &mut FeatureVector, mean: &[f32], std: &[f
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
-    use crate::core::packet::{Packet, IpProtocol};
+    use crate::core::{Packet, IpProtocol};
 
     fn make_test_flow() -> Flow {
         let mut pkt = Packet::new(

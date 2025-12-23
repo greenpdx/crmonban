@@ -10,8 +10,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use crate::core::flow::{Flow, FlowKey};
-use crate::core::packet::Packet;
+use crate::core::{Flow, FlowKey, Packet};
 use super::FlowConfig;
 
 /// Flow table entry with timeout tracking
@@ -253,7 +252,7 @@ impl FlowTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::packet::{IpProtocol, TcpFlags};
+    use crate::core::{IpProtocol, TcpFlags};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn make_packet(src_port: u16, dst_port: u16) -> Packet {

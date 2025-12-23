@@ -2,10 +2,7 @@
 //!
 //! Automatically detects application protocol and routes to appropriate analyzer.
 
-use crate::core::analysis::PacketAnalysis;
-use crate::core::event::{DetectionEvent, DetectionType, Severity};
-use crate::core::flow::Flow;
-use crate::core::packet::Packet;
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Flow, Packet};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 use super::AppProtocol;
 use super::{
@@ -158,7 +155,7 @@ impl StageProcessor for ProtocolDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::packet::IpProtocol;
+    use crate::core::IpProtocol;
     use std::net::{IpAddr, Ipv4Addr};
 
     fn make_packet(payload: &[u8], dst_port: u16) -> Packet {
