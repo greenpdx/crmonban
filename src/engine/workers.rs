@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{trace, debug};
 
 use crate::brute_force::BruteForceTracker;
-use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet};
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet, AlertAnalyzer, AnalyzerDecision};
 use crate::correlation::{CorrelationEngine, CorrelationConfig, CorrelationResult};
 use crate::dos::DoSDetector;
 use crate::flow::{FlowTracker, FlowConfig};
@@ -137,6 +137,9 @@ pub struct WorkerThread {
     // Stage 9: Correlation
     correlation_engine: CorrelationEngine,
 
+    // Alert Analyzer - decides block/continue after detection events
+    alert_analyzer: AlertAnalyzer,
+
     /// Per-stage metrics (basic counters)
     stage_metrics: PipelineMetrics,
     /// Last metrics log time
@@ -197,6 +200,9 @@ impl WorkerThread {
 
             // Stage 9: Correlation
             correlation_engine: CorrelationEngine::new(CorrelationConfig::default()),
+
+            // Alert Analyzer
+            alert_analyzer: AlertAnalyzer::default(),
 
             stage_metrics: PipelineMetrics::new(),
             last_metrics_log: Instant::now(),
@@ -260,6 +266,26 @@ impl WorkerThread {
                 profile.record(stage_latency_ns);
                 if stage_marked {
                     profile.record_marked();
+                }
+            }
+
+            // If detection events were added, consult alert analyzer
+            if stage_marked {
+                let decision = self.alert_analyzer.analyze(&mut analysis);
+                match decision {
+                    AnalyzerDecision::RemoveFlow => {
+                        // Remove from flow tracking
+                        if let Some(ref flow) = analysis.flow {
+                            self.flow_tracker.remove_flow(&flow.key);
+                        }
+                        // Stop processing further stages
+                        analysis.stop();
+                        trace!("Alert analyzer: RemoveFlow - stopping pipeline");
+                        break;
+                    }
+                    AnalyzerDecision::Continue => {
+                        // Continue to next stage
+                    }
                 }
             }
         }

@@ -130,7 +130,7 @@ impl ProtocolDetector {
     }
 }
 
-impl StageProcessor for ProtocolDetector {
+impl StageProcessor<PipelineConfig, PipelineStage> for ProtocolDetector {
     fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         // Need a mutable flow to analyze
         if let Some(ref mut flow) = analysis.flow {

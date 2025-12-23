@@ -25,6 +25,8 @@ pub use crmonban_types::{
     PacketAnalysis, FlowControl,
     // Protocols
     AppProtocol,
+    // Pipeline (AlertAnalyzer only - StageProcessor imported directly from crmonban_types)
+    AlertAnalyzer, AlertAnalyzerConfig, AnalyzerDecision,
 };
 
 // Re-export parser types

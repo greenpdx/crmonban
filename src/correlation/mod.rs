@@ -617,7 +617,7 @@ impl Default for CorrelationEngine {
     }
 }
 
-impl StageProcessor for CorrelationEngine {
+impl StageProcessor<PipelineConfig, PipelineStage> for CorrelationEngine {
     fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         // Correlation processes the events already collected in PacketAnalysis
         // This is the final stage - it correlates events from all previous stages

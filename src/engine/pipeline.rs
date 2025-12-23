@@ -34,31 +34,8 @@ use crate::database::{BatchedWriterHandle, IntervalStats};
 use super::workers::{WorkerPool, WorkerConfig};
 use super::EngineStats;
 
-/// Trait for pipeline stage processors
-///
-/// Each stage implements this trait with a uniform interface:
-/// - Receives `PacketAnalysis` containing packet, flow, events, and control flags
-/// - Returns the modified `PacketAnalysis` for the next stage
-///
-/// This enables a clean functional pipeline: stage1 -> stage2 -> ... -> stageN
-pub trait StageProcessor {
-    /// Process the packet analysis through this stage
-    ///
-    /// The stage may:
-    /// - Add detection events via `analysis.add_event()`
-    /// - Update flow state via `analysis.flow_mut()`
-    /// - Set control flags (stop_processing, suppress_events)
-    /// - Mark the packet as suspicious
-    fn process(&mut self, analysis: PacketAnalysis, config: &PipelineConfig) -> PacketAnalysis;
-
-    /// Get the pipeline stage type this processor handles
-    fn stage(&self) -> PipelineStage;
-
-    /// Check if this stage is enabled in the config
-    fn is_enabled(&self, config: &PipelineConfig) -> bool {
-        config.is_stage_enabled(self.stage())
-    }
-}
+// Re-export StageProcessor from crmonban-types
+pub use crmonban_types::StageProcessor;
 
 /// Pipeline configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

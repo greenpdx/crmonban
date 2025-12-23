@@ -294,7 +294,7 @@ impl IntelEngine {
     }
 }
 
-impl StageProcessor for IntelEngine {
+impl StageProcessor<PipelineConfig, PipelineStage> for IntelEngine {
     fn process(&mut self, mut analysis: PacketAnalysis, config: &PipelineConfig) -> PacketAnalysis {
         // Check source IP
         if let Some(m) = self.check_ip(&analysis.packet.src_ip()) {

@@ -95,6 +95,11 @@ impl FlowTracker {
         self.table.get(key).map(|f| f.stats())
     }
 
+    /// Remove a flow by key (used by alert analyzer on block decision)
+    pub fn remove_flow(&mut self, key: &FlowKey) -> Option<Flow> {
+        self.table.remove(key)
+    }
+
     /// Get active flow count
     pub fn active_flows(&self) -> usize {
         self.table.len()
@@ -205,7 +210,7 @@ impl FlowTracker {
     }
 }
 
-impl StageProcessor for FlowTracker {
+impl StageProcessor<PipelineConfig, PipelineStage> for FlowTracker {
     fn process(&mut self, analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         self.process_analysis(analysis)
     }
