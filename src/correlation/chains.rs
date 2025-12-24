@@ -176,6 +176,14 @@ impl MitreTactic {
                 Some(MitreTactic::DefenseEvasion)
             }
             DetectionType::TlsKnownMalwareJa3 => Some(MitreTactic::CommandAndControl),
+            // SSH Attack types
+            DetectionType::SshBruteForce => Some(MitreTactic::CredentialAccess),
+            DetectionType::SshVersionVulnerable => Some(MitreTactic::InitialAccess),
+            DetectionType::SshWeakKeyExchange | DetectionType::SshWeakCipher |
+            DetectionType::SshWeakMac => Some(MitreTactic::DefenseEvasion),
+            DetectionType::SshKnownMalwareHashsh => Some(MitreTactic::CommandAndControl),
+            DetectionType::SshRootLogin => Some(MitreTactic::PrivilegeEscalation),
+            DetectionType::SshInvalidUser => Some(MitreTactic::CredentialAccess),
             // Signatures
             DetectionType::Signature => Some(MitreTactic::InitialAccess),
             // Phishing / Spam

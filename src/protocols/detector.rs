@@ -1,9 +1,10 @@
 //! Protocol detection and routing
 //!
 //! Automatically detects application protocol and routes to appropriate analyzer.
-//! Integrates attack detection engines for HTTP, DNS, and TLS.
+//! Integrates attack detection engines for HTTP, DNS, TLS, and SSH.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 
 use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Flow, Packet};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
@@ -12,6 +13,8 @@ use super::{
     ProtocolAnalyzer, ProtocolConfig, ProtocolEvent,
     HttpAnalyzer, DnsAnalyzer, TlsAnalyzer, HttpTransaction, DnsMessage, TlsEvent,
 };
+use super::ssh::{SshAnalyzer, SshAnalyzerConfig, SshParser};
+use crmonban_types::protocols::SshEvent;
 
 // HTTP attack detection engine
 use crmonban_detection::{DetectionEngine as HttpAttackEngine, ScanReport};
@@ -23,6 +26,7 @@ pub struct ProtocolDetector {
     http: HttpAnalyzer,
     dns: DnsAnalyzer,
     tls: TlsAnalyzer,
+    ssh: SshAnalyzer,
     /// HTTP attack detection engine (optional - requires patterns file)
     http_attack_engine: Option<HttpAttackEngine>,
 }
@@ -30,10 +34,26 @@ pub struct ProtocolDetector {
 impl ProtocolDetector {
     /// Create a new protocol detector
     pub fn new(config: ProtocolConfig) -> Self {
+        let ssh_config = SshAnalyzerConfig {
+            enabled: config.ssh.enabled,
+            ports: config.ssh.ports.clone(),
+            detect_brute_force: config.ssh.detect_brute_force,
+            brute_force_threshold: config.ssh.brute_force_threshold,
+            brute_force_window_secs: config.ssh.brute_force_window_secs,
+            detect_vulnerable_versions: config.ssh.detect_vulnerable_versions,
+            block_ssh1: config.ssh.block_ssh1,
+            hassh_enabled: config.ssh.hassh_enabled,
+            detect_weak_algorithms: config.ssh.detect_weak_algorithms,
+            alert_root_login: config.ssh.alert_root_login,
+            cve_database_path: config.ssh.cve_database_path.clone(),
+            hassh_database_path: config.ssh.hassh_database_path.clone(),
+        };
+
         Self {
             http: HttpAnalyzer::new(config.http.clone()),
             dns: DnsAnalyzer::new(config.dns.clone()),
             tls: TlsAnalyzer::new(config.tls.clone()),
+            ssh: SshAnalyzer::new(ssh_config),
             config,
             http_attack_engine: None,
         }
@@ -45,10 +65,26 @@ impl ProtocolDetector {
             .map_err(|e| tracing::warn!("Failed to load HTTP attack patterns: {}", e))
             .ok();
 
+        let ssh_config = SshAnalyzerConfig {
+            enabled: config.ssh.enabled,
+            ports: config.ssh.ports.clone(),
+            detect_brute_force: config.ssh.detect_brute_force,
+            brute_force_threshold: config.ssh.brute_force_threshold,
+            brute_force_window_secs: config.ssh.brute_force_window_secs,
+            detect_vulnerable_versions: config.ssh.detect_vulnerable_versions,
+            block_ssh1: config.ssh.block_ssh1,
+            hassh_enabled: config.ssh.hassh_enabled,
+            detect_weak_algorithms: config.ssh.detect_weak_algorithms,
+            alert_root_login: config.ssh.alert_root_login,
+            cve_database_path: config.ssh.cve_database_path.clone(),
+            hassh_database_path: config.ssh.hassh_database_path.clone(),
+        };
+
         Self {
             http: HttpAnalyzer::new(config.http.clone()),
             dns: DnsAnalyzer::new(config.dns.clone()),
             tls: TlsAnalyzer::new(config.tls.clone()),
+            ssh: SshAnalyzer::new(ssh_config),
             config,
             http_attack_engine,
         }
@@ -397,6 +433,38 @@ impl ProtocolDetector {
         false
     }
 
+    /// Analyze SSH event for attacks
+    fn analyze_ssh_attacks(&mut self, ssh_event: &SshEvent, packet: &Packet, flow_id: u64) -> Vec<DetectionEvent> {
+        let src_ip = packet.src_ip();
+
+        // Use SSH analyzer to detect attacks
+        let detections = self.ssh.analyze(ssh_event, src_ip, flow_id);
+
+        // Convert SSH detections to DetectionEvents
+        detections.into_iter().map(|d| {
+            let severity = if d.severity >= 0.9 {
+                Severity::Critical
+            } else if d.severity >= 0.7 {
+                Severity::High
+            } else if d.severity >= 0.4 {
+                Severity::Medium
+            } else {
+                Severity::Low
+            };
+
+            DetectionEvent::new(
+                d.detection_type,
+                severity,
+                packet.src_ip(),
+                packet.dst_ip(),
+                d.description,
+            )
+            .with_detector("sshAnalyzer")
+            .with_confidence(d.severity)
+            .with_ports(packet.src_port(), packet.dst_port())
+        }).collect()
+    }
+
     /// Analyze a packet and return protocol events
     pub fn analyze(&self, packet: &Packet, flow: &mut Flow) -> Vec<ProtocolEvent> {
         if !self.config.enabled || packet.payload().is_empty() {
@@ -430,6 +498,11 @@ impl ProtocolDetector {
                     events.push(event);
                 }
             }
+            AppProtocol::Ssh => {
+                if let Some(event) = self.ssh.parse(packet, flow) {
+                    events.push(event);
+                }
+            }
             _ => {
                 // Try TLS detection on common TLS ports
                 if self.config.tls.ports.contains(&packet.dst_port())
@@ -437,6 +510,15 @@ impl ProtocolDetector {
                 {
                     if let Some(event) = self.tls.parse(packet, flow) {
                         flow.app_protocol = AppProtocol::Https;
+                        events.push(event);
+                    }
+                }
+                // Try SSH detection on common SSH ports
+                else if self.config.ssh.ports.contains(&packet.dst_port())
+                    || self.config.ssh.ports.contains(&packet.src_port())
+                {
+                    if let Some(event) = self.ssh.parse(packet, flow) {
+                        flow.app_protocol = AppProtocol::Ssh;
                         events.push(event);
                     }
                 }
@@ -468,6 +550,11 @@ impl ProtocolDetector {
             return AppProtocol::Https;
         }
 
+        // Check SSH
+        if self.config.ssh.enabled && self.ssh.detect(payload, packet.dst_port()) {
+            return AppProtocol::Ssh;
+        }
+
         // Fall back to port-based detection
         AppProtocol::from_port(packet.dst_port(), packet.protocol())
     }
@@ -487,6 +574,11 @@ impl ProtocolDetector {
         &self.tls
     }
 
+    /// Get SSH analyzer
+    pub fn ssh(&self) -> &SshAnalyzer {
+        &self.ssh
+    }
+
     /// Convert protocol event to detection event (for anomalies/alerts)
     /// Note: Current ProtocolEvent doesn't have anomaly variants, so this always returns None.
     /// Anomalies would need to be detected by analyzers and stored in ProtocolEvent.
@@ -500,10 +592,16 @@ impl ProtocolDetector {
 
 impl StageProcessor<PipelineConfig, PipelineStage> for ProtocolDetector {
     async fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
-        // Need a mutable flow to analyze
-        if let Some(ref mut flow) = analysis.flow {
-            let events = self.analyze(&analysis.packet, flow);
+        // Need a mutable flow to analyze - extract flow_id first to avoid borrow conflicts
+        let flow_id = analysis.flow.as_ref().map(|f| f.id);
 
+        let events = if let Some(ref mut flow) = analysis.flow {
+            self.analyze(&analysis.packet, flow)
+        } else {
+            Vec::new()
+        };
+
+        if !events.is_empty() {
             // Store protocol events for later stages (attack engines, ML, correlation)
             analysis.add_protocol_events(events.clone());
 
@@ -529,6 +627,15 @@ impl StageProcessor<PipelineConfig, PipelineStage> for ProtocolDetector {
                         let attack_events = self.analyze_tls_attacks(tls_event, &analysis.packet);
                         for event in attack_events {
                             analysis.add_event(event);
+                        }
+                    }
+                    ProtocolEvent::Ssh(ssh_event) => {
+                        // Run SSH attack detection
+                        if let Some(fid) = flow_id {
+                            let attack_events = self.analyze_ssh_attacks(ssh_event, &analysis.packet, fid);
+                            for event in attack_events {
+                                analysis.add_event(event);
+                            }
                         }
                     }
                     ProtocolEvent::Generic { .. } => {

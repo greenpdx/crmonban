@@ -158,6 +158,39 @@ impl RuleLoader {
             .unwrap_or(3)
     }
 
+    /// Check if a rule should be included based on layer/classtype filters
+    /// Returns true if rule should be loaded, false if it should be skipped
+    fn should_include_rule(&self, rule: &Rule) -> bool {
+        // Check protocol exclusions
+        if !self.config.excluded_protocols.is_empty() {
+            let proto_str = rule.protocol.to_string();
+            if self.config.excluded_protocols.iter().any(|p| p.eq_ignore_ascii_case(&proto_str)) {
+                return false;
+            }
+        }
+
+        // Check classtype exclusions
+        if let Some(ref classtype) = rule.classtype {
+            if self.config.excluded_classtypes.iter().any(|c| c.eq_ignore_ascii_case(classtype)) {
+                return false;
+            }
+        }
+
+        // Check classtype inclusions (if specified, only allow these)
+        if !self.config.included_classtypes.is_empty() {
+            if let Some(ref classtype) = rule.classtype {
+                if !self.config.included_classtypes.iter().any(|c| c.eq_ignore_ascii_case(classtype)) {
+                    return false;
+                }
+            } else {
+                // No classtype and we have inclusion list - skip
+                return false;
+            }
+        }
+
+        true
+    }
+
     /// Load all configured rules
     pub fn load_all(&mut self) -> Result<RuleSet, std::io::Error> {
         let mut ruleset = RuleSet::default();
@@ -252,7 +285,11 @@ impl RuleLoader {
                             rule.priority = self.get_priority_for_classtype(classtype);
                         }
                     }
-                    ruleset.add_rule(rule);
+
+                    // Check layer/classtype filters
+                    if self.should_include_rule(&rule) {
+                        ruleset.add_rule(rule);
+                    }
                 }
                 Err(mut e) => {
                     e.line = Some(line_num);

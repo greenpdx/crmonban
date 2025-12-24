@@ -104,6 +104,18 @@ pub struct SignatureConfig {
 
     /// Suppression rules file
     pub suppression_file: Option<PathBuf>,
+
+    /// Excluded classtypes - rules with these classifications are skipped
+    /// Default excludes L2-4 detections handled by layer2detect and
+    /// HTTP/DNS/TLS attacks handled by ProtocolAnalysis
+    pub excluded_classtypes: Vec<String>,
+
+    /// Excluded protocols - rules for these protocols are skipped
+    /// e.g., ["http", "dns", "tls"] if handled by ProtocolAnalysis
+    pub excluded_protocols: Vec<String>,
+
+    /// Only load rules matching these classtypes (empty = all)
+    pub included_classtypes: Vec<String>,
 }
 
 impl Default for SignatureConfig {
@@ -128,8 +140,38 @@ impl Default for SignatureConfig {
             classification_file: None,
             reference_config: None,
             suppression_file: None,
+            // Default: exclude L2-4 detections (handled by layer2detect)
+            // and protocol-specific attacks (handled by ProtocolAnalysis)
+            excluded_classtypes: default_excluded_classtypes(),
+            excluded_protocols: Vec::new(), // Empty = don't filter by protocol
+            included_classtypes: Vec::new(), // Empty = include all (after exclusions)
         }
     }
+}
+
+/// Default classtypes to exclude from signature loading
+/// These are handled by other pipeline stages:
+/// - Layer 2-4: layer2detect (scans, DoS, brute force)
+/// - HTTP/DNS/TLS: ProtocolAnalysis (web attacks, DNS tunneling, TLS attacks)
+fn default_excluded_classtypes() -> Vec<String> {
+    vec![
+        // L2-4: Handled by layer2detect
+        "attempted-recon".into(),           // Port scans, network mapping
+        "network-scan".into(),              // Network scanning
+        "denial-of-service".into(),         // DoS/DDoS attacks
+        "attempted-dos".into(),             // DoS attempts
+        "misc-attack".into(),               // Generic network attacks (often scans)
+
+        // HTTP: Handled by ProtocolAnalysis + httpAttack
+        "web-application-attack".into(),    // SQL injection, XSS, etc.
+        "web-application-activity".into(),  // HTTP anomalies
+
+        // DNS: Handled by ProtocolAnalysis DNS detection
+        // Note: Keep "dns" protocol rules for C2 domain matching
+
+        // TLS: Handled by ProtocolAnalysis TLS detection
+        // Note: Keep ja3.hash rules for malware fingerprinting
+    ]
 }
 
 /// Default rule variables

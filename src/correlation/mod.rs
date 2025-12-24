@@ -412,6 +412,15 @@ impl CorrelationEngine {
             DetectionType::TlsSelfSigned => "TlsSelfSigned",
             DetectionType::TlsExpiredCert => "TlsExpiredCert",
             DetectionType::TlsKnownMalwareJa3 => "TlsKnownMalwareJa3",
+            // SSH attack types
+            DetectionType::SshBruteForce => "SshBruteForce",
+            DetectionType::SshVersionVulnerable => "SshVersionVulnerable",
+            DetectionType::SshWeakKeyExchange => "SshWeakKeyExchange",
+            DetectionType::SshWeakCipher => "SshWeakCipher",
+            DetectionType::SshWeakMac => "SshWeakMac",
+            DetectionType::SshKnownMalwareHashsh => "SshKnownMalwareHashsh",
+            DetectionType::SshRootLogin => "SshRootLogin",
+            DetectionType::SshInvalidUser => "SshInvalidUser",
             DetectionType::Custom(_) => "Custom",
         };
         type_strs.iter().any(|t| type_name.contains(t.as_str()))

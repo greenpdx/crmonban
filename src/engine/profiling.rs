@@ -21,8 +21,14 @@ use super::pipeline::PipelineStage;
 pub struct StageProfile {
     /// Packets that passed through this stage
     pub pass_count: AtomicU64,
-    /// Packets marked as suspicious by this stage
+    /// Packets marked as suspicious by this stage (detections)
     pub marked_count: AtomicU64,
+    /// True positives (confirmed detections)
+    pub true_positives: AtomicU64,
+    /// False positives (confirmed false alarms)
+    pub false_positives: AtomicU64,
+    /// False negatives (missed detections - from external feedback)
+    pub false_negatives: AtomicU64,
     /// Errors encountered
     pub errors: AtomicU64,
     /// Latency histogram (nanoseconds)
@@ -47,6 +53,9 @@ impl StageProfile {
         Self {
             pass_count: AtomicU64::new(0),
             marked_count: AtomicU64::new(0),
+            true_positives: AtomicU64::new(0),
+            false_positives: AtomicU64::new(0),
+            false_negatives: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             latency_histogram: Mutex::new(histogram),
             total_time_ns: AtomicU64::new(0),
@@ -72,6 +81,83 @@ impl StageProfile {
     /// Record an error
     pub fn record_error(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a confirmed true positive (detection was correct)
+    pub fn record_true_positive(&self) {
+        self.true_positives.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a confirmed false positive (detection was wrong)
+    pub fn record_false_positive(&self) {
+        self.false_positives.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a false negative (missed detection - from external feedback)
+    pub fn record_false_negative(&self) {
+        self.false_negatives.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get detection rate (marked / pass)
+    /// Returns 0.0 - 1.0 (percentage as decimal)
+    pub fn detection_rate(&self) -> f64 {
+        let pass = self.pass_count.load(Ordering::Relaxed);
+        let marked = self.marked_count.load(Ordering::Relaxed);
+        if pass > 0 {
+            marked as f64 / pass as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Get false positive rate (FP / (FP + TN))
+    /// Note: TN is estimated as pass_count - marked_count - FN
+    /// Returns 0.0 - 1.0 (percentage as decimal)
+    pub fn false_positive_rate(&self) -> f64 {
+        let fp = self.false_positives.load(Ordering::Relaxed);
+        let marked = self.marked_count.load(Ordering::Relaxed);
+        if marked > 0 {
+            fp as f64 / marked as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Get precision (TP / (TP + FP))
+    /// Returns 0.0 - 1.0, or None if no confirmed feedback
+    pub fn precision(&self) -> Option<f64> {
+        let tp = self.true_positives.load(Ordering::Relaxed);
+        let fp = self.false_positives.load(Ordering::Relaxed);
+        let total = tp + fp;
+        if total > 0 {
+            Some(tp as f64 / total as f64)
+        } else {
+            None
+        }
+    }
+
+    /// Get recall (TP / (TP + FN))
+    /// Returns 0.0 - 1.0, or None if no confirmed feedback
+    pub fn recall(&self) -> Option<f64> {
+        let tp = self.true_positives.load(Ordering::Relaxed);
+        let fn_ = self.false_negatives.load(Ordering::Relaxed);
+        let total = tp + fn_;
+        if total > 0 {
+            Some(tp as f64 / total as f64)
+        } else {
+            None
+        }
+    }
+
+    /// Get F1 score (harmonic mean of precision and recall)
+    pub fn f1_score(&self) -> Option<f64> {
+        let precision = self.precision()?;
+        let recall = self.recall()?;
+        if precision + recall > 0.0 {
+            Some(2.0 * precision * recall / (precision + recall))
+        } else {
+            None
+        }
     }
 
     /// Get latency percentile in nanoseconds
@@ -113,6 +199,7 @@ impl StageProfile {
     pub fn snapshot(&self, stage_name: &'static str, total_pipeline_time_ns: u64) -> StageProfileSnapshot {
         let hist = self.latency_histogram.lock();
         let pass_count = self.pass_count.load(Ordering::Relaxed);
+        let marked_count = self.marked_count.load(Ordering::Relaxed);
         let stage_time = self.total_time_ns.load(Ordering::Relaxed);
 
         let time_percent = if total_pipeline_time_ns > 0 {
@@ -121,10 +208,41 @@ impl StageProfile {
             0.0
         };
 
+        let detection_rate = if pass_count > 0 {
+            marked_count as f64 / pass_count as f64
+        } else {
+            0.0
+        };
+
+        let tp = self.true_positives.load(Ordering::Relaxed);
+        let fp = self.false_positives.load(Ordering::Relaxed);
+        let fn_ = self.false_negatives.load(Ordering::Relaxed);
+
+        let precision = if tp + fp > 0 {
+            Some(tp as f64 / (tp + fp) as f64)
+        } else {
+            None
+        };
+
+        let recall = if tp + fn_ > 0 {
+            Some(tp as f64 / (tp + fn_) as f64)
+        } else {
+            None
+        };
+
+        let false_positive_rate = if marked_count > 0 {
+            fp as f64 / marked_count as f64
+        } else {
+            0.0
+        };
+
         StageProfileSnapshot {
             name: stage_name,
             pass_count,
-            marked_count: self.marked_count.load(Ordering::Relaxed),
+            marked_count,
+            true_positives: tp,
+            false_positives: fp,
+            false_negatives: fn_,
             errors: self.errors.load(Ordering::Relaxed),
             latency_p50_ns: hist.value_at_percentile(50.0),
             latency_p95_ns: hist.value_at_percentile(95.0),
@@ -132,6 +250,10 @@ impl StageProfile {
             latency_mean_ns: hist.mean(),
             latency_max_ns: hist.max(),
             time_percent,
+            detection_rate,
+            false_positive_rate,
+            precision,
+            recall,
         }
     }
 
@@ -148,8 +270,14 @@ pub struct StageProfileSnapshot {
     pub name: &'static str,
     /// Packets that passed through
     pub pass_count: u64,
-    /// Packets marked as suspicious
+    /// Packets marked as suspicious (detections)
     pub marked_count: u64,
+    /// Confirmed true positives
+    pub true_positives: u64,
+    /// Confirmed false positives
+    pub false_positives: u64,
+    /// Confirmed false negatives
+    pub false_negatives: u64,
     /// Errors encountered
     pub errors: u64,
     /// p50 latency (nanoseconds)
@@ -164,6 +292,14 @@ pub struct StageProfileSnapshot {
     pub latency_max_ns: u64,
     /// Percentage of total pipeline time
     pub time_percent: f32,
+    /// Detection rate (marked / pass)
+    pub detection_rate: f64,
+    /// False positive rate (FP / marked)
+    pub false_positive_rate: f64,
+    /// Precision (TP / (TP + FP)), None if no feedback
+    pub precision: Option<f64>,
+    /// Recall (TP / (TP + FN)), None if no feedback
+    pub recall: Option<f64>,
 }
 
 impl StageProfileSnapshot {
@@ -289,6 +425,36 @@ impl PipelineProfiler {
 
         let total_hist = self.total_latency.lock();
         let uptime = self.start_time.elapsed().as_secs();
+        let total_packets = self.total_packets.load(Ordering::Relaxed);
+
+        // Aggregate detection metrics across stages
+        let total_detections: u64 = stages.iter().map(|s| s.marked_count).sum();
+        let total_true_positives: u64 = stages.iter().map(|s| s.true_positives).sum();
+        let total_false_positives: u64 = stages.iter().map(|s| s.false_positives).sum();
+        let total_false_negatives: u64 = stages.iter().map(|s| s.false_negatives).sum();
+
+        let total_detection_rate = if total_packets > 0 {
+            total_detections as f64 / total_packets as f64
+        } else {
+            0.0
+        };
+
+        let total_precision = if total_true_positives + total_false_positives > 0 {
+            Some(total_true_positives as f64 / (total_true_positives + total_false_positives) as f64)
+        } else {
+            None
+        };
+
+        let total_recall = if total_true_positives + total_false_negatives > 0 {
+            Some(total_true_positives as f64 / (total_true_positives + total_false_negatives) as f64)
+        } else {
+            None
+        };
+
+        let total_f1_score = match (total_precision, total_recall) {
+            (Some(p), Some(r)) if p + r > 0.0 => Some(2.0 * p * r / (p + r)),
+            _ => None,
+        };
 
         PipelineProfileSnapshot {
             stages,
@@ -298,7 +464,15 @@ impl PipelineProfiler {
             total_latency_mean_ns: total_hist.mean(),
             total_latency_max_ns: total_hist.max(),
             total_throughput_pps: self.throughput() as u64,
-            total_packets: self.total_packets.load(Ordering::Relaxed),
+            total_packets,
+            total_detections,
+            total_detection_rate,
+            total_true_positives,
+            total_false_positives,
+            total_false_negatives,
+            total_precision,
+            total_recall,
+            total_f1_score,
             bottleneck_stage: self.bottleneck().map(|s| s.name()),
             uptime_secs: uptime,
         }
@@ -313,15 +487,33 @@ impl PipelineProfiler {
         *self.last_reset.lock() = Instant::now();
     }
 
+    /// Record feedback for a specific stage
+    pub fn record_feedback(&self, stage: PipelineStage, is_true_positive: bool) {
+        if let Some(profile) = self.stages.get(&stage) {
+            if is_true_positive {
+                profile.record_true_positive();
+            } else {
+                profile.record_false_positive();
+            }
+        }
+    }
+
+    /// Record a missed detection (false negative) for a stage
+    pub fn record_missed_detection(&self, stage: PipelineStage) {
+        if let Some(profile) = self.stages.get(&stage) {
+            profile.record_false_negative();
+        }
+    }
+
     /// Log profile summary (for debug output)
     pub fn log_summary(&self) {
         use tracing::debug;
 
         let snapshot = self.snapshot();
 
-        debug!("┌────────────────────────┬──────────┬─────────┬─────────┬─────────┬─────────┬────────┐");
-        debug!("│ Stage                  │ Pass     │ Marked  │ p50     │ p95     │ p99     │ Time % │");
-        debug!("├────────────────────────┼──────────┼─────────┼─────────┼─────────┼─────────┼────────┤");
+        debug!("┌────────────────────────┬──────────┬─────────┬─────────┬─────────┬─────────┬─────────┬────────┐");
+        debug!("│ Stage                  │ Pass     │ Detect  │ Det%    │ p50     │ p95     │ p99     │ Time % │");
+        debug!("├────────────────────────┼──────────┼─────────┼─────────┼─────────┼─────────┼─────────┼────────┤");
 
         for stage in &snapshot.stages {
             if stage.pass_count > 0 {
@@ -331,10 +523,11 @@ impl PipelineProfiler {
                     ""
                 };
                 debug!(
-                    "│ {:22} │ {:>8} │ {:>7} │ {:>7} │ {:>7} │ {:>7} │ {:>5.1}%{}│",
+                    "│ {:22} │ {:>8} │ {:>7} │ {:>6.2}% │ {:>7} │ {:>7} │ {:>7} │ {:>5.1}%{}│",
                     stage.name,
                     stage.pass_count,
                     stage.marked_count,
+                    stage.detection_rate * 100.0,
                     StageProfileSnapshot::format_latency(stage.latency_p50_ns),
                     StageProfileSnapshot::format_latency(stage.latency_p95_ns),
                     StageProfileSnapshot::format_latency(stage.latency_p99_ns),
@@ -344,21 +537,72 @@ impl PipelineProfiler {
             }
         }
 
-        debug!("├────────────────────────┼──────────┼─────────┼─────────┼─────────┼─────────┼────────┤");
+        debug!("├────────────────────────┼──────────┼─────────┼─────────┼─────────┼─────────┼─────────┼────────┤");
         debug!(
-            "│ TOTAL                  │ {:>8} │         │ {:>7} │ {:>7} │ {:>7} │  100%  │",
+            "│ TOTAL                  │ {:>8} │ {:>7} │ {:>6.2}% │ {:>7} │ {:>7} │ {:>7} │  100%  │",
             snapshot.total_packets,
+            snapshot.total_detections,
+            snapshot.total_detection_rate * 100.0,
             StageProfileSnapshot::format_latency(snapshot.total_latency_p50_ns),
             StageProfileSnapshot::format_latency(snapshot.total_latency_p95_ns),
             StageProfileSnapshot::format_latency(snapshot.total_latency_p99_ns),
         );
-        debug!("└────────────────────────┴──────────┴─────────┴─────────┴─────────┴─────────┴────────┘");
+        debug!("└────────────────────────┴──────────┴─────────┴─────────┴─────────┴─────────┴─────────┴────────┘");
 
+        // Show throughput and bottleneck
+        let mut summary = format!("Throughput: {} pps", snapshot.total_throughput_pps);
         if let Some(bottleneck) = &snapshot.bottleneck_stage {
-            debug!("Throughput: {} pps | Bottleneck: {}", snapshot.total_throughput_pps, bottleneck);
-        } else {
-            debug!("Throughput: {} pps", snapshot.total_throughput_pps);
+            summary.push_str(&format!(" | Bottleneck: {}", bottleneck));
         }
+        debug!("{}", summary);
+
+        // Show detection accuracy if feedback available
+        if snapshot.total_true_positives > 0 || snapshot.total_false_positives > 0 {
+            debug!(
+                "Detection Accuracy: TP={} FP={} FN={} | Precision={} Recall={} F1={}",
+                snapshot.total_true_positives,
+                snapshot.total_false_positives,
+                snapshot.total_false_negatives,
+                PipelineProfileSnapshot::format_optional_percent(snapshot.total_precision),
+                PipelineProfileSnapshot::format_optional_percent(snapshot.total_recall),
+                PipelineProfileSnapshot::format_optional_percent(snapshot.total_f1_score),
+            );
+        }
+    }
+
+    /// Log detailed detection metrics for each stage
+    pub fn log_detection_metrics(&self) {
+        use tracing::info;
+
+        let snapshot = self.snapshot();
+
+        info!("┌────────────────────────┬─────────┬─────────┬─────────┬───────────┬───────────┐");
+        info!("│ Stage                  │ Detect  │ TP      │ FP      │ Precision │ FP Rate   │");
+        info!("├────────────────────────┼─────────┼─────────┼─────────┼───────────┼───────────┤");
+
+        for stage in &snapshot.stages {
+            if stage.marked_count > 0 || stage.true_positives > 0 || stage.false_positives > 0 {
+                info!(
+                    "│ {:22} │ {:>7} │ {:>7} │ {:>7} │ {:>9} │ {:>9} │",
+                    stage.name,
+                    stage.marked_count,
+                    stage.true_positives,
+                    stage.false_positives,
+                    PipelineProfileSnapshot::format_optional_percent(stage.precision),
+                    PipelineProfileSnapshot::format_percent(stage.false_positive_rate),
+                );
+            }
+        }
+
+        info!("├────────────────────────┼─────────┼─────────┼─────────┼───────────┼───────────┤");
+        info!(
+            "│ TOTAL                  │ {:>7} │ {:>7} │ {:>7} │ {:>9} │           │",
+            snapshot.total_detections,
+            snapshot.total_true_positives,
+            snapshot.total_false_positives,
+            PipelineProfileSnapshot::format_optional_percent(snapshot.total_precision),
+        );
+        info!("└────────────────────────┴─────────┴─────────┴─────────┴───────────┴───────────┘");
     }
 }
 
@@ -381,10 +625,39 @@ pub struct PipelineProfileSnapshot {
     pub total_throughput_pps: u64,
     /// Total packets processed
     pub total_packets: u64,
+    /// Total detections (sum of all stages' marked_count)
+    pub total_detections: u64,
+    /// Total detection rate (detections / packets)
+    pub total_detection_rate: f64,
+    /// Total true positives (sum across stages)
+    pub total_true_positives: u64,
+    /// Total false positives (sum across stages)
+    pub total_false_positives: u64,
+    /// Total false negatives (sum across stages)
+    pub total_false_negatives: u64,
+    /// Overall precision (if feedback available)
+    pub total_precision: Option<f64>,
+    /// Overall recall (if feedback available)
+    pub total_recall: Option<f64>,
+    /// Overall F1 score (if feedback available)
+    pub total_f1_score: Option<f64>,
     /// Bottleneck stage name
     pub bottleneck_stage: Option<&'static str>,
     /// Uptime in seconds
     pub uptime_secs: u64,
+}
+
+impl PipelineProfileSnapshot {
+    /// Format percentage as string
+    pub fn format_percent(rate: f64) -> String {
+        format!("{:.2}%", rate * 100.0)
+    }
+
+    /// Format optional percentage
+    pub fn format_optional_percent(rate: Option<f64>) -> String {
+        rate.map(|r| format!("{:.2}%", r * 100.0))
+            .unwrap_or_else(|| "N/A".to_string())
+    }
 }
 
 #[cfg(test)]

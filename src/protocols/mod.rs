@@ -4,6 +4,7 @@
 //! - HTTP: Request/response parsing, header extraction
 //! - DNS: Query/answer parsing
 //! - TLS: Handshake parsing, JA3/JA3S fingerprinting
+//! - SSH: Version detection, HASSH fingerprinting, brute force detection
 //!
 //! # Architecture
 //!
@@ -22,13 +23,15 @@ pub mod detector;
 pub mod http;
 pub mod dns;
 pub mod tls;
+pub mod ssh;
 
 // Re-export core protocol types from crmonban-types
-pub use crmonban_types::{
-    AppProtocol, ProtocolEvent,
+pub use crmonban_types::{AppProtocol, ProtocolEvent};
+pub use crmonban_types::protocols::{
     HttpTransaction, HttpRequest, HttpResponse,
     DnsMessage, DnsQuery, DnsAnswer,
     TlsEvent, Ja3Fingerprint,
+    SshEvent, SshAuthMethod, HasshFingerprint,
 };
 
 pub use detector::ProtocolDetector;
@@ -36,6 +39,7 @@ pub use detector::ProtocolDetector;
 pub use http::HttpAnalyzer;
 pub use dns::DnsAnalyzer;
 pub use tls::TlsAnalyzer;
+pub use ssh::SshAnalyzer;
 
 use serde::{Deserialize, Serialize};
 use crmonban_types::{Flow, Packet};
@@ -66,6 +70,9 @@ pub struct ProtocolConfig {
 
     /// TLS configuration
     pub tls: TlsConfig,
+
+    /// SSH configuration
+    pub ssh: SshConfig,
 }
 
 impl Default for ProtocolConfig {
@@ -75,6 +82,7 @@ impl Default for ProtocolConfig {
             http: HttpConfig::default(),
             dns: DnsConfig::default(),
             tls: TlsConfig::default(),
+            ssh: SshConfig::default(),
         }
     }
 }
@@ -157,6 +165,42 @@ impl Default for TlsConfig {
     }
 }
 
+/// SSH analyzer configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SshConfig {
+    pub enabled: bool,
+    pub ports: Vec<u16>,
+    pub detect_brute_force: bool,
+    pub brute_force_threshold: u32,
+    pub brute_force_window_secs: u64,
+    pub detect_vulnerable_versions: bool,
+    pub block_ssh1: bool,
+    pub hassh_enabled: bool,
+    pub detect_weak_algorithms: bool,
+    pub alert_root_login: bool,
+    pub cve_database_path: Option<String>,
+    pub hassh_database_path: Option<String>,
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ports: vec![22, 2222, 22222],
+            detect_brute_force: true,
+            brute_force_threshold: 5,
+            brute_force_window_secs: 60,
+            detect_vulnerable_versions: true,
+            block_ssh1: true,
+            hassh_enabled: true,
+            detect_weak_algorithms: true,
+            alert_root_login: true,
+            cve_database_path: None,
+            hassh_database_path: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +212,8 @@ mod tests {
         assert!(config.http.enabled);
         assert!(config.dns.enabled);
         assert!(config.tls.enabled);
+        assert!(config.ssh.enabled);
+        assert!(config.ssh.detect_brute_force);
+        assert!(config.ssh.block_ssh1);
     }
 }
