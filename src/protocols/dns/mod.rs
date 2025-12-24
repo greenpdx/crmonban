@@ -1,300 +1,66 @@
 //! DNS protocol analyzer
 //!
-//! Parses DNS queries and responses.
+//! Parses DNS queries and responses and matches Suricata rules.
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+pub mod types;
+pub mod state;
+pub mod parser;
+pub mod match_;
 
+pub use types::*;
+pub use state::DnsState;
+pub use parser::{DnsParser, DnsConfig};
+pub use match_::DnsMatcher;
+
+use crate::signatures::ast::Protocol;
+use crate::protocols::registry::ProtocolRegistration;
+
+/// Get DNS protocol registration
+pub fn registration() -> ProtocolRegistration {
+    ProtocolRegistration {
+        name: "dns",
+        protocol: Protocol::Dns,
+        tcp_ports: &[53],
+        udp_ports: &[53, 5353],
+        create_parser: || Box::new(DnsParser::new()),
+        priority: 70, // High priority - common protocol
+        keywords: DNS_KEYWORDS,
+    }
+}
+
+// Legacy compatibility
 use crate::core::{Flow, Packet};
-use super::{DnsConfig, ProtocolAnalyzer, ProtocolEvent};
+use super::{DnsConfig as LegacyDnsConfig, ProtocolAnalyzer, ProtocolEvent};
 
-// Re-export types from crmonban-types
-pub use crmonban_types::{DnsMessage, DnsQuery, DnsAnswer, DnsRecordType, DnsRdata};
-
-/// DNS protocol analyzer
+/// Legacy DNS protocol analyzer for backwards compatibility
 pub struct DnsAnalyzer {
-    config: DnsConfig,
+    config: LegacyDnsConfig,
+    parser: DnsParser,
 }
 
 impl DnsAnalyzer {
-    pub fn new(config: DnsConfig) -> Self {
-        Self { config }
+    pub fn new(config: LegacyDnsConfig) -> Self {
+        let parser_config = parser::DnsConfig {
+            enabled: config.enabled,
+            ports: config.ports.clone(),
+            detect_tunneling: config.detect_tunneling,
+            detect_dga: true, // Default to true for legacy config
+        };
+
+        Self {
+            config,
+            parser: DnsParser::with_config(parser_config),
+        }
     }
 
     /// Parse DNS message from payload
     pub fn parse_message(&self, payload: &[u8]) -> Option<DnsMessage> {
-        if payload.len() < 12 {
-            return None;
-        }
-
-        let id = u16::from_be_bytes([payload[0], payload[1]]);
-        let flags = u16::from_be_bytes([payload[2], payload[3]]);
-
-        let is_response = (flags & 0x8000) != 0;
-        let opcode = ((flags >> 11) & 0x0F) as u8;
-        let authoritative = (flags & 0x0400) != 0;
-        let truncated = (flags & 0x0200) != 0;
-        let recursion_desired = (flags & 0x0100) != 0;
-        let recursion_available = (flags & 0x0080) != 0;
-        let rcode = (flags & 0x000F) as u8;
-
-        let qdcount = u16::from_be_bytes([payload[4], payload[5]]) as usize;
-        let ancount = u16::from_be_bytes([payload[6], payload[7]]) as usize;
-        let nscount = u16::from_be_bytes([payload[8], payload[9]]) as usize;
-        let arcount = u16::from_be_bytes([payload[10], payload[11]]) as usize;
-
-        let mut msg = DnsMessage {
-            id,
-            is_response,
-            opcode,
-            authoritative,
-            truncated,
-            recursion_desired,
-            recursion_available,
-            rcode,
-            ..Default::default()
-        };
-
-        let mut offset = 12;
-
-        // Parse questions
-        for _ in 0..qdcount {
-            if let Some((query, new_offset)) = self.parse_question(payload, offset) {
-                msg.queries.push(query);
-                offset = new_offset;
-            } else {
-                break;
-            }
-        }
-
-        // Parse answers
-        for _ in 0..ancount {
-            if let Some((answer, new_offset)) = self.parse_resource_record(payload, offset) {
-                msg.answers.push(answer);
-                offset = new_offset;
-            } else {
-                break;
-            }
-        }
-
-        // Parse authority records
-        for _ in 0..nscount {
-            if let Some((answer, new_offset)) = self.parse_resource_record(payload, offset) {
-                msg.authorities.push(answer);
-                offset = new_offset;
-            } else {
-                break;
-            }
-        }
-
-        // Parse additional records
-        for _ in 0..arcount {
-            if let Some((answer, new_offset)) = self.parse_resource_record(payload, offset) {
-                msg.additionals.push(answer);
-                offset = new_offset;
-            } else {
-                break;
-            }
-        }
-
-        Some(msg)
-    }
-
-    /// Parse a DNS question
-    fn parse_question(&self, payload: &[u8], offset: usize) -> Option<(DnsQuery, usize)> {
-        let (name, offset) = self.parse_name(payload, offset)?;
-
-        if offset + 4 > payload.len() {
-            return None;
-        }
-
-        let qtype = u16::from_be_bytes([payload[offset], payload[offset + 1]]);
-        let qclass = u16::from_be_bytes([payload[offset + 2], payload[offset + 3]]);
-
-        Some((
-            DnsQuery {
-                name,
-                qtype: DnsRecordType::from(qtype),
-                qclass,
-            },
-            offset + 4,
-        ))
-    }
-
-    /// Parse a DNS resource record
-    fn parse_resource_record(&self, payload: &[u8], offset: usize) -> Option<(DnsAnswer, usize)> {
-        let (name, offset) = self.parse_name(payload, offset)?;
-
-        if offset + 10 > payload.len() {
-            return None;
-        }
-
-        let rtype = u16::from_be_bytes([payload[offset], payload[offset + 1]]);
-        let rclass = u16::from_be_bytes([payload[offset + 2], payload[offset + 3]]);
-        let ttl = u32::from_be_bytes([
-            payload[offset + 4],
-            payload[offset + 5],
-            payload[offset + 6],
-            payload[offset + 7],
-        ]);
-        let rdlength = u16::from_be_bytes([payload[offset + 8], payload[offset + 9]]) as usize;
-
-        let rdata_offset = offset + 10;
-        if rdata_offset + rdlength > payload.len() {
-            return None;
-        }
-
-        let rdata = self.parse_rdata(payload, rdata_offset, rdlength, DnsRecordType::from(rtype));
-
-        Some((
-            DnsAnswer {
-                name,
-                rtype: DnsRecordType::from(rtype),
-                rclass,
-                ttl,
-                rdata,
-            },
-            rdata_offset + rdlength,
-        ))
-    }
-
-    /// Parse DNS name (handles compression)
-    fn parse_name(&self, payload: &[u8], mut offset: usize) -> Option<(String, usize)> {
-        let mut name = String::new();
-        let mut jumped = false;
-        let mut return_offset = offset;
-        let mut depth = 0;
-
-        loop {
-            if offset >= payload.len() || depth > 10 {
-                break;
-            }
-
-            let len = payload[offset] as usize;
-
-            if len == 0 {
-                if !jumped {
-                    return_offset = offset + 1;
-                }
-                break;
-            }
-
-            // Check for compression pointer
-            if len & 0xC0 == 0xC0 {
-                if offset + 1 >= payload.len() {
-                    return None;
-                }
-                let pointer = (((len & 0x3F) as usize) << 8) | (payload[offset + 1] as usize);
-                if !jumped {
-                    return_offset = offset + 2;
-                }
-                offset = pointer;
-                jumped = true;
-                depth += 1;
-                continue;
-            }
-
-            offset += 1;
-            if offset + len > payload.len() {
-                return None;
-            }
-
-            if !name.is_empty() {
-                name.push('.');
-            }
-            name.push_str(&String::from_utf8_lossy(&payload[offset..offset + len]));
-            offset += len;
-        }
-
-        Some((name, return_offset))
-    }
-
-    /// Parse RDATA based on record type
-    fn parse_rdata(&self, payload: &[u8], offset: usize, length: usize, rtype: DnsRecordType) -> DnsRdata {
-        let rdata = &payload[offset..offset + length];
-
-        match rtype {
-            DnsRecordType::A if length == 4 => {
-                DnsRdata::A(Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]))
-            }
-            DnsRecordType::AAAA if length == 16 => {
-                let mut octets = [0u8; 16];
-                octets.copy_from_slice(rdata);
-                DnsRdata::AAAA(Ipv6Addr::from(octets))
-            }
-            DnsRecordType::CNAME | DnsRecordType::NS | DnsRecordType::PTR => {
-                if let Some((name, _)) = self.parse_name(payload, offset) {
-                    match rtype {
-                        DnsRecordType::CNAME => DnsRdata::CNAME(name),
-                        DnsRecordType::NS => DnsRdata::NS(name),
-                        DnsRecordType::PTR => DnsRdata::PTR(name),
-                        _ => DnsRdata::Unknown(rdata.to_vec()),
-                    }
-                } else {
-                    DnsRdata::Unknown(rdata.to_vec())
-                }
-            }
-            DnsRecordType::MX if length >= 2 => {
-                let preference = u16::from_be_bytes([rdata[0], rdata[1]]);
-                if let Some((exchange, _)) = self.parse_name(payload, offset + 2) {
-                    DnsRdata::MX { preference, exchange }
-                } else {
-                    DnsRdata::Unknown(rdata.to_vec())
-                }
-            }
-            DnsRecordType::TXT => {
-                // TXT records have length-prefixed strings
-                let mut txt = String::new();
-                let mut pos = 0;
-                while pos < length {
-                    let str_len = rdata[pos] as usize;
-                    pos += 1;
-                    if pos + str_len <= length {
-                        txt.push_str(&String::from_utf8_lossy(&rdata[pos..pos + str_len]));
-                        pos += str_len;
-                    } else {
-                        break;
-                    }
-                }
-                DnsRdata::TXT(txt)
-            }
-            _ => DnsRdata::Unknown(rdata.to_vec()),
-        }
+        self.parser.parse_message(payload)
     }
 
     /// Detect DNS tunneling attempts
     pub fn detect_tunneling(&self, query: &DnsQuery) -> bool {
-        let name = &query.name;
-
-        // Check for overly long labels (base64 encoded data)
-        let labels: Vec<&str> = name.split('.').collect();
-        for label in &labels {
-            if label.len() > 63 {
-                return true;
-            }
-            // High entropy in subdomain (likely encoded data)
-            if label.len() > 30 {
-                let unique: std::collections::HashSet<char> = label.chars().collect();
-                let entropy_ratio = unique.len() as f32 / label.len() as f32;
-                if entropy_ratio > 0.7 {
-                    return true;
-                }
-            }
-        }
-
-        // Check for many subdomains
-        if labels.len() > 7 {
-            return true;
-        }
-
-        // Check for uncommon TXT queries (often used for tunneling)
-        if matches!(query.qtype, DnsRecordType::TXT | DnsRecordType::ANY) {
-            // Additional heuristics for TXT tunneling
-            if name.len() > 100 {
-                return true;
-            }
-        }
-
-        false
+        self.parser.detect_tunneling(query)
     }
 }
 
@@ -313,7 +79,6 @@ impl ProtocolAnalyzer for DnsAnalyzer {
             // Basic validation of DNS header
             if payload.len() >= 12 {
                 let qdcount = u16::from_be_bytes([payload[4], payload[5]]);
-                // Reasonable number of questions
                 if qdcount <= 10 {
                     return true;
                 }
@@ -362,10 +127,9 @@ mod tests {
 
     #[test]
     fn test_parse_dns_query() {
-        let config = DnsConfig::default();
+        let config = LegacyDnsConfig::default();
         let analyzer = DnsAnalyzer::new(config);
 
-        // DNS query for example.com type A
         let dns_query = [
             0x12, 0x34, // Transaction ID
             0x01, 0x00, // Flags: standard query
@@ -373,10 +137,9 @@ mod tests {
             0x00, 0x00, // Answers: 0
             0x00, 0x00, // Authority: 0
             0x00, 0x00, // Additional: 0
-            // Question: example.com
             0x07, b'e', b'x', b'a', b'm', b'p', b'l', b'e',
             0x03, b'c', b'o', b'm',
-            0x00, // End of name
+            0x00,
             0x00, 0x01, // Type A
             0x00, 0x01, // Class IN
         ];
@@ -392,10 +155,9 @@ mod tests {
 
     #[test]
     fn test_detect_tunneling() {
-        let config = DnsConfig::default();
+        let config = LegacyDnsConfig::default();
         let analyzer = DnsAnalyzer::new(config);
 
-        // Normal query
         let normal = DnsQuery {
             name: "www.example.com".to_string(),
             qtype: DnsRecordType::A,
@@ -403,7 +165,6 @@ mod tests {
         };
         assert!(!analyzer.detect_tunneling(&normal));
 
-        // Suspicious query (very long TXT record - triggers name.len() > 100 check)
         let suspicious = DnsQuery {
             name: "abcdefghij.klmnopqrst.uvwxyz0123.456789abcd.efghijklmn.opqrstuvwx.yzABCDEFGH.IJKLMNOPQR.tunnel.example.com".to_string(),
             qtype: DnsRecordType::TXT,

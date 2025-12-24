@@ -148,7 +148,8 @@ name = "crmonban"
 path = "src/lib.rs"
 
 [features]
-default = ["nids"]
+default = ["nids", "all-protocols"]
+
 # D-Bus integration for daemon control
 dbus = ["dep:zbus"]
 # External firewall integration (requires separate firewall daemon)
@@ -158,7 +159,7 @@ signatures = ["dep:nom", "dep:aho-corasick", "dep:parking_lot"]
 # Flow tracking for ML/anomaly detection (Stage 2)
 flow-tracking = ["dep:parking_lot"]
 # Protocol analyzers with JA3 fingerprinting (Stage 3)
-protocols = ["dep:md5"]
+protocols = ["dep:md5", "dep:async-trait"]
 # Threat intelligence feeds (Stage 5)
 threat-intel = ["dep:bincode", "dep:async-trait", "dep:parking_lot"]
 # ML/Anomaly detection (Stage 6)
@@ -178,6 +179,63 @@ nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detectio
 scan = []
 # Network Scanning - Commercial (Nessus, Acunetix) - only when explicitly requested
 scan-commercial = ["scan"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Protocol Features - Each protocol can be individually enabled/disabled
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# All protocols enabled by default
+all-protocols = [
+    "proto-http",
+    "proto-dns",
+    "proto-tls",
+    "proto-ssh",
+    "proto-smtp",
+    "proto-smb",
+    "proto-dcerpc",
+    "proto-ftp",
+    "proto-nfs",
+    "proto-kerberos",
+    "proto-rdp",
+    "proto-dhcp",
+    "proto-snmp",
+    "proto-sip",
+    "proto-mqtt",
+    "proto-modbus",
+    "proto-dnp3",
+    "proto-tftp",
+    "proto-ntp",
+    "proto-enip",
+    "proto-rfb",
+    "proto-ike",
+]
+
+# ICS/SCADA protocol group
+ics-protocols = ["proto-modbus", "proto-dnp3", "proto-enip"]
+
+# Individual protocol features
+proto-http = []
+proto-dns = []
+proto-tls = []
+proto-ssh = []
+proto-smtp = []
+proto-smb = []
+proto-dcerpc = []
+proto-ftp = []
+proto-nfs = []
+proto-kerberos = []
+proto-rdp = []
+proto-dhcp = []
+proto-snmp = []
+proto-sip = []
+proto-mqtt = []
+proto-modbus = []
+proto-dnp3 = []
+proto-tftp = []
+proto-ntp = []
+proto-enip = []
+proto-rfb = []
+proto-ike = []
 
 [dev-dependencies]
 tempfile = "*"

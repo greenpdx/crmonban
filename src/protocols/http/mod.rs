@@ -1,165 +1,67 @@
 //! HTTP protocol analyzer
 //!
-//! Parses HTTP/1.x requests and responses.
+//! Parses HTTP/1.x requests and responses and matches Suricata rules.
 
-use crate::core::{Flow, Direction, Packet};
-use super::{HttpConfig, ProtocolAnalyzer, ProtocolEvent};
-// Re-export types from crmonban-types
-pub use crmonban_types::{HttpRequest, HttpResponse, HttpTransaction};
+pub mod types;
+pub mod state;
+pub mod parser;
+pub mod match_;
 
-/// HTTP protocol analyzer
+pub use types::*;
+pub use state::HttpState;
+pub use parser::{HttpParser, HttpConfig};
+pub use match_::HttpMatcher;
+
+use crate::signatures::ast::Protocol;
+use crate::protocols::registry::ProtocolRegistration;
+
+/// Get HTTP protocol registration
+pub fn registration() -> ProtocolRegistration {
+    ProtocolRegistration {
+        name: "http",
+        protocol: Protocol::Http,
+        tcp_ports: &[80, 8080, 8000, 8008, 8888, 3000],
+        udp_ports: &[],
+        create_parser: || Box::new(HttpParser::new()),
+        priority: 60, // High priority - common protocol
+        keywords: HTTP_KEYWORDS,
+    }
+}
+
+// Legacy compatibility - re-export for existing code
+use crate::core::{Flow, Packet, Direction};
+use super::{HttpConfig as LegacyHttpConfig, ProtocolAnalyzer, ProtocolEvent};
+
+/// Legacy HTTP protocol analyzer for backwards compatibility
 pub struct HttpAnalyzer {
-    config: HttpConfig,
+    config: LegacyHttpConfig,
+    parser: HttpParser,
 }
 
 impl HttpAnalyzer {
-    pub fn new(config: HttpConfig) -> Self {
-        Self { config }
+    pub fn new(config: LegacyHttpConfig) -> Self {
+        let parser_config = parser::HttpConfig {
+            enabled: config.enabled,
+            ports: config.ports.clone(),
+            extract_headers: config.extract_headers,
+            max_request_body: config.max_request_body,
+            max_response_body: config.max_response_body,
+        };
+
+        Self {
+            config,
+            parser: HttpParser::with_config(parser_config),
+        }
     }
 
     /// Parse HTTP request from payload
     pub fn parse_request(&self, payload: &[u8]) -> Option<HttpRequest> {
-        let text = std::str::from_utf8(payload).ok()?;
-        let mut lines = text.lines();
-
-        // Parse request line
-        let request_line = lines.next()?;
-        let mut parts = request_line.split_whitespace();
-        let method = parts.next()?.to_string();
-        let uri = parts.next()?.to_string();
-        let version = parts.next().unwrap_or("HTTP/1.0").to_string();
-
-        // Validate method
-        let valid_methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "CONNECT", "TRACE"];
-        if !valid_methods.contains(&method.as_str()) {
-            return None;
-        }
-
-        let mut request = HttpRequest {
-            method,
-            uri,
-            version,
-            ..Default::default()
-        };
-
-        // Parse headers
-        let mut body_start = None;
-        for (i, line) in text.lines().enumerate() {
-            if line.is_empty() {
-                body_start = Some(i + 1);
-                break;
-            }
-
-            if let Some((name, value)) = line.split_once(':') {
-                let name = name.trim().to_lowercase();
-                let value = value.trim().to_string();
-
-                match name.as_str() {
-                    "host" => request.host = Some(value.clone()),
-                    "user-agent" => request.user_agent = Some(value.clone()),
-                    "content-type" => request.content_type = Some(value.clone()),
-                    "content-length" => request.content_length = value.parse().ok(),
-                    "cookie" => request.cookie = Some(value.clone()),
-                    _ => {}
-                }
-
-                if self.config.extract_headers {
-                    request.headers.insert(name, value);
-                }
-            }
-        }
-
-        // Extract body if present
-        if let Some(start) = body_start {
-            let body_text: String = text.lines().skip(start).collect::<Vec<_>>().join("\n");
-            let max_body = self.config.max_request_body;
-            request.body = body_text.as_bytes()[..body_text.len().min(max_body)].to_vec();
-        }
-
-        Some(request)
+        self.parser.parse_request(payload)
     }
 
     /// Parse HTTP response from payload
     pub fn parse_response(&self, payload: &[u8]) -> Option<HttpResponse> {
-        let text = std::str::from_utf8(payload).ok()?;
-        let mut lines = text.lines();
-
-        // Parse status line
-        let status_line = lines.next()?;
-        let mut parts = status_line.splitn(3, ' ');
-        let version = parts.next()?.to_string();
-        let status_code: u16 = parts.next()?.parse().ok()?;
-        let status_msg = parts.next().unwrap_or("").to_string();
-
-        // Validate version
-        if !version.starts_with("HTTP/") {
-            return None;
-        }
-
-        let mut response = HttpResponse {
-            version,
-            status_code,
-            status_msg,
-            ..Default::default()
-        };
-
-        // Parse headers
-        let mut body_start = None;
-        for (i, line) in text.lines().enumerate() {
-            if line.is_empty() {
-                body_start = Some(i + 1);
-                break;
-            }
-
-            if let Some((name, value)) = line.split_once(':') {
-                let name = name.trim().to_lowercase();
-                let value = value.trim().to_string();
-
-                match name.as_str() {
-                    "content-type" => response.content_type = Some(value.clone()),
-                    "content-length" => response.content_length = value.parse().ok(),
-                    "server" => response.server = Some(value.clone()),
-                    _ => {}
-                }
-
-                response.headers.insert(name, value);
-            }
-        }
-
-        // Extract body if present
-        if let Some(start) = body_start {
-            let body_text: String = text.lines().skip(start).collect::<Vec<_>>().join("\n");
-            let max_body = self.config.max_response_body;
-            response.body = body_text.as_bytes()[..body_text.len().min(max_body)].to_vec();
-        }
-
-        Some(response)
-    }
-
-    /// Check if payload starts with HTTP request
-    fn is_http_request(&self, payload: &[u8]) -> bool {
-        if payload.len() < 4 {
-            return false;
-        }
-
-        let methods = [
-            b"GET ".as_slice(),
-            b"POST".as_slice(),
-            b"PUT ".as_slice(),
-            b"DELE".as_slice(),
-            b"HEAD".as_slice(),
-            b"OPTI".as_slice(),
-            b"PATC".as_slice(),
-            b"CONN".as_slice(),
-            b"TRAC".as_slice(),
-        ];
-
-        methods.iter().any(|m| payload.starts_with(m))
-    }
-
-    /// Check if payload starts with HTTP response
-    fn is_http_response(&self, payload: &[u8]) -> bool {
-        payload.starts_with(b"HTTP/")
+        self.parser.parse_response(payload)
     }
 }
 
@@ -179,7 +81,7 @@ impl ProtocolAnalyzer for HttpAnalyzer {
         }
 
         // Check by content
-        self.is_http_request(payload) || self.is_http_response(payload)
+        HttpParser::is_http_request(payload) || HttpParser::is_http_response(payload)
     }
 
     fn parse(&self, packet: &Packet, flow: &mut Flow) -> Option<ProtocolEvent> {
@@ -192,7 +94,7 @@ impl ProtocolAnalyzer for HttpAnalyzer {
         // Determine if request or response based on direction and content
         let transaction = match packet.direction {
             Direction::ToServer => {
-                if self.is_http_request(payload) {
+                if HttpParser::is_http_request(payload) {
                     if let Some(request) = self.parse_request(payload) {
                         // Store in flow for correlation
                         if let Some(host) = &request.host {
@@ -223,7 +125,7 @@ impl ProtocolAnalyzer for HttpAnalyzer {
                 }
             }
             Direction::ToClient => {
-                if self.is_http_response(payload) {
+                if HttpParser::is_http_response(payload) {
                     if let Some(response) = self.parse_response(payload) {
                         flow.set_app_data("http.status_code", serde_json::json!(response.status_code));
                         if let Some(server) = &response.server {
@@ -250,7 +152,7 @@ impl ProtocolAnalyzer for HttpAnalyzer {
             }
             Direction::Unknown => {
                 // Try to auto-detect
-                if self.is_http_request(payload) {
+                if HttpParser::is_http_request(payload) {
                     if let Some(request) = self.parse_request(payload) {
                         HttpTransaction {
                             request: Some(request),
@@ -259,7 +161,7 @@ impl ProtocolAnalyzer for HttpAnalyzer {
                     } else {
                         return None;
                     }
-                } else if self.is_http_response(payload) {
+                } else if HttpParser::is_http_response(payload) {
                     if let Some(response) = self.parse_response(payload) {
                         HttpTransaction {
                             response: Some(response),
@@ -283,8 +185,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_request() {
-        let config = HttpConfig::default();
+    fn test_legacy_parse_request() {
+        let config = LegacyHttpConfig::default();
         let analyzer = HttpAnalyzer::new(config);
 
         let request = b"GET /index.html HTTP/1.1\r\n\
@@ -301,8 +203,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_response() {
-        let config = HttpConfig::default();
+    fn test_legacy_parse_response() {
+        let config = LegacyHttpConfig::default();
         let analyzer = HttpAnalyzer::new(config);
 
         let response = b"HTTP/1.1 200 OK\r\n\
@@ -320,8 +222,8 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_http() {
-        let config = HttpConfig::default();
+    fn test_legacy_detect_http() {
+        let config = LegacyHttpConfig::default();
         let analyzer = HttpAnalyzer::new(config);
 
         assert!(analyzer.detect(b"GET / HTTP/1.1", 80));
