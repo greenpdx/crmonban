@@ -638,6 +638,10 @@ impl StageProcessor<PipelineConfig, PipelineStage> for ProtocolDetector {
                             }
                         }
                     }
+                    ProtocolEvent::Smtp(_smtp_event) => {
+                        // SMTP attack detection handled by SmtpAnalyzer
+                        // Transaction-level analysis is done separately
+                    }
                     ProtocolEvent::Generic { .. } => {
                         // Generic events - no attack detection
                     }

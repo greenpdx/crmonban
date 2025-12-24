@@ -421,6 +421,16 @@ impl CorrelationEngine {
             DetectionType::SshKnownMalwareHashsh => "SshKnownMalwareHashsh",
             DetectionType::SshRootLogin => "SshRootLogin",
             DetectionType::SshInvalidUser => "SshInvalidUser",
+            // SMTP attack types
+            DetectionType::SmtpSpam => "SmtpSpam",
+            DetectionType::SmtpPhishing => "SmtpPhishing",
+            DetectionType::SmtpSpoofing => "SmtpSpoofing",
+            DetectionType::SmtpOpenRelay => "SmtpOpenRelay",
+            DetectionType::SmtpAuthBruteForce => "SmtpAuthBruteForce",
+            DetectionType::SmtpMalwareAttachment => "SmtpMalwareAttachment",
+            DetectionType::SmtpSuspiciousSender => "SmtpSuspiciousSender",
+            DetectionType::SmtpMassMailer => "SmtpMassMailer",
+            DetectionType::SmtpHeaderAnomaly => "SmtpHeaderAnomaly",
             DetectionType::Custom(_) => "Custom",
         };
         type_strs.iter().any(|t| type_name.contains(t.as_str()))

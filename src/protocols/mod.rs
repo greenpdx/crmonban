@@ -24,6 +24,7 @@ pub mod http;
 pub mod dns;
 pub mod tls;
 pub mod ssh;
+pub mod smtp;
 
 // Re-export core protocol types from crmonban-types
 pub use crmonban_types::{AppProtocol, ProtocolEvent};
@@ -32,6 +33,7 @@ pub use crmonban_types::protocols::{
     DnsMessage, DnsQuery, DnsAnswer,
     TlsEvent, Ja3Fingerprint,
     SshEvent, SshAuthMethod, HasshFingerprint,
+    SmtpEvent, SmtpAuthMechanism, SmtpTransaction, SmtpHeaders, SmtpAttachment, EmailAddress,
 };
 
 pub use detector::ProtocolDetector;
@@ -40,6 +42,7 @@ pub use http::HttpAnalyzer;
 pub use dns::DnsAnalyzer;
 pub use tls::TlsAnalyzer;
 pub use ssh::SshAnalyzer;
+pub use smtp::SmtpAnalyzer;
 
 use serde::{Deserialize, Serialize};
 use crmonban_types::{Flow, Packet};
@@ -73,6 +76,9 @@ pub struct ProtocolConfig {
 
     /// SSH configuration
     pub ssh: SshConfig,
+
+    /// SMTP configuration
+    pub smtp: SmtpConfig,
 }
 
 impl Default for ProtocolConfig {
@@ -83,6 +89,7 @@ impl Default for ProtocolConfig {
             dns: DnsConfig::default(),
             tls: TlsConfig::default(),
             ssh: SshConfig::default(),
+            smtp: SmtpConfig::default(),
         }
     }
 }
@@ -201,6 +208,64 @@ impl Default for SshConfig {
     }
 }
 
+/// SMTP analyzer configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmtpConfig {
+    pub enabled: bool,
+    pub ports: Vec<u16>,
+    /// Detect spam based on subject patterns and recipient count
+    pub detect_spam: bool,
+    /// Detect phishing emails
+    pub detect_phishing: bool,
+    /// Detect email spoofing (SPF/DKIM/DMARC failures)
+    pub detect_spoofing: bool,
+    /// Detect open relay abuse attempts
+    pub detect_open_relay: bool,
+    /// Local domains for open relay detection
+    pub local_domains: Vec<String>,
+    /// Detect authentication brute force attacks
+    pub detect_auth_brute_force: bool,
+    /// Auth brute force threshold (failed attempts)
+    pub auth_brute_force_threshold: u32,
+    /// Auth brute force time window in seconds
+    pub auth_brute_force_window_secs: u64,
+    /// Detect dangerous attachments
+    pub detect_malware_attachments: bool,
+    /// Detect mass mailer activity
+    pub detect_mass_mailer: bool,
+    /// Mass mailer mail count threshold
+    pub mass_mailer_threshold: u32,
+    /// Mass mailer unique recipient threshold
+    pub mass_mailer_recipient_threshold: u32,
+    /// Mass mailer time window in seconds
+    pub mass_mailer_window_secs: u64,
+    /// Log all mail transactions
+    pub log_transactions: bool,
+}
+
+impl Default for SmtpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ports: vec![25, 465, 587, 2525],
+            detect_spam: true,
+            detect_phishing: true,
+            detect_spoofing: true,
+            detect_open_relay: true,
+            local_domains: Vec::new(),
+            detect_auth_brute_force: true,
+            auth_brute_force_threshold: 5,
+            auth_brute_force_window_secs: 60,
+            detect_malware_attachments: true,
+            detect_mass_mailer: true,
+            mass_mailer_threshold: 100,
+            mass_mailer_recipient_threshold: 50,
+            mass_mailer_window_secs: 300,
+            log_transactions: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +280,9 @@ mod tests {
         assert!(config.ssh.enabled);
         assert!(config.ssh.detect_brute_force);
         assert!(config.ssh.block_ssh1);
+        assert!(config.smtp.enabled);
+        assert!(config.smtp.detect_spam);
+        assert!(config.smtp.detect_phishing);
+        assert!(config.smtp.detect_auth_brute_force);
     }
 }

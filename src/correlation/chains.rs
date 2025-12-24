@@ -184,6 +184,17 @@ impl MitreTactic {
             DetectionType::SshKnownMalwareHashsh => Some(MitreTactic::CommandAndControl),
             DetectionType::SshRootLogin => Some(MitreTactic::PrivilegeEscalation),
             DetectionType::SshInvalidUser => Some(MitreTactic::CredentialAccess),
+            // SMTP Attack types
+            DetectionType::SmtpSpam | DetectionType::SmtpPhishing => {
+                Some(MitreTactic::InitialAccess)
+            }
+            DetectionType::SmtpSpoofing => Some(MitreTactic::DefenseEvasion),
+            DetectionType::SmtpOpenRelay => Some(MitreTactic::ResourceDevelopment),
+            DetectionType::SmtpAuthBruteForce => Some(MitreTactic::CredentialAccess),
+            DetectionType::SmtpMalwareAttachment => Some(MitreTactic::Execution),
+            DetectionType::SmtpSuspiciousSender => Some(MitreTactic::InitialAccess),
+            DetectionType::SmtpMassMailer => Some(MitreTactic::Impact),
+            DetectionType::SmtpHeaderAnomaly => Some(MitreTactic::DefenseEvasion),
             // Signatures
             DetectionType::Signature => Some(MitreTactic::InitialAccess),
             // Phishing / Spam
