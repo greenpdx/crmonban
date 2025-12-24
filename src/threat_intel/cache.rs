@@ -579,6 +579,29 @@ impl IocCache {
             + self.ssl_certs.len()
     }
 
+    /// Get all IP-based IOCs (IPv4, IPv6, and CIDR) for loading into external filters
+    ///
+    /// Returns cloned IOCs to allow callers to process them without holding a lock.
+    pub fn get_ip_iocs(&self) -> Vec<Ioc> {
+        let mut iocs = Vec::with_capacity(self.ips.len() + self.cidrs.len());
+
+        // Add all exact IP IOCs
+        for entry in self.ips.values() {
+            if !entry.ioc.is_expired() {
+                iocs.push(entry.ioc.clone());
+            }
+        }
+
+        // Add all CIDR IOCs
+        for (_, entry) in &self.cidrs {
+            if !entry.ioc.is_expired() {
+                iocs.push(entry.ioc.clone());
+            }
+        }
+
+        iocs
+    }
+
     /// Save cache to disk
     pub fn save_to_disk(&self, path: &Path) -> anyhow::Result<()> {
         let file = File::create(path)?;

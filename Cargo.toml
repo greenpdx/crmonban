@@ -13,6 +13,15 @@ categories = ["command-line-utilities", "network-programming"]
 # Core types library
 crmonban-types = { path = "../crmonban-types" }
 
+# IP filtering with GeoIP support
+ipfilter = { path = "../ipfilter" }
+
+# Layer 2 detection (scans, DoS, brute force)
+layer2detect = { path = "../layer2detct" }
+
+# HTTP attack detection (SQL injection, XSS, path traversal, etc.)
+crmonban-detection = { path = "../httpAttack" }
+
 # nftables JSON API
 nftables = { version = "0.6.4", registry = "kellnr" }
 

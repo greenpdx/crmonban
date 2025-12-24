@@ -153,6 +153,29 @@ impl MitreTactic {
             DetectionType::Malware | DetectionType::Intrusion | DetectionType::WebAttack => {
                 Some(MitreTactic::Execution)
             }
+            // Web Attack types (Initial Access / Exploitation)
+            DetectionType::SqlInjection | DetectionType::Xss |
+            DetectionType::PathTraversal | DetectionType::CommandInjection |
+            DetectionType::LdapInjection | DetectionType::XxeInjection |
+            DetectionType::SsrfAttack | DetectionType::CsrfAttack => {
+                Some(MitreTactic::InitialAccess)
+            }
+            // DNS Attack types
+            DetectionType::DnsTunneling => Some(MitreTactic::Exfiltration),
+            DetectionType::DnsAmplification => Some(MitreTactic::Impact),
+            DetectionType::DnsDga | DetectionType::DnsRebinding => {
+                Some(MitreTactic::CommandAndControl)
+            }
+            DetectionType::DnsSpoofing => Some(MitreTactic::DefenseEvasion),
+            // TLS Attack types
+            DetectionType::TlsDowngrade | DetectionType::TlsWeakCipher => {
+                Some(MitreTactic::DefenseEvasion)
+            }
+            DetectionType::TlsHeartbleed => Some(MitreTactic::Collection),
+            DetectionType::TlsSelfSigned | DetectionType::TlsExpiredCert => {
+                Some(MitreTactic::DefenseEvasion)
+            }
+            DetectionType::TlsKnownMalwareJa3 => Some(MitreTactic::CommandAndControl),
             // Signatures
             DetectionType::Signature => Some(MitreTactic::InitialAccess),
             // Phishing / Spam

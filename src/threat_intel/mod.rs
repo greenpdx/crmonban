@@ -19,9 +19,6 @@ use parking_lot::RwLock;
 use tokio::sync::{mpsc, RwLock as TokioRwLock};
 use tracing::{debug, info, warn, error};
 
-use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Packet, Severity as CoreSeverity};
-use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
-
 pub use ioc::{Ioc, IocType, ThreatCategory, Severity, ThreatMatch, MatchContext};
 pub use cache::{IocCache, CacheStats};
 pub use feeds::{ThreatFeed, FeedType, FeedManager, FeedConfig, FeedStatus, UpdateStats};
@@ -250,81 +247,17 @@ impl IntelEngine {
         self.cache.write().insert(ioc);
     }
 
-    /// Convert a threat match to a detection event
-    fn match_to_event(&self, m: &ThreatMatch, packet: &Packet, is_src: bool) -> DetectionEvent {
-        let severity = match m.ioc.severity {
-            Severity::Critical => CoreSeverity::Critical,
-            Severity::High => CoreSeverity::High,
-            Severity::Medium => CoreSeverity::Medium,
-            Severity::Low => CoreSeverity::Low,
-            Severity::Info => CoreSeverity::Info,
-        };
-
-        let detection_type = match m.ioc.category {
-            ThreatCategory::C2 => DetectionType::C2,
-            ThreatCategory::Botnet => DetectionType::Malware,
-            ThreatCategory::Malware => DetectionType::Malware,
-            ThreatCategory::Phishing => DetectionType::Phishing,
-            ThreatCategory::Spam => DetectionType::Spam,
-            ThreatCategory::Scanner => DetectionType::PortScan,
-            ThreatCategory::Ransomware => DetectionType::Malware,
-            ThreatCategory::Apt => DetectionType::Intrusion,
-            ThreatCategory::TorExit => DetectionType::TorTraffic,
-            ThreatCategory::Proxy => DetectionType::ProxyTraffic,
-            _ => DetectionType::ThreatIntel,
-        };
-
-        let direction = if is_src { "source" } else { "destination" };
-
-        DetectionEvent::new(
-            detection_type,
-            severity,
-            packet.src_ip(),
-            packet.dst_ip(),
-            format!(
-                "Threat intel hit ({}): {} - {} (feed: {})",
-                direction,
-                m.ioc.value,
-                m.ioc.category.as_str(),
-                m.ioc.source,
-            ),
-        )
-        .with_detector("threat_intel")
-        .with_ports(packet.src_port(), packet.dst_port())
+    /// Get all IP-based IOCs (IPv4, IPv6, and CIDR)
+    ///
+    /// Useful for loading threat intel data into external filters (e.g., ipfilter)
+    pub fn get_ip_iocs(&self) -> Vec<Ioc> {
+        self.cache.read().get_ip_iocs()
     }
 }
 
-impl StageProcessor<PipelineConfig, PipelineStage> for IntelEngine {
-    fn process(&mut self, mut analysis: PacketAnalysis, config: &PipelineConfig) -> PacketAnalysis {
-        // Check source IP
-        if let Some(m) = self.check_ip(&analysis.packet.src_ip()) {
-            let event = self.match_to_event(&m, &analysis.packet, true);
-            analysis.add_event(event);
-
-            // If critical threat intel hit, optionally stop processing
-            if m.ioc.severity == Severity::Critical {
-                // Could set analysis.control.stop_processing = true here
-                debug!("Critical threat intel hit on source IP: {}", analysis.packet.src_ip());
-            }
-        }
-
-        // Check destination IP
-        if let Some(m) = self.check_ip(&analysis.packet.dst_ip()) {
-            let event = self.match_to_event(&m, &analysis.packet, false);
-            analysis.add_event(event);
-
-            if m.ioc.severity == Severity::Critical {
-                debug!("Critical threat intel hit on dest IP: {}", analysis.packet.dst_ip());
-            }
-        }
-
-        analysis
-    }
-
-    fn stage(&self) -> PipelineStage {
-        PipelineStage::ThreatIntel
-    }
-}
+// Note: IntelEngine is no longer a pipeline stage. Its IOCs are loaded into
+// ipfilter at startup via WorkerThread::load_threat_intel(). This allows
+// threat intel data to be used in the fast path of the IpFilter stage.
 
 impl Default for IntelEngine {
     fn default() -> Self {

@@ -2,91 +2,10 @@
 //!
 //! Parses HTTP/1.x requests and responses.
 
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
-
 use crate::core::{Flow, Direction, Packet};
 use super::{HttpConfig, ProtocolAnalyzer, ProtocolEvent};
-
-/// HTTP request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpRequest {
-    pub method: String,
-    pub uri: String,
-    pub version: String,
-    pub headers: HashMap<String, String>,
-    pub host: Option<String>,
-    pub user_agent: Option<String>,
-    pub content_type: Option<String>,
-    pub content_length: Option<usize>,
-    pub cookie: Option<String>,
-    pub body: Vec<u8>,
-}
-
-impl Default for HttpRequest {
-    fn default() -> Self {
-        Self {
-            method: String::new(),
-            uri: String::new(),
-            version: String::new(),
-            headers: HashMap::new(),
-            host: None,
-            user_agent: None,
-            content_type: None,
-            content_length: None,
-            cookie: None,
-            body: Vec::new(),
-        }
-    }
-}
-
-/// HTTP response
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpResponse {
-    pub version: String,
-    pub status_code: u16,
-    pub status_msg: String,
-    pub headers: HashMap<String, String>,
-    pub content_type: Option<String>,
-    pub content_length: Option<usize>,
-    pub server: Option<String>,
-    pub body: Vec<u8>,
-}
-
-impl Default for HttpResponse {
-    fn default() -> Self {
-        Self {
-            version: String::new(),
-            status_code: 0,
-            status_msg: String::new(),
-            headers: HashMap::new(),
-            content_type: None,
-            content_length: None,
-            server: None,
-            body: Vec::new(),
-        }
-    }
-}
-
-/// HTTP transaction (request + response)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HttpTransaction {
-    pub request: Option<HttpRequest>,
-    pub response: Option<HttpResponse>,
-    pub timestamp_request: Option<u64>,
-    pub timestamp_response: Option<u64>,
-}
-
-impl Default for HttpTransaction {
-    fn default() -> Self {
-        Self {
-            request: None,
-            response: None,
-            timestamp_request: None,
-            timestamp_response: None,
-        }
-    }
-}
+// Re-export types from crmonban-types
+pub use crmonban_types::{HttpRequest, HttpResponse, HttpTransaction};
 
 /// HTTP protocol analyzer
 pub struct HttpAnalyzer {

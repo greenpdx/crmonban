@@ -244,7 +244,7 @@ impl Default for WasmEngine {
 }
 
 impl StageProcessor<PipelineConfig, PipelineStage> for WasmEngine {
-    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+    async fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         // Build stage context from analysis
         let mut context = StageContext::new();
 
@@ -275,7 +275,7 @@ impl StageProcessor<PipelineConfig, PipelineStage> for WasmEngine {
         analysis
     }
 
-    fn stage(&self) -> PipelineStage {
+    async fn stage(&self) -> PipelineStage {
         PipelineStage::WasmPlugins
     }
 }

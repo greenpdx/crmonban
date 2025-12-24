@@ -23,12 +23,19 @@ pub mod http;
 pub mod dns;
 pub mod tls;
 
-pub use types::AppProtocol;
+// Re-export core protocol types from crmonban-types
+pub use crmonban_types::{
+    AppProtocol, ProtocolEvent,
+    HttpTransaction, HttpRequest, HttpResponse,
+    DnsMessage, DnsQuery, DnsAnswer,
+    TlsEvent, Ja3Fingerprint,
+};
 
 pub use detector::ProtocolDetector;
-pub use http::{HttpAnalyzer, HttpRequest, HttpResponse, HttpTransaction};
-pub use dns::{DnsAnalyzer, DnsMessage, DnsQuery, DnsAnswer};
-pub use tls::{TlsAnalyzer, TlsHandshake, Ja3Fingerprint};
+// Re-export analyzer implementations
+pub use http::HttpAnalyzer;
+pub use dns::DnsAnalyzer;
+pub use tls::TlsAnalyzer;
 
 use serde::{Deserialize, Serialize};
 use crmonban_types::{Flow, Packet};
@@ -43,55 +50,6 @@ pub trait ProtocolAnalyzer: Send + Sync {
 
     /// Parse packet and extract protocol data
     fn parse(&self, packet: &Packet, flow: &mut Flow) -> Option<ProtocolEvent>;
-}
-
-/// Events emitted by protocol analyzers
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ProtocolEvent {
-    /// HTTP transaction
-    Http(HttpTransaction),
-    /// DNS message
-    Dns(DnsMessage),
-    /// TLS handshake event
-    Tls(TlsEvent),
-    /// Generic protocol event
-    Generic {
-        protocol: String,
-        event_type: String,
-        data: serde_json::Value,
-    },
-}
-
-/// TLS-specific events
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TlsEvent {
-    /// Client Hello parsed
-    ClientHello {
-        sni: Option<String>,
-        ja3: Ja3Fingerprint,
-        versions: Vec<u16>,
-        cipher_suites: Vec<u16>,
-    },
-    /// Server Hello parsed
-    ServerHello {
-        ja3s: Ja3Fingerprint,
-        version: u16,
-        cipher_suite: u16,
-    },
-    /// Certificate received
-    Certificate {
-        subject: String,
-        issuer: String,
-        serial: String,
-        not_before: String,
-        not_after: String,
-        fingerprint_sha256: String,
-    },
-    /// Handshake complete
-    HandshakeComplete {
-        version: String,
-        cipher_suite: String,
-    },
 }
 
 /// Configuration for protocol analyzers

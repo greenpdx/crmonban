@@ -1,5 +1,11 @@
 //! Probabilistic Scan Detection Module
 //!
+//! **DEPRECATED**: This module is deprecated in favor of `layer2detect` which uses
+//! vector similarity for scan, DoS, and brute force detection with better accuracy.
+//! See `PipelineStage::Layer2Detect` in the pipeline module.
+//!
+//! This module will be removed in a future version.
+//!
 //! Replaces simple threshold-based detection with a probabilistic scoring system that:
 //! - Tracks connection states (half-open vs completed)
 //! - Weights different behaviors differently

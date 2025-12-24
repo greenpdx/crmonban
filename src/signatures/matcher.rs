@@ -1616,7 +1616,7 @@ impl SignatureEngine {
 }
 
 impl StageProcessor<PipelineConfig, PipelineStage> for SignatureEngine {
-    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+    async fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         // Build flow state from analysis
         let flow_state = if let Some(ref flow) = analysis.flow {
             FlowState {
@@ -1655,7 +1655,7 @@ impl StageProcessor<PipelineConfig, PipelineStage> for SignatureEngine {
         analysis
     }
 
-    fn stage(&self) -> PipelineStage {
+    async fn stage(&self) -> PipelineStage {
         PipelineStage::SignatureMatching
     }
 }

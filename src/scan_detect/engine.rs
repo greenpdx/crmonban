@@ -663,7 +663,7 @@ impl ScanDetectEngine {
 }
 
 impl StageProcessor<PipelineConfig, PipelineStage> for ScanDetectEngine {
-    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+    async fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         // Process the packet through scan detection
         if let Some(alert) = self.process_packet(&analysis.packet) {
             let event = self.alert_to_event(&alert, &analysis.packet);
@@ -672,7 +672,7 @@ impl StageProcessor<PipelineConfig, PipelineStage> for ScanDetectEngine {
         analysis
     }
 
-    fn stage(&self) -> PipelineStage {
+    async fn stage(&self) -> PipelineStage {
         PipelineStage::ScanDetection
     }
 }

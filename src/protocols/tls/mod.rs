@@ -7,23 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::core::{Flow, Direction, Packet};
 use super::{TlsConfig, ProtocolAnalyzer, ProtocolEvent, TlsEvent};
 
-/// JA3 fingerprint
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ja3Fingerprint {
-    /// Raw JA3 string
-    pub string: String,
-    /// MD5 hash of the string
-    pub hash: String,
-}
-
-impl Default for Ja3Fingerprint {
-    fn default() -> Self {
-        Self {
-            string: String::new(),
-            hash: String::new(),
-        }
-    }
-}
+// Re-export Ja3Fingerprint from crmonban-types
+pub use crmonban_types::Ja3Fingerprint;
 
 /// TLS version
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

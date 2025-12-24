@@ -450,7 +450,7 @@ impl BruteForceTracker {
 }
 
 impl StageProcessor<PipelineConfig, PipelineStage> for BruteForceTracker {
-    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+    async fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         if let Some(alert) = self.process_packet(&analysis.packet) {
             let event = self.alert_to_event(&alert);
             analysis.add_event(event);
@@ -458,7 +458,7 @@ impl StageProcessor<PipelineConfig, PipelineStage> for BruteForceTracker {
         analysis
     }
 
-    fn stage(&self) -> PipelineStage {
+    async fn stage(&self) -> PipelineStage {
         PipelineStage::BruteForceDetection
     }
 }

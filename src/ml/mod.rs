@@ -438,7 +438,7 @@ impl Default for MLEngine {
 }
 
 impl StageProcessor<PipelineConfig, PipelineStage> for MLEngine {
-    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+    async fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         // ML engine works on flows - need flow to process
         if let Some(ref flow) = analysis.flow {
             if let Some(score) = self.process_flow(flow) {
@@ -481,7 +481,7 @@ impl StageProcessor<PipelineConfig, PipelineStage> for MLEngine {
         analysis
     }
 
-    fn stage(&self) -> PipelineStage {
+    async fn stage(&self) -> PipelineStage {
         PipelineStage::MLDetection
     }
 }

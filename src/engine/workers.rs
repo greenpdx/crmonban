@@ -7,18 +7,18 @@
 //! - `WorkerPool`: Manages one or more `WorkerThread` instances, distributes packets
 //! - `WorkerThread`: Single-threaded packet processor with all detection engines
 //!
-//! ## Pipeline Stage Order (v3 spec)
+//! ## Pipeline Stage Order (v4 spec)
 //!
+//! 0. IP Filter - IP blocklist, GeoIP, threat intel IOCs
 //! 1. Flow Tracking - connection state tracking
 //! 2. Port Scan Detection - NULL/XMAS/FIN/Maimon/ACK/SYN scans
 //! 2b. DoS Detection - flood/amplification attacks
 //! 3. Brute Force Detection - session-based login attempt tracking
 //! 4. Signature Matching - Aho-Corasick + rule verification
-//! 5. Threat Intel - IOC lookups
-//! 6. Protocol Analysis - HTTP/DNS/TLS/SSH parsers
-//! 7. WASM Plugins - custom detection plugins (Rust/WASM)
-//! 8. ML Anomaly Detection - flow-based scoring
-//! 9. Correlation - DB write + alert generation (only if marked)
+//! 5. Protocol Analysis - HTTP/DNS/TLS/SSH parsers
+//! 6. WASM Plugins - custom detection plugins (Rust/WASM)
+//! 7. ML Anomaly Detection - flow-based scoring
+//! 8. Correlation - DB write + alert generation (only if marked)
 //!
 //! Stage order is configurable via PipelineConfig::stage_order.
 //! Each stage has pass_count and marked_count counters for debugging.
@@ -39,8 +39,13 @@ use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent};
 use crate::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
 use crate::signatures::SignatureEngine;
 use crate::signatures::matcher::{ProtocolContext, FlowState};
-use crate::threat_intel::{IntelEngine, ThreatCategory};
 use crate::wasm::{WasmEngine, StageContext};
+
+// IP filtering with GeoIP and threat intel (Stage 0)
+use ipfilter::{Worker as IpFilterWorker, IpFilter, IpFilterConfig};
+
+// Layer 2 detection: scans, DoS, brute force (Stage 2)
+use layer2detect::Detector as Layer2Detector;
 
 use super::pipeline::{PipelineConfig, PipelineStage, PipelineMetrics, StageProcessor};
 #[cfg(feature = "profiling")]
@@ -104,10 +109,18 @@ pub struct WorkerThread {
     /// Start time
     start_time: Instant,
 
+    // Stage 0: IP Filtering (includes GeoIP + threat intel IOCs)
+    ipfilter_worker: IpFilterWorker,
+    /// IP filter configuration for stage processing
+    ipfilter_config: IpFilterConfig,
+
     // Stage 1: Flow Tracking
     flow_tracker: FlowTracker,
 
-    // Stage 2: Port Scan Detection
+    // Stage 2: Layer 2 Detection (scans, DoS, brute force)
+    layer2_detector: Layer2Detector,
+
+    // Stage 2 (DEPRECATED): Port Scan Detection
     scan_detect_engine: ScanDetectEngine,
 
     // Stage 2b: DoS/Flood Detection
@@ -119,22 +132,19 @@ pub struct WorkerThread {
     // Stage 4: Signature Matching
     signature_engine: Option<SignatureEngine>,
 
-    // Stage 5: Threat Intel
-    intel_engine: IntelEngine,
-
-    // Stage 6: Protocol Analysis
+    // Stage 5: Protocol Analysis
     protocol_detector: ProtocolDetector,
 
-    // Stage 7: WASM Plugin Processing
+    // Stage 6: WASM Plugin Processing
     wasm_engine: WasmEngine,
 
     // Accumulated stage context for WASM plugins
     stage_context: StageContext,
 
-    // Stage 8: ML Anomaly Detection
+    // Stage 7: ML Anomaly Detection
     ml_engine: MLEngine,
 
-    // Stage 9: Correlation
+    // Stage 8: Correlation
     correlation_engine: CorrelationEngine,
 
     // Alert Analyzer - decides block/continue after detection events
@@ -160,6 +170,11 @@ impl WorkerThread {
         let signature_engine = config.rules_dir.as_ref()
             .and_then(|dir| SignatureEngine::load_from_dir(dir));
 
+        // Stage 0: Create IP filter with default settings
+        // Note: Threat intel IOCs and GeoIP are loaded via load_threat_intel()
+        let ip_filter = IpFilter::new();
+        let ipfilter_worker = IpFilterWorker::new(ip_filter);
+
         Self {
             config,
             packets_processed: Arc::new(AtomicU64::new(0)),
@@ -168,10 +183,23 @@ impl WorkerThread {
             total_time_ns: Arc::new(AtomicU64::new(0)),
             start_time: Instant::now(),
 
+            // Stage 0: IP Filtering
+            ipfilter_worker,
+            ipfilter_config: IpFilterConfig::default(),
+
             // Stage 1: Flow Tracking
             flow_tracker: FlowTracker::new(FlowConfig::default()),
 
-            // Stage 2: Port Scan Detection (uses config from WorkerConfig)
+            // Stage 2: Layer 2 Detection (scans, DoS, brute force)
+            layer2_detector: Layer2Detector::builder()
+                .with_scan_detection(true)
+                .with_bruteforce_detection(true)
+                .with_dos_detection(true)
+                .with_anomaly_detection(false)  // ML handles anomaly detection
+                .build()
+                .expect("Failed to create Layer2Detector"),
+
+            // Stage 2 (DEPRECATED): Port Scan Detection
             scan_detect_engine: ScanDetectEngine::new(scan_detect_config),
 
             // Stage 2b: DoS/Flood Detection
@@ -183,22 +211,19 @@ impl WorkerThread {
             // Stage 4: Signature Matching
             signature_engine,
 
-            // Stage 5: Threat Intel
-            intel_engine: IntelEngine::new(),
-
-            // Stage 6: Protocol Analysis
+            // Stage 5: Protocol Analysis
             protocol_detector: ProtocolDetector::new(ProtocolConfig::default()),
 
-            // Stage 7: WASM Plugin Processing
+            // Stage 6: WASM Plugin Processing
             wasm_engine: WasmEngine::new(),
 
             // Accumulated stage context for WASM plugins
             stage_context: StageContext::new(),
 
-            // Stage 8: ML Anomaly Detection
+            // Stage 7: ML Anomaly Detection
             ml_engine: MLEngine::new(MLConfig::default()),
 
-            // Stage 9: Correlation
+            // Stage 8: Correlation
             correlation_engine: CorrelationEngine::new(CorrelationConfig::default()),
 
             // Alert Analyzer
@@ -218,8 +243,8 @@ impl WorkerThread {
     /// may add events/update flow, and returns it for the next stage.
     ///
     /// Pipeline order defined by config.stage_order:
-    /// Default v3 order: Flow → Scan → DoS → Brute → Sig → Intel → Proto → WASM → ML → Corr
-    pub fn process(&mut self, packet: Packet, config: &PipelineConfig) -> Vec<DetectionEvent> {
+    /// Default v4 order: IpFilter → Flow → Scan → DoS → Brute → Sig → Proto → WASM → ML → Corr
+    pub async fn process(&mut self, packet: Packet, config: &PipelineConfig) -> Vec<DetectionEvent> {
         let start = Instant::now();
 
         // Create PacketAnalysis - the data container passed between stages
@@ -245,7 +270,7 @@ impl WorkerThread {
             let events_before = analysis.event_count();
 
             // Process through the appropriate stage
-            analysis = self.process_stage(*stage, analysis, config);
+            analysis = self.process_stage(*stage, analysis, config).await;
 
             // Calculate if this stage marked the packet (added events)
             let stage_marked = analysis.event_count() > events_before;
@@ -271,7 +296,7 @@ impl WorkerThread {
 
             // If detection events were added, consult alert analyzer
             if stage_marked {
-                let decision = self.alert_analyzer.analyze(&mut analysis);
+                let decision = self.alert_analyzer.analyze(&mut analysis).await;
                 match decision {
                     AnalyzerDecision::RemoveFlow => {
                         // Remove from flow tracking
@@ -326,20 +351,33 @@ impl WorkerThread {
     ///
     /// Dispatches to the appropriate stage processor.
     /// Most stages use the StageProcessor trait; some have custom logic.
-    fn process_stage(
+    async fn process_stage(
         &mut self,
         stage: PipelineStage,
         mut analysis: PacketAnalysis,
         config: &PipelineConfig,
     ) -> PacketAnalysis {
         match stage {
-            // Stage 1: Flow Tracking - use StageProcessor
-            PipelineStage::FlowTracker => {
-                trace!("Stage 1: Flow tracking");
-                StageProcessor::process(&mut self.flow_tracker, analysis, config)
+            // Stage 0: IP Filtering (includes GeoIP + threat intel IOCs)
+            PipelineStage::IpFilter => {
+                trace!("Stage 0: IP filtering");
+                self.ipfilter_worker.process(analysis, &self.ipfilter_config).await
             }
 
-            // Stage 2: Port Scan Detection - custom logic for detailed event construction
+            // Stage 1: Flow Tracking - use process_analysis directly to avoid method name conflict
+            PipelineStage::FlowTracker => {
+                trace!("Stage 1: Flow tracking");
+                self.flow_tracker.process_analysis(analysis)
+            }
+
+            // Stage 2: Layer 2 Detection (scans, DoS, brute force via vector similarity)
+            PipelineStage::Layer2Detect => {
+                trace!("Stage 2: Layer 2 detection (scans, DoS, brute force)");
+                self.layer2_detector.process(&mut analysis).await;
+                analysis
+            }
+
+            // Stage 2 (DEPRECATED): Port Scan Detection - custom logic for detailed event construction
             PipelineStage::ScanDetection => {
                 trace!("Stage 2: Port scan detection");
                 if let Some(alert) = self.scan_detect_engine.process_packet(&analysis.packet) {
@@ -390,13 +428,13 @@ impl WorkerThread {
             // Stage 2b: DoS/Flood Detection - use StageProcessor
             PipelineStage::DoSDetection => {
                 trace!("Stage 2b: DoS/Flood detection");
-                self.dos_detector.process(analysis, config)
+                self.dos_detector.process(analysis, config).await
             }
 
             // Stage 3: Brute Force Detection - use StageProcessor
             PipelineStage::BruteForceDetection => {
                 trace!("Stage 3: Brute force detection");
-                self.brute_force_tracker.process(analysis, config)
+                self.brute_force_tracker.process(analysis, config).await
             }
 
             // Stage 4: Signature Matching - custom logic (SignatureEngine is Option)
@@ -440,62 +478,9 @@ impl WorkerThread {
                 analysis
             }
 
-            // Stage 5: Threat Intel - custom logic for detailed event construction
-            PipelineStage::ThreatIntel => {
-                trace!("Stage 5: Threat intel lookup");
-
-                // Check source IP
-                if let Some(threat_match) = self.intel_engine.check_ip(&analysis.packet.src_ip()) {
-                    let severity = match threat_match.ioc.category {
-                        ThreatCategory::C2 | ThreatCategory::Botnet => Severity::Critical,
-                        ThreatCategory::Malware | ThreatCategory::Ransomware => Severity::High,
-                        ThreatCategory::Phishing | ThreatCategory::Spam => Severity::Medium,
-                        _ => Severity::Low,
-                    };
-                    analysis.add_event(
-                        DetectionEvent::new(
-                            DetectionType::ThreatIntelMatch,
-                            severity,
-                            analysis.packet.src_ip(),
-                            analysis.packet.dst_ip(),
-                            format!("Threat intel match: {} ({})",
-                                threat_match.ioc.value,
-                                threat_match.ioc.source),
-                        )
-                        .with_detector("threat_intel")
-                        .with_ports(analysis.packet.src_port(), analysis.packet.dst_port())
-                    );
-                }
-
-                // Check destination IP
-                if let Some(threat_match) = self.intel_engine.check_ip(&analysis.packet.dst_ip()) {
-                    let severity = match threat_match.ioc.category {
-                        ThreatCategory::C2 | ThreatCategory::Botnet => Severity::Critical,
-                        ThreatCategory::Malware | ThreatCategory::Ransomware => Severity::High,
-                        ThreatCategory::Phishing | ThreatCategory::Spam => Severity::Medium,
-                        _ => Severity::Low,
-                    };
-                    analysis.add_event(
-                        DetectionEvent::new(
-                            DetectionType::MaliciousIp,
-                            severity,
-                            analysis.packet.src_ip(),
-                            analysis.packet.dst_ip(),
-                            format!("Connection to malicious IP: {} ({})",
-                                threat_match.ioc.value,
-                                threat_match.ioc.source),
-                        )
-                        .with_detector("threat_intel")
-                        .with_ports(analysis.packet.src_port(), analysis.packet.dst_port())
-                    );
-                }
-
-                analysis
-            }
-
-            // Stage 6: Protocol Analysis - custom logic for protocol-specific detection
+            // Stage 5: Protocol Analysis - custom logic for protocol-specific detection
             PipelineStage::ProtocolAnalysis => {
-                trace!("Stage 6: Protocol analysis");
+                trace!("Stage 5: Protocol analysis");
 
                 if let Some(ref mut flow) = analysis.flow {
                     let proto_events = self.protocol_detector.analyze(&analysis.packet, flow);
@@ -554,9 +539,9 @@ impl WorkerThread {
                 analysis
             }
 
-            // Stage 7: WASM Plugin Processing
+            // Stage 6: WASM Plugin Processing
             PipelineStage::WasmPlugins => {
-                trace!("Stage 7: WASM plugins");
+                trace!("Stage 6: WASM plugins");
 
                 let context = self.stage_context.clone()
                     .with_stage(PipelineStage::WasmPlugins);
@@ -571,9 +556,9 @@ impl WorkerThread {
                 analysis
             }
 
-            // Stage 8: ML Anomaly Detection
+            // Stage 7: ML Anomaly Detection
             PipelineStage::MLDetection => {
-                trace!("Stage 8: ML detection");
+                trace!("Stage 7: ML detection");
 
                 if let Some(ref flow) = analysis.flow {
                     if let Some(anomaly_score) = self.ml_engine.process_flow(flow) {
@@ -616,9 +601,9 @@ impl WorkerThread {
                 analysis
             }
 
-            // Stage 9: Correlation (final stage) - processes events from all stages
+            // Stage 8: Correlation (final stage) - processes events from all stages
             PipelineStage::Correlation => {
-                trace!("Stage 9: Correlation");
+                trace!("Stage 8: Correlation");
 
                 // Take events to process through correlation
                 let events = analysis.take_events();
@@ -743,6 +728,76 @@ impl WorkerThread {
     pub fn profile_snapshot(&self) -> super::profiling::PipelineProfileSnapshot {
         self.profiler.snapshot()
     }
+
+    /// Get mutable reference to the IP filter worker
+    pub fn ipfilter_worker_mut(&mut self) -> &mut IpFilterWorker {
+        &mut self.ipfilter_worker
+    }
+
+    /// Configure IP filter settings
+    pub fn set_ipfilter_config(&mut self, config: IpFilterConfig) {
+        self.ipfilter_config = config;
+    }
+
+    /// Block an IP address in the filter
+    pub fn block_ip(&mut self, ip: std::net::IpAddr, reason: String) {
+        self.ipfilter_worker.ip_filter_mut().block(ip, reason);
+    }
+
+    /// Add an IP to the watch list
+    pub fn watch_ip(&mut self, ip: std::net::IpAddr, reason: String) {
+        self.ipfilter_worker.ip_filter_mut().watch(ip, reason);
+    }
+
+    /// Load threat intel IOCs into the IP filter
+    ///
+    /// This method loads IP-based IOCs from the threat intel cache into the
+    /// ipfilter blocklist for fast lookup during packet processing.
+    #[cfg(feature = "threat-intel")]
+    pub fn load_threat_intel(&mut self, intel_engine: &crate::threat_intel::IntelEngine) {
+        use crate::threat_intel::{IocType, ThreatCategory};
+
+        // Get all IP IOCs from the intel engine cache
+        let ip_iocs = intel_engine.get_ip_iocs();
+
+        for ioc in ip_iocs {
+            if let Ok(ip) = ioc.value.parse::<std::net::IpAddr>() {
+                let reason = format!("threat_intel:{}:{}", ioc.source, ioc.category.as_str());
+
+                // Block high-severity threats, watch lower severity
+                match ioc.category {
+                    ThreatCategory::C2
+                    | ThreatCategory::Botnet
+                    | ThreatCategory::Ransomware
+                    | ThreatCategory::Apt => {
+                        self.ipfilter_worker.ip_filter_mut().block(ip, reason);
+                    }
+                    ThreatCategory::Malware
+                    | ThreatCategory::Phishing
+                    | ThreatCategory::ExploitKit => {
+                        self.ipfilter_worker.ip_filter_mut().block(ip, reason);
+                    }
+                    _ => {
+                        // Watch but don't block lower severity threats
+                        self.ipfilter_worker.ip_filter_mut().watch(ip, reason);
+                    }
+                }
+            }
+        }
+
+        tracing::info!("Loaded threat intel IOCs into IP filter");
+    }
+
+    /// Load GeoIP database for country-based filtering
+    pub fn load_geoip(&mut self, database_path: &std::path::Path) -> anyhow::Result<()> {
+        use ipfilter::GeoIpFilter;
+
+        let geoip = GeoIpFilter::new().load_database(database_path)?;
+        self.ipfilter_worker.set_geoip(geoip);
+
+        tracing::info!("Loaded GeoIP database from {:?}", database_path);
+        Ok(())
+    }
 }
 
 impl Default for WorkerThread {
@@ -787,12 +842,12 @@ impl WorkerPool {
     ///
     /// Currently routes all packets to worker 0. Future versions will
     /// distribute packets across workers based on flow hash for parallelism.
-    pub fn process(&mut self, packet: Packet, config: &PipelineConfig) -> Vec<DetectionEvent> {
+    pub async fn process(&mut self, packet: Packet, config: &PipelineConfig) -> Vec<DetectionEvent> {
         // Future: distribute by flow hash to maintain flow affinity
         // let worker_idx = packet.flow_hash() % self.workers.len();
         let worker_idx = 0;
 
-        let events = self.workers[worker_idx].process(packet, config);
+        let events = self.workers[worker_idx].process(packet, config).await;
 
         self.packets_processed.fetch_add(1, Ordering::Relaxed);
         self.events_generated.fetch_add(events.len() as u64, Ordering::Relaxed);
@@ -878,7 +933,6 @@ pub struct WorkerStats {
 mod tests {
     use super::*;
     use crate::core::{IpProtocol, TcpFlags, DetectionType};
-    use crate::threat_intel::{Ioc, ThreatCategory as IntelThreatCategory};
     use std::net::IpAddr;
 
     fn make_packet() -> Packet {
@@ -925,14 +979,16 @@ mod tests {
     }
 
     /// Disable all stages except the specified one
+    #[allow(deprecated)]
     fn config_single_stage(stage: PipelineStage) -> PipelineConfig {
         let mut config = PipelineConfig::default();
+        config.enable_ipfilter = stage == PipelineStage::IpFilter;
         config.enable_flows = stage == PipelineStage::FlowTracker;
+        config.enable_layer2detect = stage == PipelineStage::Layer2Detect;
         config.enable_scan_detect = stage == PipelineStage::ScanDetection;
         config.enable_dos = stage == PipelineStage::DoSDetection;
         config.enable_brute_force = stage == PipelineStage::BruteForceDetection;
         config.enable_signatures = stage == PipelineStage::SignatureMatching;
-        config.enable_intel = stage == PipelineStage::ThreatIntel;
         config.enable_protocols = stage == PipelineStage::ProtocolAnalysis;
         config.enable_wasm = stage == PipelineStage::WasmPlugins;
         config.enable_ml = stage == PipelineStage::MLDetection;
@@ -954,21 +1010,21 @@ mod tests {
         assert_eq!(pool.packets_processed(), 0);
     }
 
-    #[test]
-    fn test_worker_pool_processing() {
+    #[tokio::test]
+    async fn test_worker_pool_processing() {
         let mut pool = WorkerPool::default();
         let config = PipelineConfig::default();
 
         let packet = make_packet();
-        let events = pool.process(packet, &config);
+        let events = pool.process(packet, &config).await;
 
         assert_eq!(pool.packets_processed(), 1);
         // Normal HTTP packet shouldn't generate events
         assert!(events.is_empty());
     }
 
-    #[test]
-    fn test_worker_pool_event_generation() {
+    #[tokio::test]
+    async fn test_worker_pool_event_generation() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
         config.enable_scan_detect = true;
@@ -980,7 +1036,7 @@ mod tests {
         let mut total_events = 0;
         for port in 1..100 {
             let packet = make_tcp_packet("10.0.0.99", "192.168.1.1", 45678, port, syn_flags.clone());
-            let events = pool.process(packet, &config);
+            let events = pool.process(packet, &config).await;
             total_events += events.len();
         }
 
@@ -989,15 +1045,15 @@ mod tests {
         assert_eq!(pool.packets_processed(), 99);
     }
 
-    #[test]
-    fn test_worker_utilization() {
+    #[tokio::test]
+    async fn test_worker_utilization() {
         let mut pool = WorkerPool::default();
         let config = PipelineConfig::default();
 
         // Process some packets
         for _ in 0..100 {
             let packet = make_packet();
-            pool.process(packet, &config);
+            pool.process(packet, &config).await;
         }
 
         let util = pool.utilization();
@@ -1010,8 +1066,8 @@ mod tests {
 
     /// Test 1: Flow Tracker stage
     /// Verifies that flow tracking updates flow state (no events, but metrics update)
-    #[test]
-    fn test_stage1_flow_tracker() {
+    #[tokio::test]
+    async fn test_stage1_flow_tracker() {
         let mut pool = WorkerPool::default();
         let config = config_single_stage(PipelineStage::FlowTracker);
 
@@ -1019,7 +1075,7 @@ mod tests {
         let syn_flags = syn_flags();
         let packet = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, syn_flags);
 
-        let events = pool.process(packet, &config);
+        let _events = pool.process(packet, &config).await;
 
         // Flow tracker doesn't generate events directly, but processes packets
         assert_eq!(pool.packets_processed(), 1);
@@ -1035,8 +1091,8 @@ mod tests {
 
     /// Test 2: Scan Detection stage
     /// Sends multiple SYN packets to different ports to trigger scan detection
-    #[test]
-    fn test_stage2_scan_detection() {
+    #[tokio::test]
+    async fn test_stage2_scan_detection() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
         config.enable_scan_detect = true;
@@ -1047,7 +1103,7 @@ mod tests {
         // This tests that the scan detection stage processes packets correctly
         for port in 1..200 {
             let packet = make_tcp_packet("10.0.0.50", "192.168.1.1", 45678, port, syn_flags.clone());
-            let _events = pool.process(packet, &config);
+            let _events = pool.process(packet, &config).await;
         }
 
         // Check stage metrics
@@ -1061,14 +1117,43 @@ mod tests {
         assert_eq!(pool.packets_processed(), 199);
     }
 
-    /// Test 3: Brute Force Detection stage
+    /// Test 2b: Layer2Detect stage (v4 spec - replaces scan/dos/brute force)
+    /// Tests the unified layer2detect stage processes packets
+    #[tokio::test]
+    async fn test_stage2_layer2detect() {
+        let mut pool = WorkerPool::default();
+        let config = config_single_stage(PipelineStage::Layer2Detect);
+
+        let syn_flags = syn_flags();
+
+        // Send SYN packets to many different ports (scan behavior)
+        for port in 1..50 {
+            let packet = make_tcp_packet("10.0.0.75", "192.168.1.1", 45678, port, syn_flags.clone());
+            let _events = pool.process(packet, &config).await;
+        }
+
+        // Check stage metrics
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::Layer2Detect) {
+            let snap = metrics.snapshot();
+            assert!(snap.pass_count >= 40, "Layer2Detect should process packets");
+            println!("Layer2Detect: pass={}, marked={}", snap.pass_count, snap.marked_count);
+        }
+
+        // Verify packets were processed through the pipeline
+        assert_eq!(pool.packets_processed(), 49);
+    }
+
+    /// Test 3: Brute Force Detection stage (DEPRECATED - tests backward compatibility)
     /// Sends multiple short sessions to trigger brute force detection
-    #[test]
-    fn test_stage3_brute_force_detection() {
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn test_stage3_brute_force_detection() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
         config.enable_brute_force = true;
         config.enable_correlation = true;
+        // Add deprecated stage to stage_order for backward compatibility testing
+        config.stage_order.push(PipelineStage::BruteForceDetection);
 
         let syn_flags = syn_flags();
         let rst_flags = rst_flags();
@@ -1079,11 +1164,11 @@ mod tests {
         for i in 0..15 {
             // SYN (session start)
             let syn_pkt = make_tcp_packet("10.0.0.100", "192.168.1.1", 40000 + i, 22, syn_flags.clone());
-            let _ = pool.process(syn_pkt, &config);
+            let _ = pool.process(syn_pkt, &config).await;
 
             // RST (quick session end - failed login)
             let rst_pkt = make_tcp_packet("10.0.0.100", "192.168.1.1", 40000 + i, 22, rst_flags.clone());
-            let events = pool.process(rst_pkt, &config);
+            let events = pool.process(rst_pkt, &config).await;
 
             for event in &events {
                 if matches!(event.event_type, DetectionType::BruteForce) {
@@ -1106,8 +1191,8 @@ mod tests {
     /// Test 4: Signature Matching stage
     /// Tests that signature matching stage processes packets without errors
     /// Note: By default no rules are loaded, so no matches will occur
-    #[test]
-    fn test_stage4_signature_matching() {
+    #[tokio::test]
+    async fn test_stage4_signature_matching() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
         config.enable_signatures = true;
@@ -1116,7 +1201,7 @@ mod tests {
         let syn_flags = syn_flags();
         let packet = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 22, syn_flags);
 
-        let _events = pool.process(packet, &config);
+        let _events = pool.process(packet, &config).await;
 
         // Check stage metrics - without loaded rules, no matches expected
         if let Some(metrics) = pool.stage_metrics().get(PipelineStage::SignatureMatching) {
@@ -1129,46 +1214,43 @@ mod tests {
         assert_eq!(pool.packets_processed(), 1);
     }
 
-    /// Test 5: Threat Intel stage
-    /// Adds malicious IP to cache and verifies detection
-    #[test]
-    fn test_stage5_threat_intel() {
+    /// Test 0: IP Filter stage
+    /// Adds blocked IP and verifies detection
+    #[tokio::test]
+    async fn test_stage0_ipfilter() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
-        config.enable_intel = true;
+        config.enable_ipfilter = true;
         config.enable_correlation = true;
 
-        // Add a known malicious IP to the threat intel cache
+        // Add a known blocked IP to the filter
         let malicious_ip: IpAddr = "198.51.100.1".parse().unwrap();
-        {
-            // Access internal cache to add test IOC
-            let ioc = Ioc::ip(malicious_ip, "test_feed", IntelThreatCategory::C2);
-            pool.worker_mut().intel_engine.add_ioc(ioc);
-        }
+        pool.worker_mut().ipfilter_worker_mut().ip_filter_mut()
+            .block(malicious_ip, "Known C2 server".to_string());
 
-        // Send packet FROM the malicious IP
+        // Send packet FROM the blocked IP
         let syn_flags = syn_flags();
         let packet = make_tcp_packet("198.51.100.1", "192.168.1.1", 45678, 80, syn_flags);
 
-        let events = pool.process(packet, &config);
+        let events = pool.process(packet, &config).await;
 
         // Check stage metrics
-        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::ThreatIntel) {
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::IpFilter) {
             let snap = metrics.snapshot();
-            assert!(snap.pass_count >= 1, "ThreatIntel should process packet");
-            assert!(snap.marked_count >= 1, "Malicious IP should be marked");
-            println!("ThreatIntel: pass={}, marked={}", snap.pass_count, snap.marked_count);
+            assert!(snap.pass_count >= 1, "IpFilter should process packet");
+            assert!(snap.marked_count >= 1, "Blocked IP should be marked");
+            println!("IpFilter: pass={}, marked={}", snap.pass_count, snap.marked_count);
         }
 
-        // Check for threat intel match event
-        let has_threat_match = events.iter().any(|e| matches!(e.event_type, DetectionType::ThreatIntelMatch));
-        assert!(has_threat_match, "Should detect threat intel match for malicious IP");
+        // Check for malicious IP detection event
+        let has_malicious_ip = events.iter().any(|e| matches!(e.event_type, DetectionType::MaliciousIp));
+        assert!(has_malicious_ip, "Should detect malicious IP for blocked source");
     }
 
-    /// Test 6: Protocol Analysis stage
+    /// Test 5: Protocol Analysis stage
     /// Sends HTTP request with path traversal to trigger protocol anomaly
-    #[test]
-    fn test_stage6_protocol_analysis() {
+    #[tokio::test]
+    async fn test_stage5_protocol_analysis() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
         config.enable_flows = true; // Need flow for protocol analysis
@@ -1178,7 +1260,7 @@ mod tests {
         // First, establish a flow
         let syn_flags = syn_flags();
         let syn_pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, syn_flags);
-        let _ = pool.process(syn_pkt, &config);
+        let _ = pool.process(syn_pkt, &config).await;
 
         // Now send HTTP request with path traversal
         let ack_flags = ack_psh_flags();
@@ -1187,7 +1269,7 @@ mod tests {
             tcp.payload = b"GET /../../etc/passwd HTTP/1.1\r\nHost: target\r\n\r\n".to_vec();
         }
 
-        let events = pool.process(http_packet, &config);
+        let events = pool.process(http_packet, &config).await;
 
         // Check stage metrics
         if let Some(metrics) = pool.stage_metrics().get(PipelineStage::ProtocolAnalysis) {
@@ -1203,10 +1285,10 @@ mod tests {
         }
     }
 
-    /// Test 7: ML Anomaly Detection stage
+    /// Test 6: ML Anomaly Detection stage
     /// Creates a flow with anomalous characteristics
-    #[test]
-    fn test_stage7_ml_detection() {
+    #[tokio::test]
+    async fn test_stage6_ml_detection() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
         config.enable_flows = true; // Need flow for ML
@@ -1219,7 +1301,7 @@ mod tests {
 
         // Send packets to establish flow
         let syn = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, syn_flags);
-        let _ = pool.process(syn, &config);
+        let _ = pool.process(syn, &config).await;
 
         // Add data packets
         for _ in 0..5 {
@@ -1227,7 +1309,7 @@ mod tests {
             if let Some(tcp) = data_pkt.tcp_mut() {
                 tcp.payload = vec![0xAB; 1000]; // 1KB payload
             }
-            let _ = pool.process(data_pkt, &config);
+            let _ = pool.process(data_pkt, &config).await;
         }
 
         // Check stage metrics
@@ -1243,29 +1325,29 @@ mod tests {
         println!("ML stage processed (detection requires trained model)");
     }
 
-    /// Test 8: Correlation stage
-    /// Verifies that events from threat intel are passed to correlation
-    #[test]
-    fn test_stage8_correlation() {
+    /// Test 7: Correlation stage
+    /// Verifies that events from IP filter are passed to correlation
+    #[tokio::test]
+    async fn test_stage7_correlation() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
-        // Enable threat intel + correlation to test event correlation
-        config.enable_intel = true;
+        // Enable IP filter + correlation to test event correlation
+        // Note: Use "watch" not "block" because blocked IPs stop processing
+        config.enable_ipfilter = true;
         config.enable_correlation = true;
 
-        // Add test IOC to threat intel
-        let malicious_ip: IpAddr = "10.0.0.1".parse().unwrap();
-        pool.worker_mut().intel_engine.add_ioc(
-            Ioc::ip(malicious_ip, "test_feed", IntelThreatCategory::C2)
-        );
+        // Add watched IP to the filter (watch allows packet to continue through pipeline)
+        let suspicious_ip: IpAddr = "10.0.0.1".parse().unwrap();
+        pool.worker_mut().ipfilter_worker_mut().ip_filter_mut()
+            .watch(suspicious_ip, "Suspicious activity".to_string());
 
-        // Send packets from malicious IP
+        // Send packets from watched IP
         let syn_flags = syn_flags();
 
         let mut all_events = Vec::new();
         for i in 0..5 {
             let packet = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678 + i, 22, syn_flags.clone());
-            let events = pool.process(packet, &config);
+            let events = pool.process(packet, &config).await;
             all_events.extend(events);
         }
 
@@ -1276,44 +1358,42 @@ mod tests {
             assert!(snap.pass_count >= 1, "Correlation should process events");
         }
 
-        // Events should be generated from threat intel
+        // Events should be generated from IP filter (ThreatIntelMatch for watched IPs)
         println!("Total events after correlation: {}", all_events.len());
         for event in &all_events {
             println!("  Event: {:?} - {}", event.event_type, event.message);
         }
 
-        // We should have events from threat intel
-        assert!(!all_events.is_empty(), "Should have events from threat intel");
+        // We should have events from IP filter
+        assert!(!all_events.is_empty(), "Should have events from IP filter");
     }
 
     /// Integration test: All stages work together
-    #[test]
-    fn test_all_stages_integration() {
+    #[tokio::test]
+    async fn test_all_stages_integration() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
         // Enable stages we need for testing
-        config.enable_intel = true;
+        config.enable_ipfilter = true;
 
-        // Add malicious IP for threat intel
-        let malicious_ip: IpAddr = "203.0.113.1".parse().unwrap();
-        {
-            let ioc = Ioc::ip(malicious_ip, "test_feed", IntelThreatCategory::Botnet);
-            pool.worker_mut().intel_engine.add_ioc(ioc);
-        }
+        // Add blocked IP for IP filter
+        let blocked_ip: IpAddr = "203.0.113.1".parse().unwrap();
+        pool.worker_mut().ipfilter_worker_mut().ip_filter_mut()
+            .block(blocked_ip, "Known botnet".to_string());
 
         // Test 1: Normal traffic (should pass through without alerts)
         let syn_flags = syn_flags();
         let normal_pkt = make_tcp_packet("10.0.0.1", "192.168.1.1", 45678, 80, syn_flags.clone());
-        let events = pool.process(normal_pkt, &config);
+        let events = pool.process(normal_pkt, &config).await;
         println!("Normal packet events: {}", events.len());
         assert!(events.is_empty(), "Normal traffic should not trigger events");
 
-        // Test 2: Threat intel match (malicious source IP)
+        // Test 2: Blocked IP match (malicious source IP)
         let malicious_pkt = make_tcp_packet("203.0.113.1", "192.168.1.1", 45678, 80, syn_flags.clone());
-        let events = pool.process(malicious_pkt, &config);
-        println!("Malicious IP events: {}", events.len());
-        assert!(events.iter().any(|e| matches!(e.event_type, DetectionType::ThreatIntelMatch)),
-            "Should detect malicious IP");
+        let events = pool.process(malicious_pkt, &config).await;
+        println!("Blocked IP events: {}", events.len());
+        assert!(events.iter().any(|e| matches!(e.event_type, DetectionType::MaliciousIp)),
+            "Should detect blocked IP");
 
         // Print final stage metrics
         println!("\n=== Stage Metrics Summary ===");

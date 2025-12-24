@@ -215,7 +215,7 @@ impl Default for DoSDetector {
 }
 
 impl StageProcessor<PipelineConfig, PipelineStage> for DoSDetector {
-    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+    async fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         let alerts = self.process_packet(&analysis.packet);
         for alert in alerts {
             let event = alert.to_detection_event(&analysis.packet);
@@ -224,7 +224,7 @@ impl StageProcessor<PipelineConfig, PipelineStage> for DoSDetector {
         analysis
     }
 
-    fn stage(&self) -> PipelineStage {
+    async fn stage(&self) -> PipelineStage {
         PipelineStage::DoSDetection
     }
 }

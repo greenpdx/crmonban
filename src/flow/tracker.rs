@@ -211,11 +211,11 @@ impl FlowTracker {
 }
 
 impl StageProcessor<PipelineConfig, PipelineStage> for FlowTracker {
-    fn process(&mut self, analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+    async fn process(&mut self, analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         self.process_analysis(analysis)
     }
 
-    fn stage(&self) -> PipelineStage {
+    async fn stage(&self) -> PipelineStage {
         PipelineStage::FlowTracker
     }
 }

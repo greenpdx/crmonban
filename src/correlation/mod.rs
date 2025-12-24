@@ -390,6 +390,28 @@ impl CorrelationEngine {
             DetectionType::CnC => "CnC",
             DetectionType::UnauthorizedAccess => "UnauthorizedAccess",
             DetectionType::CorrelatedThreat => "CorrelatedThreat",
+            // Web attack types
+            DetectionType::SqlInjection => "SqlInjection",
+            DetectionType::Xss => "Xss",
+            DetectionType::PathTraversal => "PathTraversal",
+            DetectionType::CommandInjection => "CommandInjection",
+            DetectionType::LdapInjection => "LdapInjection",
+            DetectionType::XxeInjection => "XxeInjection",
+            DetectionType::SsrfAttack => "SsrfAttack",
+            DetectionType::CsrfAttack => "CsrfAttack",
+            // DNS attack types
+            DetectionType::DnsTunneling => "DnsTunneling",
+            DetectionType::DnsAmplification => "DnsAmplification",
+            DetectionType::DnsDga => "DnsDga",
+            DetectionType::DnsRebinding => "DnsRebinding",
+            DetectionType::DnsSpoofing => "DnsSpoofing",
+            // TLS attack types
+            DetectionType::TlsDowngrade => "TlsDowngrade",
+            DetectionType::TlsHeartbleed => "TlsHeartbleed",
+            DetectionType::TlsWeakCipher => "TlsWeakCipher",
+            DetectionType::TlsSelfSigned => "TlsSelfSigned",
+            DetectionType::TlsExpiredCert => "TlsExpiredCert",
+            DetectionType::TlsKnownMalwareJa3 => "TlsKnownMalwareJa3",
             DetectionType::Custom(_) => "Custom",
         };
         type_strs.iter().any(|t| type_name.contains(t.as_str()))
@@ -618,7 +640,7 @@ impl Default for CorrelationEngine {
 }
 
 impl StageProcessor<PipelineConfig, PipelineStage> for CorrelationEngine {
-    fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
+    async fn process(&mut self, mut analysis: PacketAnalysis, _config: &PipelineConfig) -> PacketAnalysis {
         // Correlation processes the events already collected in PacketAnalysis
         // This is the final stage - it correlates events from all previous stages
 
@@ -666,7 +688,7 @@ impl StageProcessor<PipelineConfig, PipelineStage> for CorrelationEngine {
         analysis
     }
 
-    fn stage(&self) -> PipelineStage {
+    async fn stage(&self) -> PipelineStage {
         PipelineStage::Correlation
     }
 }
