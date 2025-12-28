@@ -1,0 +1,56 @@
+# Sample nginx access log with attack patterns
+# Format: IP - - [date] "request" status size "referer" "user-agent"
+
+# SQL Injection Attacks
+192.168.1.50 - - [28/Dec/2025:10:15:01 +0000] "GET /login?id=1' OR '1'='1 HTTP/1.1" 200 1234 "-" "Mozilla/5.0"
+192.168.1.50 - - [28/Dec/2025:10:15:02 +0000] "GET /search?q=' UNION SELECT username,password FROM users-- HTTP/1.1" 200 5678 "-" "Mozilla/5.0"
+192.168.1.50 - - [28/Dec/2025:10:15:03 +0000] "GET /api/query?id=1; DROP TABLE users-- HTTP/1.1" 200 100 "-" "Mozilla/5.0"
+192.168.1.50 - - [28/Dec/2025:10:15:04 +0000] "GET /product?id=1%20OR%201%3D1 HTTP/1.1" 200 2345 "-" "sqlmap/1.5"
+
+# XSS Attacks
+10.0.0.100 - - [28/Dec/2025:10:20:01 +0000] "GET /search?q=<script>alert('XSS')</script> HTTP/1.1" 200 1000 "-" "Mozilla/5.0"
+10.0.0.100 - - [28/Dec/2025:10:20:02 +0000] "GET /comment?text=<img src=x onerror=alert(1)> HTTP/1.1" 200 1000 "-" "Mozilla/5.0"
+10.0.0.100 - - [28/Dec/2025:10:20:03 +0000] "GET /profile?name=%3Cscript%3Ealert(1)%3C/script%3E HTTP/1.1" 200 1000 "-" "Mozilla/5.0"
+
+# Path Traversal Attacks
+172.16.0.50 - - [28/Dec/2025:10:25:01 +0000] "GET /download?file=../../../etc/passwd HTTP/1.1" 200 1500 "-" "Mozilla/5.0"
+172.16.0.50 - - [28/Dec/2025:10:25:02 +0000] "GET /file?path=....//....//....//etc/shadow HTTP/1.1" 200 1500 "-" "Mozilla/5.0"
+172.16.0.50 - - [28/Dec/2025:10:25:03 +0000] "GET /read?f=..%2f..%2f..%2fetc/passwd HTTP/1.1" 200 1500 "-" "Mozilla/5.0"
+
+# Command Injection
+203.0.113.50 - - [28/Dec/2025:10:30:01 +0000] "GET /ping?host=;cat%20/etc/passwd HTTP/1.1" 200 2000 "-" "Mozilla/5.0"
+203.0.113.50 - - [28/Dec/2025:10:30:02 +0000] "GET /exec?cmd=%7Ccat%20/etc/shadow HTTP/1.1" 200 2000 "-" "Mozilla/5.0"
+203.0.113.50 - - [28/Dec/2025:10:30:03 +0000] "GET /shell?c=$(whoami) HTTP/1.1" 200 100 "-" "Mozilla/5.0"
+
+# Scanner User Agents
+198.51.100.50 - - [28/Dec/2025:10:35:01 +0000] "GET / HTTP/1.1" 200 5000 "-" "nikto/2.1.6"
+198.51.100.50 - - [28/Dec/2025:10:35:02 +0000] "GET /admin HTTP/1.1" 404 200 "-" "sqlmap/1.5"
+198.51.100.50 - - [28/Dec/2025:10:35:03 +0000] "GET /robots.txt HTTP/1.1" 200 100 "-" "nmap scripting engine"
+198.51.100.51 - - [28/Dec/2025:10:35:04 +0000] "GET / HTTP/1.1" 200 5000 "-" "nuclei/2.9.0"
+
+# WordPress Attack Patterns
+192.0.2.50 - - [28/Dec/2025:10:40:01 +0000] "GET /wp-login.php HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+192.0.2.50 - - [28/Dec/2025:10:40:02 +0000] "POST /xmlrpc.php HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+192.0.2.50 - - [28/Dec/2025:10:40:03 +0000] "GET /wp-admin/install.php HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+
+# Shell Upload Attempts
+192.0.2.100 - - [28/Dec/2025:10:45:01 +0000] "GET /shell.php HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+192.0.2.100 - - [28/Dec/2025:10:45:02 +0000] "GET /c99.php HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+192.0.2.100 - - [28/Dec/2025:10:45:03 +0000] "GET /uploads/cmd.php HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+
+# Sensitive File Access
+192.0.2.150 - - [28/Dec/2025:10:50:01 +0000] "GET /.env HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+192.0.2.150 - - [28/Dec/2025:10:50:02 +0000] "GET /.git/config HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+192.0.2.150 - - [28/Dec/2025:10:50:03 +0000] "GET /wp-config.php HTTP/1.1" 404 200 "-" "Mozilla/5.0"
+
+# Login Bruteforce
+10.10.10.50 - - [28/Dec/2025:10:55:01 +0000] "POST /admin/login HTTP/1.1" 401 100 "-" "Mozilla/5.0"
+10.10.10.50 - - [28/Dec/2025:10:55:02 +0000] "POST /admin/login HTTP/1.1" 401 100 "-" "Mozilla/5.0"
+10.10.10.50 - - [28/Dec/2025:10:55:03 +0000] "POST /admin/login HTTP/1.1" 401 100 "-" "Mozilla/5.0"
+10.10.10.50 - - [28/Dec/2025:10:55:04 +0000] "POST /wp-login.php HTTP/1.1" 401 100 "-" "Mozilla/5.0"
+10.10.10.50 - - [28/Dec/2025:10:55:05 +0000] "POST /wp-login.php HTTP/1.1" 401 100 "-" "Mozilla/5.0"
+
+# Normal traffic (should NOT trigger)
+192.168.1.1 - - [28/Dec/2025:11:00:01 +0000] "GET / HTTP/1.1" 200 5000 "-" "Mozilla/5.0"
+192.168.1.1 - - [28/Dec/2025:11:00:02 +0000] "GET /about HTTP/1.1" 200 3000 "-" "Mozilla/5.0"
+192.168.1.1 - - [28/Dec/2025:11:00:03 +0000] "POST /api/data HTTP/1.1" 200 500 "-" "Mozilla/5.0"

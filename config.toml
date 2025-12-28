@@ -90,6 +90,62 @@ name = "too_many_auth_failures"
 regex = 'Disconnecting authenticating user .* (?P<ip>\d+\.\d+\.\d+\.\d+) .* Too many authentication failures'
 event_type = "brute_force"
 
+# Additional SSH attack patterns from real-world logs
+[[services.ssh.patterns]]
+name = "failed_password_root"
+regex = 'Failed password for root from (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "brute_force"
+
+[[services.ssh.patterns]]
+name = "refused_connect"
+regex = 'refused connect from (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "failed_auth"
+
+[[services.ssh.patterns]]
+name = "did_not_receive_identification"
+regex = 'Did not receive identification string from (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "exploit"
+
+[[services.ssh.patterns]]
+name = "connection_reset"
+regex = 'Connection reset by (?P<ip>\d+\.\d+\.\d+\.\d+) port \d+ \[preauth\]'
+event_type = "failed_auth"
+
+[[services.ssh.patterns]]
+name = "bad_protocol_version"
+regex = 'Bad protocol version identification.*from (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "exploit"
+
+[[services.ssh.patterns]]
+name = "ssh_disconnect_protocol_error"
+regex = 'Disconnected from (?P<ip>\d+\.\d+\.\d+\.\d+) port \d+.*protocol error'
+event_type = "exploit"
+
+[[services.ssh.patterns]]
+name = "pam_auth_failure"
+regex = 'pam_unix\(sshd:auth\): authentication failure.*rhost=(?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "failed_auth"
+
+[[services.ssh.patterns]]
+name = "publickey_not_accepted"
+regex = 'Connection closed by authenticating user .* (?P<ip>\d+\.\d+\.\d+\.\d+) .* \[preauth\]'
+event_type = "failed_auth"
+
+[[services.ssh.patterns]]
+name = "maximum_auth_attempts"
+regex = 'error: maximum authentication attempts exceeded for .* from (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "brute_force"
+
+[[services.ssh.patterns]]
+name = "ssh_banner_exchange"
+regex = 'kex_exchange_identification: banner exchange: Connection reset by (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "exploit"
+
+[[services.ssh.patterns]]
+name = "ssh_invalid_format"
+regex = 'sshd.*error: kex_exchange_identification:.*from (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "exploit"
+
 [services.nginx]
 enabled = false
 log_path = "/var/log/nginx/error.log"
@@ -106,6 +162,84 @@ event_type = "rate_limit"
 name = "limit_conn"
 regex = 'limiting connections by zone .*, client: (?P<ip>\d+\.\d+\.\d+\.\d+)'
 event_type = "rate_limit"
+
+[[services.nginx.patterns]]
+name = "upstream_timeout"
+regex = 'upstream timed out.*client: (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "rate_limit"
+
+[[services.nginx.patterns]]
+name = "access_forbidden"
+regex = 'access forbidden by rule, client: (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "exploit"
+
+[[services.nginx.patterns]]
+name = "directory_index_forbidden"
+regex = 'directory index of .* is forbidden, client: (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "exploit"
+
+[[services.nginx.patterns]]
+name = "client_closed_connection"
+regex = 'client prematurely closed connection, client: (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "rate_limit"
+
+# Nginx access log monitoring for web attacks
+[services.nginx_access]
+enabled = false
+log_path = "/var/log/nginx/access.log"
+max_failures = 5
+find_time = 60
+ban_time = 3600
+
+[[services.nginx_access.patterns]]
+name = "sql_injection_union"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(?i)(union\+select|union%20select)'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "sql_injection_or"
+regex = "(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+).*(?i)(or%201%3D1|or%20'1'%3D'1'|' or ''=')"
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "path_traversal"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(\.\.\/|\.\.%2f|\.\.%252f)'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "xss_script"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(<script|%3Cscript|javascript:)'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "cmd_injection"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(;cat%20|%7Ccat|%60id%60|\$\()'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "wordpress_attack"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(wp-login\.php|xmlrpc\.php|wp-admin).* 404'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "scanner_uagent"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*"(nikto|sqlmap|nmap|masscan|zgrab|nessus|nuclei)"'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "shell_access"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(shell\.php|c99\.php|r57\.php|b374k|cmd\.php)'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "sensitive_files"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(\.env|\.git|\.htaccess|\.htpasswd|wp-config\.php)'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "admin_bruteforce"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*POST.*(\/admin|\/login|\/wp-login).* 401'
+event_type = "brute_force"
 
 [services.apache]
 enabled = false
@@ -142,6 +276,216 @@ ban_time = 3600
 name = "auth_failed"
 regex = 'auth failed, \d+ attempts .* rip=(?P<ip>\d+\.\d+\.\d+\.\d+)'
 event_type = "failed_auth"
+
+[[services.dovecot.patterns]]
+name = "imap_auth_failed"
+regex = 'imap-login: Disconnected.*rip=(?P<ip>\d+\.\d+\.\d+\.\d+).*auth failed'
+event_type = "failed_auth"
+
+[[services.dovecot.patterns]]
+name = "pop3_auth_failed"
+regex = 'pop3-login:.*rip=(?P<ip>\d+\.\d+\.\d+\.\d+).*auth failed'
+event_type = "failed_auth"
+
+# FTP service monitoring (vsftpd, proftpd)
+[services.vsftpd]
+enabled = false
+log_path = "/var/log/vsftpd.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.vsftpd.patterns]]
+name = "ftp_login_failed"
+regex = 'FAIL LOGIN: Client "(?P<ip>\d+\.\d+\.\d+\.\d+)"'
+event_type = "failed_auth"
+
+[[services.vsftpd.patterns]]
+name = "ftp_login_incorrect"
+regex = '\[(?P<ip>\d+\.\d+\.\d+\.\d+)\].*LOGIN FAILED'
+event_type = "failed_auth"
+
+[services.proftpd]
+enabled = false
+log_path = "/var/log/proftpd/proftpd.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.proftpd.patterns]]
+name = "proftpd_auth_failed"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*USER .+: no such user'
+event_type = "invalid_user"
+
+[[services.proftpd.patterns]]
+name = "proftpd_pass_failed"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*PASS.*Authentication failed'
+event_type = "failed_auth"
+
+# MySQL monitoring
+[services.mysql]
+enabled = false
+log_path = "/var/log/mysql/error.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.mysql.patterns]]
+name = "mysql_access_denied"
+regex = "Access denied for user.*from '(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+)'"
+event_type = "failed_auth"
+
+[[services.mysql.patterns]]
+name = "mysql_connection_refused"
+regex = "Host '(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+)' is blocked"
+event_type = "brute_force"
+
+# PostgreSQL monitoring
+[services.postgresql]
+enabled = false
+log_path = "/var/log/postgresql/postgresql-main.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.postgresql.patterns]]
+name = "pg_auth_failed"
+regex = 'FATAL:.*authentication failed for user.*host=(?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "failed_auth"
+
+[[services.postgresql.patterns]]
+name = "pg_no_hba"
+regex = 'no pg_hba.conf entry for host "(?P<ip>\d+\.\d+\.\d+\.\d+)"'
+event_type = "failed_auth"
+
+# Exim mail server
+[services.exim]
+enabled = false
+log_path = "/var/log/exim4/mainlog"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.exim.patterns]]
+name = "exim_auth_failed"
+regex = 'authenticator failed for .* \[(?P<ip>\d+\.\d+\.\d+\.\d+)\]'
+event_type = "failed_auth"
+
+[[services.exim.patterns]]
+name = "exim_rejected"
+regex = 'rejected connection from \[(?P<ip>\d+\.\d+\.\d+\.\d+)\]'
+event_type = "rate_limit"
+
+# Pure-FTPd
+[services.pureftpd]
+enabled = false
+log_path = "/var/log/syslog"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.pureftpd.patterns]]
+name = "pureftpd_auth_failed"
+regex = 'pure-ftpd: \(\?@(?P<ip>\d+\.\d+\.\d+\.\d+)\) \[WARNING\] Authentication failed'
+event_type = "failed_auth"
+
+# Named/BIND DNS
+[services.named]
+enabled = false
+log_path = "/var/log/named/security.log"
+max_failures = 10
+find_time = 60
+ban_time = 600
+
+[[services.named.patterns]]
+name = "dns_query_denied"
+regex = 'client @.* (?P<ip>\d+\.\d+\.\d+\.\d+)#\d+.*query.*denied'
+event_type = "rate_limit"
+
+[[services.named.patterns]]
+name = "dns_transfer_denied"
+regex = 'client @.* (?P<ip>\d+\.\d+\.\d+\.\d+)#\d+.*zone transfer.*denied'
+event_type = "exploit"
+
+# RDP via xrdp
+[services.xrdp]
+enabled = false
+log_path = "/var/log/xrdp-sesman.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.xrdp.patterns]]
+name = "xrdp_login_failed"
+regex = 'AUTHINFO: authentication failed.*client_ip=(?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "failed_auth"
+
+# OpenVPN
+[services.openvpn]
+enabled = false
+log_path = "/var/log/openvpn.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.openvpn.patterns]]
+name = "ovpn_auth_failed"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+):\d+.*AUTH_FAILED'
+event_type = "failed_auth"
+
+[[services.openvpn.patterns]]
+name = "ovpn_tls_error"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+):\d+.*TLS Error'
+event_type = "exploit"
+
+# Asterisk/VoIP
+[services.asterisk]
+enabled = false
+log_path = "/var/log/asterisk/security"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.asterisk.patterns]]
+name = "asterisk_failed_auth"
+regex = 'SECURITY.*from\s+(?P<ip>\d+\.\d+\.\d+\.\d+).*FailedACL'
+event_type = "failed_auth"
+
+[[services.asterisk.patterns]]
+name = "asterisk_invalid_pass"
+regex = 'SECURITY.*from\s+(?P<ip>\d+\.\d+\.\d+\.\d+).*InvalidPassword'
+event_type = "failed_auth"
+
+[[services.asterisk.patterns]]
+name = "sip_register_failed"
+regex = "SecurityEvent.*RemoteAddress.*IPV4/UDP/(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+).*InvalidPassword"
+event_type = "brute_force"
+
+# Webmin
+[services.webmin]
+enabled = false
+log_path = "/var/webmin/miniserv.log"
+max_failures = 5
+find_time = 300
+ban_time = 3600
+
+[[services.webmin.patterns]]
+name = "webmin_auth_failed"
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*Invalid login'
+event_type = "failed_auth"
+
+# Recidive - for persistent offenders (scans auth.log for already banned IPs re-attempting)
+[services.recidive]
+enabled = false
+log_path = "/var/log/auth.log"
+max_failures = 3
+find_time = 86400    # 24 hours
+ban_time = 604800    # 1 week
+
+[[services.recidive.patterns]]
+name = "repeat_offender"
+regex = 'sshd\[\d+\]: Disconnected from banned (?P<ip>\d+\.\d+\.\d+\.\d+)'
+event_type = "brute_force"
 
 # ============================================================================
 # Port-Based Firewall Rules (UFW-like)

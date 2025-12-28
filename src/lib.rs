@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod malware_detect;
 pub mod models;
 pub mod monitor;
+pub mod journald_monitor;
 pub mod port_scan_monitor;
 pub mod scan_detect;
 pub mod shared_whitelist;

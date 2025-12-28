@@ -1,0 +1,44 @@
+# Sample attack log file for validating crmonban detection patterns
+# This file contains realistic attack patterns from various sources
+
+# SSH Brute Force Attacks
+Dec 28 10:15:01 server sshd[12345]: Failed password for root from 192.168.1.100 port 54321 ssh2
+Dec 28 10:15:02 server sshd[12345]: Failed password for root from 192.168.1.100 port 54322 ssh2
+Dec 28 10:15:03 server sshd[12345]: Failed password for root from 192.168.1.100 port 54323 ssh2
+Dec 28 10:15:04 server sshd[12345]: Failed password for root from 192.168.1.100 port 54324 ssh2
+Dec 28 10:15:05 server sshd[12345]: Failed password for root from 192.168.1.100 port 54325 ssh2
+Dec 28 10:15:06 server sshd[12345]: error: maximum authentication attempts exceeded for root from 192.168.1.100 port 54326 ssh2 [preauth]
+Dec 28 10:15:07 server sshd[12345]: Disconnecting authenticating user root 192.168.1.100 port 54326: Too many authentication failures [preauth]
+
+# SSH Invalid User Attacks
+Dec 28 10:20:01 server sshd[12346]: Invalid user admin from 10.0.0.50 port 44444
+Dec 28 10:20:02 server sshd[12346]: Failed password for invalid user admin from 10.0.0.50 port 44444 ssh2
+Dec 28 10:20:03 server sshd[12346]: Invalid user test from 10.0.0.50 port 44445
+Dec 28 10:20:04 server sshd[12346]: Invalid user oracle from 10.0.0.50 port 44446
+Dec 28 10:20:05 server sshd[12346]: Invalid user postgres from 10.0.0.50 port 44447
+
+# SSH Protocol Exploits/Scanners
+Dec 28 10:25:01 server sshd[12347]: Did not receive identification string from 172.16.0.1 port 33333
+Dec 28 10:25:02 server sshd[12347]: Bad protocol version identification 'GET / HTTP/1.1' from 172.16.0.1 port 33334
+Dec 28 10:25:03 server sshd[12347]: kex_exchange_identification: banner exchange: Connection reset by 172.16.0.2 port 33335
+
+# Connection Issues
+Dec 28 10:30:01 server sshd[12348]: Connection closed by 203.0.113.1 port 12345 [preauth]
+Dec 28 10:30:02 server sshd[12348]: Connection reset by 203.0.113.1 port 12346 [preauth]
+Dec 28 10:30:03 server sshd[12348]: Connection closed by authenticating user user1 203.0.113.1 port 12347 [preauth]
+
+# PAM Authentication Failures
+Dec 28 10:35:01 server sshd[12349]: pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=198.51.100.1 user=root
+Dec 28 10:35:02 server sshd[12349]: pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=198.51.100.1 user=admin
+
+# SSH Disconnect Events
+Dec 28 10:40:01 server sshd[12350]: Disconnected from 198.51.100.2 port 55555 protocol error
+Dec 28 10:40:02 server sshd[12350]: error: kex_exchange_identification: read: Connection reset by peer from 198.51.100.3 port 55556
+
+# Refused Connections
+Dec 28 10:45:01 server sshd[12351]: refused connect from 192.0.2.1 (192.0.2.1)
+Dec 28 10:45:02 server sshd[12351]: refused connect from 192.0.2.2 (192.0.2.2)
+
+# Successful auth (should NOT trigger)
+Dec 28 11:00:01 server sshd[12352]: Accepted password for validuser from 192.168.1.1 port 22222 ssh2
+Dec 28 11:00:02 server sshd[12352]: Accepted publickey for validuser from 192.168.1.1 port 22223 ssh2
