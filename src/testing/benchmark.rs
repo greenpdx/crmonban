@@ -11,7 +11,7 @@ use pcap::Capture;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{DetectionEvent, Packet, PacketAnalysis};
-use crate::layer234::Detector as Layer234Detector;
+use crate::layer234::{Detector as Layer234Detector, DetectorBuilder as Layer234Builder, Config as Layer234Config};
 use crate::http_detect::DetectionEngine as HttpDetectionEngine;
 
 use super::ground_truth::{GroundTruth, MatchResult};
@@ -92,8 +92,16 @@ impl DetectionBenchmark {
     /// Initialize detection engines
     fn initialize_detectors(&mut self) {
         if self.config.enable_layer234 {
-            // Use builder pattern for Layer234 Detector
-            if let Ok(detector) = Layer234Detector::builder().build() {
+            // Load default config with signatures
+            let mut layer234_config = Layer234Config::default();
+            // Override window settings for benchmark (matching layer2detect benchmark parameters)
+            layer234_config.detector.window_size_ms = 2000; // 2 second windows
+            layer234_config.detector.min_packets = 5; // Only need 5 packets per window
+
+            // Build detector from config (which loads signatures!)
+            if let Ok(detector) = Layer234Builder::from_config(&layer234_config)
+                .build_with_config(&layer234_config)
+            {
                 self.layer234 = Some(detector);
                 self.collectors.insert("layer234".to_string(), MetricsCollector::new("layer234"));
             }
@@ -185,6 +193,67 @@ impl DetectionBenchmark {
         self.generate_report()
     }
 
+    /// Process packets from realistic traffic generator
+    pub fn process_realistic_generator(&mut self, generator: &mut super::realistic::RealisticTrafficGenerator) -> BenchmarkReport {
+        // Generate all attack traffic and clone immediately to release mutable borrow
+        let packets: Vec<_> = generator.generate_all_attacks().to_vec();
+
+        // Set ground truth from generator (now safe since packets are owned)
+        self.ground_truth = Some(generator.get_ground_truth().clone());
+        self.start_time = Some(Instant::now());
+
+        // Print ground truth attackers
+        if let Some(ref gt) = self.ground_truth {
+            eprintln!("\nAttack Sources ({} attackers, {} packets):",
+                gt.attacker_ips.len(), packets.len());
+            for attack in &gt.attacks {
+                eprintln!("  {} -> {}", attack.src_ip, attack.attack_type);
+            }
+            eprintln!();
+        }
+
+        // Subscribe to detection stream before processing to catch flush events
+        let mut detection_rx = self.layer234.as_ref().map(|d| d.detection_stream());
+
+        // Process all packets
+        for packet in packets {
+            self.process_packet(packet);
+        }
+
+        // Flush the detector to process remaining windows and collect events
+        if let Some(ref mut detector) = self.layer234 {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let _ = detector.flush().await;
+            });
+
+            // Collect any events from the detection stream (from flush)
+            if let Some(ref mut rx) = detection_rx {
+                while let Ok(event) = rx.try_recv() {
+                    // Record detection in metrics
+                    let is_known_attack = self.ground_truth.as_ref()
+                        .map(|gt| gt.is_attacker(&event.src_ip))
+                        .unwrap_or(false);
+
+                    // Print each detection
+                    let status = if is_known_attack { "TP" } else { "FP" };
+                    eprintln!("  [{}] {:?} from {}", status, event.event_type, event.src_ip);
+
+                    if let Some(collector) = self.collectors.get_mut("layer234") {
+                        collector.record_detection(&format!("{:?}", event.event_type), is_known_attack);
+                    }
+                    if let Some(collector) = self.collectors.get_mut("overall") {
+                        collector.record_detection(&format!("{:?}", event.event_type), is_known_attack);
+                    }
+
+                    self.all_detections.push(event);
+                }
+            }
+        }
+
+        self.generate_report()
+    }
+
     /// Process a single packet through all enabled detectors
     pub fn process_packet(&mut self, packet: Packet) {
         // Skip warmup packets from metrics
@@ -257,8 +326,8 @@ impl DetectionBenchmark {
 
         // HTTP detection (if packet has HTTP payload)
         if let Some(ref _engine) = self.http_detect {
-            // For HTTP detection, we'd need payload - skip for now if no payload
-            // This is a simplified version
+            // TODO: Integrate with http_detect::PacketProcessor
+            // For now, HTTP detection is tested separately via httpAttack binary
         }
 
         // Record overall metrics - pre-compute detection results

@@ -12,6 +12,7 @@ use std::time::Instant;
 use crmonban::testing::{
     BenchmarkConfig, DetectionBenchmark, BenchmarkReport, ReportFormat,
     AttackConfig, AttackGenerator, MixedTrafficGenerator,
+    RealisticTrafficGenerator, RealisticConfig,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -104,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create benchmark config
     let config = BenchmarkConfig {
         enable_layer234: true,
-        enable_http_detect: false, // Skip for now - need HTTP payloads
+        enable_http_detect: false, // HTTP tested separately via httpAttack
         enable_signatures: false,
         enable_protocols: false,
         warmup_packets,
@@ -171,9 +172,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print_report(&report, output_format, output_file.as_deref())?;
                 return Ok(());
             }
+            "realistic" | "all" => {
+                // Use realistic traffic generator that tests ALL detection layers
+                println!("Running realistic traffic benchmark (ALL layers)...\n");
+                println!("Generating:");
+                println!("  - Port scan (vertical scan detection)");
+                println!("  - SYN flood (DoS detection)");
+                println!("  - SSH brute force (auth port detection)");
+                println!("  - HTTP attacks (SQL injection, XSS, path traversal)");
+                println!("  - Network sweep (horizontal scan)");
+                println!("  - UDP flood (DNS amplification)");
+                println!("  - Benign traffic (baseline)\n");
+
+                let config = RealisticConfig::default();
+                let mut generator = RealisticTrafficGenerator::new(config);
+                report = benchmark.process_realistic_generator(&mut generator);
+                print_report(&report, output_format, output_file.as_deref())?;
+                return Ok(());
+            }
             _ => {
                 eprintln!("Unknown attack type: {}", attack);
-                eprintln!("Supported: port_scan, syn_flood, ssh_brute, mixed");
+                eprintln!("Supported: port_scan, syn_flood, ssh_brute, mixed, realistic");
                 std::process::exit(1);
             }
         };
@@ -232,7 +251,8 @@ fn print_help() {
     println!("  -v, --verbose             Show per-packet timing");
     println!("  -s, --synthetic           Use synthetic traffic generation");
     println!("  -a, --attack-type <TYPE>  Attack type for synthetic mode:");
-    println!("                            port_scan, syn_flood, ssh_brute, mixed");
+    println!("                            port_scan, syn_flood, ssh_brute, mixed, realistic");
+    println!("                            (realistic tests ALL detection layers)");
     println!("  -n, --count <N>           Packet count for synthetic (default: 10000)");
     println!("  -h, --help                Show this help\n");
     println!("EXAMPLES:");
@@ -242,6 +262,8 @@ fn print_help() {
     println!("  detection_benchmark -s -a port_scan -n 5000\n");
     println!("  # Mixed traffic with JSON output");
     println!("  detection_benchmark -s -a mixed --format json -o report.json\n");
+    println!("  # Realistic traffic testing ALL detection layers");
+    println!("  detection_benchmark -s -a realistic --format markdown\n");
     println!("GROUND TRUTH FORMAT (CSV):");
     println!("  timestamp,src_ip,dst_ip,attack_type,severity");
     println!("  1609459200,192.168.1.100,10.0.0.1,port_scan,medium");
