@@ -4,7 +4,7 @@ use std::any::Any;
 use std::time::Instant;
 
 use crate::protocols::traits::ProtocolStateData;
-use crmonban_types::protocols::{SmtpAuthMechanism, SmtpHeaders};
+use crate::types::protocols::{SmtpAuthMechanism, SmtpHeaders};
 
 /// SMTP per-flow state
 #[derive(Debug)]

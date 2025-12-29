@@ -1,6 +1,6 @@
 //! TCP session tracking and stream reassembly
 
-use crmonban_types::{Packet, TcpInfo, TlsInfo as PacketTlsInfo};
+use crate::types::{Packet, TcpInfo, TlsInfo as PacketTlsInfo};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -698,7 +698,7 @@ pub fn extract_session_features(sessions: &[&TcpSession]) -> [f32; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crmonban_types::{Ipv4Info, Layer3, Layer4, TcpFlags};
+    use crate::types::{Ipv4Info, Layer3, Layer4, TcpFlags};
     use chrono::{TimeZone, Utc};
     use std::net::Ipv4Addr;
 

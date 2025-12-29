@@ -9,8 +9,8 @@
 
 pub mod parser;
 
-// Re-export all types from crmonban-types
-pub use crmonban_types::{
+// Re-export all types from crate::types
+pub use crate::types::{
     // Layers
     Layer3, Layer4, EthernetInfo,
     Ipv4Info, Ipv6Info,
@@ -25,7 +25,7 @@ pub use crmonban_types::{
     PacketAnalysis, FlowControl,
     // Protocols
     AppProtocol,
-    // Pipeline (AlertAnalyzer only - StageProcessor imported directly from crmonban_types)
+    // Pipeline (AlertAnalyzer only - StageProcessor imported directly from crate::types)
     AlertAnalyzer, AlertAnalyzerConfig, AnalyzerDecision,
 };
 

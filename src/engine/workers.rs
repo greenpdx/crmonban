@@ -42,7 +42,7 @@ use crate::signatures::matcher::{ProtocolContext, FlowState};
 use crate::wasm::{WasmEngine, StageContext};
 
 // IP filtering with GeoIP and threat intel (Stage 0)
-use ipfilter::{Worker as IpFilterWorker, IpFilter, IpFilterConfig};
+use crate::ipfilter::{Worker as IpFilterWorker, IpFilter, IpFilterConfig};
 
 // Layer 2-4 detection: scans, DoS, brute force (Stage 2)
 use crate::layer234::Detector as Layer2Detector;
@@ -790,7 +790,7 @@ impl WorkerThread {
 
     /// Load GeoIP database for country-based filtering
     pub fn load_geoip(&mut self, database_path: &std::path::Path) -> anyhow::Result<()> {
-        use ipfilter::GeoIpFilter;
+        use crate::ipfilter::GeoIpFilter;
 
         let geoip = GeoIpFilter::new().load_database(database_path)?;
         self.ipfilter_worker.set_geoip(geoip);

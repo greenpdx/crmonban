@@ -14,10 +14,10 @@ use super::{
     HttpAnalyzer, DnsAnalyzer, TlsAnalyzer, HttpTransaction, DnsMessage, TlsEvent,
 };
 use super::ssh::{SshAnalyzer, SshAnalyzerConfig, SshParser};
-use crmonban_types::protocols::SshEvent;
+use crate::types::protocols::SshEvent;
 
 // HTTP attack detection engine
-use crmonban_detection::{DetectionEngine as HttpAttackEngine, ScanReport};
+use crate::http_detect::{DetectionEngine as HttpAttackEngine, ScanReport};
 
 /// Protocol detector that routes packets to appropriate analyzers
 /// and runs attack detection on parsed protocol data
@@ -131,11 +131,11 @@ impl ProtocolDetector {
             // Convert detections to DetectionEvents
             for detection in report.detections {
                 let severity = match detection.severity {
-                    crmonban_detection::Severity::Critical => Severity::Critical,
-                    crmonban_detection::Severity::High => Severity::High,
-                    crmonban_detection::Severity::Medium => Severity::Medium,
-                    crmonban_detection::Severity::Low => Severity::Low,
-                    crmonban_detection::Severity::Info => Severity::Info,
+                    crate::http_detect::Severity::Critical => Severity::Critical,
+                    crate::http_detect::Severity::High => Severity::High,
+                    crate::http_detect::Severity::Medium => Severity::Medium,
+                    crate::http_detect::Severity::Low => Severity::Low,
+                    crate::http_detect::Severity::Info => Severity::Info,
                 };
 
                 let detection_type = match detection.category.as_str() {

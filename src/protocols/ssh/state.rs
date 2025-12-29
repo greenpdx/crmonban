@@ -4,7 +4,7 @@ use std::any::Any;
 use std::time::Instant;
 
 use crate::protocols::traits::ProtocolStateData;
-use crmonban_types::protocols::SshVersionInfo;
+use crate::types::protocols::SshVersionInfo;
 
 /// SSH per-flow state
 #[derive(Debug)]

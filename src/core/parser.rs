@@ -10,7 +10,7 @@
 use std::net::IpAddr;
 use etherparse::SlicedPacket;
 
-use crmonban_types::{
+use crate::types::{
     Packet, IpProtocol, TcpFlags,
     Layer3, Layer4, EthernetInfo,
     Ipv4Info, Ipv6Info,

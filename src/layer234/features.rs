@@ -1,5 +1,5 @@
 use super::types::{FeatureVector, VECTOR_DIM};
-use crmonban_types::Packet;
+use crate::types::Packet;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -1104,7 +1104,7 @@ mod tests {
 
     // === DoS Feature Extraction Tests ===
 
-    use crmonban_types::{IpProtocol, TcpFlags};
+    use crate::types::{IpProtocol, TcpFlags};
     use chrono::{TimeZone, Utc};
 
     fn create_syn_packet(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, dst_port: u16, timestamp_ns: u64) -> Packet {

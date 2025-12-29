@@ -26,7 +26,7 @@ pub use parser::{SshParser, SshMsgType, WEAK_KEX_ALGORITHMS, WEAK_CIPHERS, WEAK_
 pub use match_::SshMatcher;
 
 // Re-export types from crmonban-types
-pub use crmonban_types::protocols::{
+pub use crate::types::protocols::{
     SshEvent, SshAuthMethod, SshNegotiatedAlgorithms, SshVersionInfo, HasshFingerprint,
 };
 

@@ -49,7 +49,7 @@ pub mod types;
 pub mod weights;
 
 // Re-export types from crmonban-types (pipeline interface)
-pub use crmonban_types::{
+pub use crate::types::{
     // Core pipeline types
     PacketAnalysis, FlowControl, StageProcessor,
     // Detection events
@@ -66,7 +66,7 @@ pub use crmonban_types::{
 };
 
 // Re-export sub-types from event module
-pub use crmonban_types::event::{
+pub use crate::types::event::{
     DetectionSubType, ScanSubType, DosSubType, AnomalySubType, CustomSubType,
 };
 

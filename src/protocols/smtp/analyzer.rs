@@ -4,8 +4,8 @@
 
 use crate::protocols::{ProtocolAnalyzer, SmtpConfig};
 use crate::protocols::smtp::parser::{SmtpParser, SmtpCommand};
-use crmonban_types::{Flow, Packet, ProtocolEvent, DetectionType};
-use crmonban_types::protocols::{
+use crate::types::{Flow, Packet, ProtocolEvent, DetectionType};
+use crate::types::protocols::{
     SmtpEvent, SmtpTransaction, EmailAddress,
     spam_patterns::{SPAM_SUBJECT_PATTERNS, PHISHING_SUBJECT_PATTERNS},
 };
@@ -605,7 +605,7 @@ impl ProtocolAnalyzer for SmtpAnalyzer {
                         let src_ip = packet.src_ip();
                         self.handle_auth_attempt(src_ip, true, None);
                         Some(SmtpEvent::Auth {
-                            mechanism: crmonban_types::protocols::SmtpAuthMechanism::Unknown("unknown".into()),
+                            mechanism: crate::types::protocols::SmtpAuthMechanism::Unknown("unknown".into()),
                             username: None,
                             success: true,
                         })
@@ -615,7 +615,7 @@ impl ProtocolAnalyzer for SmtpAnalyzer {
                         let src_ip = packet.src_ip();
                         self.handle_auth_attempt(src_ip, false, None);
                         Some(SmtpEvent::Auth {
-                            mechanism: crmonban_types::protocols::SmtpAuthMechanism::Unknown("unknown".into()),
+                            mechanism: crate::types::protocols::SmtpAuthMechanism::Unknown("unknown".into()),
                             username: None,
                             success: false,
                         })
@@ -643,7 +643,7 @@ impl ProtocolAnalyzer for SmtpAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crmonban_types::protocols::{SmtpHeaders, SmtpAttachment};
+    use crate::types::protocols::{SmtpHeaders, SmtpAttachment};
 
     fn test_config() -> SmtpConfig {
         SmtpConfig::default()

@@ -35,7 +35,7 @@ use super::workers::{WorkerPool, WorkerConfig};
 use super::EngineStats;
 
 // Re-export StageProcessor from crmonban-types
-pub use crmonban_types::StageProcessor;
+pub use crate::types::StageProcessor;
 
 /// Pipeline configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

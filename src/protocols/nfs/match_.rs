@@ -3,7 +3,7 @@ use crate::core::Severity;
 use crate::protocols::{ProtocolState, ProtocolAlert, ProtocolRuleSet};
 use crate::protocols::alerts::priority_to_severity;
 use crate::signatures::ast::Rule;
-use crmonban_types::DetectionType;
+use crate::types::DetectionType;
 
 pub struct NfsMatcher;
 impl NfsMatcher {

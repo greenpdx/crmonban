@@ -9,11 +9,11 @@ use super::types::{
     SignatureUpdate, SignatureUpdateSender, ThreatType,
 };
 use super::weights::DetectionWeights;
-use crmonban_types::{
+use crate::types::{
     DetectionEvent, DetectionType, Severity,
     Packet, PacketAnalysis, StageProcessor,
 };
-use crmonban_types::event::{
+use crate::types::event::{
     DetectionSubType, ScanSubType, DosSubType, AnomalySubType,
 };
 use std::net::IpAddr;

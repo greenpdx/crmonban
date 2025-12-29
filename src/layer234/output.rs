@@ -1,4 +1,4 @@
-use crmonban_types::DetectionEvent;
+use crate::types::DetectionEvent;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -60,7 +60,7 @@ impl Default for OutputHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crmonban_types::{DetectionType, Severity};
+    use crate::types::{DetectionType, Severity};
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::{AtomicUsize, Ordering};
 

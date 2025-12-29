@@ -1,6 +1,6 @@
 //! SSH protocol types
 
-pub use crmonban_types::protocols::{
+pub use crate::types::protocols::{
     SshEvent, SshAuthMethod, SshNegotiatedAlgorithms, SshVersionInfo, HasshFingerprint,
 };
 

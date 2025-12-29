@@ -1,7 +1,7 @@
 use super::error::{NetVecError, Result};
 use super::tls::{parse_tls, version_string, TlsInfo as DetailedTlsInfo};
 use chrono::{TimeZone, Utc};
-use crmonban_types::{
+use crate::types::{
     Direction, EthernetInfo, IcmpInfo, Icmpv6Info, Ipv4Info, Ipv6Info, Layer3, Layer4, Packet,
     TcpFlags, TcpInfo, TlsInfo, UdpInfo,
 };

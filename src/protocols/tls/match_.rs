@@ -4,7 +4,7 @@ use crate::core::Severity;
 use crate::protocols::{ProtocolState, ProtocolAlert, ProtocolRuleSet};
 use crate::protocols::alerts::priority_to_severity;
 use crate::signatures::ast::{Rule, RuleOption, ContentMatch};
-use crmonban_types::DetectionType;
+use crate::types::DetectionType;
 use super::state::TlsState;
 use super::types::*;
 

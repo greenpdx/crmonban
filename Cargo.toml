@@ -10,17 +10,8 @@ keywords = ["firewall", "nftables", "security", "intrusion-prevention", "fail2ba
 categories = ["command-line-utilities", "network-programming"]
 
 [dependencies]
-# Core types library
-crmonban-types = { path = "../crmonban-types" }
-
-# IP filtering with GeoIP support
-ipfilter = { path = "../ipfilter" }
-
 # Vector similarity database for layer234 detection
 crvecdb = "0.1"
-
-# HTTP attack detection (SQL injection, XSS, path traversal, etc.)
-crmonban-detection = { path = "../httpAttack" }
 
 # nftables JSON API
 nftables = { version = "0.6.4", registry = "kellnr" }
@@ -37,10 +28,14 @@ notify-debouncer-mini = "*"
 
 # Pattern matching
 regex = { version = "*", features = ["std"] }
+aho-corasick = "1.1"
+
+# Concurrent data structures
+dashmap = "5.5"
+smallvec = "1.11"
 
 # Signature engine dependencies (optional)
 nom = { version = "*", optional = true }
-aho-corasick = { version = "*", optional = true }
 parking_lot = { version = "*", optional = true }
 
 # Flow tracking and protocol analysis dependencies (optional)
@@ -91,6 +86,9 @@ anyhow = "*"
 
 # IP address handling
 ipnetwork = { version = "*", features = ["serde"] }
+
+# GeoIP database
+maxminddb = "0.24"
 
 # DNS lookups
 trust-dns-resolver = "*"
@@ -181,7 +179,7 @@ dbus = ["dep:zbus"]
 # External firewall integration (requires separate firewall daemon)
 crrouter = []
 # Signature-based detection (Suricata/Snort rule compatibility)
-signatures = ["dep:nom", "dep:aho-corasick", "dep:parking_lot"]
+signatures = ["dep:nom", "dep:parking_lot"]
 # Flow tracking for ML/anomaly detection (Stage 2)
 flow-tracking = ["dep:parking_lot"]
 # Protocol analyzers with JA3 fingerprinting (Stage 3)

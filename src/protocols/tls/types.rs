@@ -1,6 +1,6 @@
 //! TLS protocol types
 
-pub use crmonban_types::Ja3Fingerprint;
+pub use crate::types::Ja3Fingerprint;
 use serde::{Deserialize, Serialize};
 
 /// TLS Suricata keywords supported

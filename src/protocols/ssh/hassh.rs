@@ -11,7 +11,7 @@ use std::path::Path;
 use std::fs;
 use tracing::{info, warn, debug};
 
-pub use crmonban_types::protocols::HasshFingerprint;
+pub use crate::types::protocols::HasshFingerprint;
 
 /// HASSH database for fingerprint matching
 #[derive(Debug, Default)]

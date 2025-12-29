@@ -2,7 +2,7 @@
 //!
 //! Parses SMTP commands and responses to extract mail transaction events.
 
-use crmonban_types::protocols::{
+use crate::types::protocols::{
     SmtpEvent, SmtpAuthMechanism, SmtpTransaction, SmtpHeaders,
     SmtpAttachment, EmailAddress,
 };

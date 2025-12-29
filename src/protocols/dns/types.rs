@@ -2,7 +2,7 @@
 //!
 //! Local types for DNS parsing and detection.
 
-pub use crmonban_types::{DnsMessage, DnsQuery, DnsAnswer, DnsRecordType, DnsRdata};
+pub use crate::types::{DnsMessage, DnsQuery, DnsAnswer, DnsRecordType, DnsRdata};
 
 /// DNS Suricata keywords supported
 pub const DNS_KEYWORDS: &[&str] = &[

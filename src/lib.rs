@@ -1,3 +1,7 @@
+// Core types - re-exported at crate root for external use
+pub mod types;
+pub use types::*;
+
 pub mod brute_force;
 pub mod cloudflare;
 pub mod config;
@@ -8,7 +12,9 @@ pub mod dbus;
 pub mod dpi;
 pub mod ebpf;
 pub mod firewall;
+pub mod http_detect;
 pub mod intel;
+pub mod ipfilter;
 pub mod ipc;
 pub mod malware_detect;
 pub mod models;

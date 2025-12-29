@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use crmonban_types::{DetectionType, Flow, Packet, ProtocolEvent};
-use crmonban_types::protocols::{
+use crate::types::{DetectionType, Flow, Packet, ProtocolEvent};
+use crate::types::protocols::{
     SshEvent, SshAuthMethod, SshVersionInfo, HasshFingerprint,
 };
 use tracing::{debug, info, warn};

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crmonban_types::DetectionType;
+use crate::types::DetectionType;
 use crate::core::Severity;
 use super::traits::Transaction;
 

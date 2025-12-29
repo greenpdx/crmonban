@@ -1,6 +1,6 @@
 use super::features::{WindowStats, DEFAULT_AUTH_PORTS};
 use super::types::FeatureVector;
-use crmonban_types::Packet;
+use crate::types::Packet;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -136,7 +136,7 @@ impl Aggregator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crmonban_types::IpProtocol;
+    use crate::types::IpProtocol;
     use chrono::{TimeZone, Utc};
     use std::net::Ipv4Addr;
 

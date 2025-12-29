@@ -34,7 +34,7 @@ use crate::protocols::{
 };
 use crate::protocols::registry::ProtocolRegistration;
 use crate::protocols::traits::ParserStage;
-use crmonban_types::protocols::spam_patterns::{SPAM_SUBJECT_PATTERNS, PHISHING_SUBJECT_PATTERNS};
+use crate::types::protocols::spam_patterns::{SPAM_SUBJECT_PATTERNS, PHISHING_SUBJECT_PATTERNS};
 
 /// Get SMTP protocol registration
 pub fn registration() -> ProtocolRegistration {
@@ -262,7 +262,7 @@ impl SmtpProtocolParser {
         None
     }
 
-    fn analyze_headers(&self, pstate: &mut ProtocolState, headers: &crmonban_types::protocols::SmtpHeaders) {
+    fn analyze_headers(&self, pstate: &mut ProtocolState, headers: &crate::types::protocols::SmtpHeaders) {
         if let Some(state) = pstate.get_inner_mut::<SmtpState>() {
             // Check for spam subject patterns
             if self.config.detect_spam {

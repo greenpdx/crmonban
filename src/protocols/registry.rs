@@ -9,7 +9,7 @@ use crate::core::Direction;
 use crate::signatures::ast::Protocol;
 use super::traits::ProtocolParser;
 use super::alerts::ProtocolAlert;
-use crmonban_types::DetectionType;
+use crate::types::DetectionType;
 
 /// Protocol registration entry
 pub struct ProtocolRegistration {

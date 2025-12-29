@@ -2,7 +2,7 @@
 //!
 //! Parses SSH protocol messages to extract version, key exchange, and auth events.
 
-use crmonban_types::protocols::{
+use crate::types::protocols::{
     SshEvent, SshAuthMethod, SshNegotiatedAlgorithms, SshVersionInfo,
     HasshFingerprint,
 };

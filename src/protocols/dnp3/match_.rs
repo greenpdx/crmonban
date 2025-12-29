@@ -2,7 +2,7 @@
 use crate::core::Severity;
 use crate::protocols::{ProtocolState, ProtocolAlert, ProtocolRuleSet};
 use crate::protocols::alerts::priority_to_severity;
-use crmonban_types::DetectionType;
+use crate::types::DetectionType;
 use super::state::Dnp3State;
 
 pub struct Dnp3Matcher;

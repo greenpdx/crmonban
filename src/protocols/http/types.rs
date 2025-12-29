@@ -2,7 +2,7 @@
 //!
 //! Local types for HTTP parsing and detection. Re-exports common types from crmonban-types.
 
-pub use crmonban_types::{HttpRequest, HttpResponse, HttpTransaction};
+pub use crate::types::{HttpRequest, HttpResponse, HttpTransaction};
 
 /// HTTP Suricata keywords supported
 pub const HTTP_KEYWORDS: &[&str] = &[

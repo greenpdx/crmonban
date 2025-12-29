@@ -1,6 +1,6 @@
 //! SMTP protocol types and Suricata keywords
 
-pub use crmonban_types::protocols::{
+pub use crate::types::protocols::{
     SmtpEvent, SmtpAuthMechanism, SmtpTransaction, SmtpHeaders, SmtpAttachment, EmailAddress,
 };
 

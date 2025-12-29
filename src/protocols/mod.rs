@@ -116,8 +116,8 @@ pub mod ike;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // Re-export core protocol types from crmonban-types
-pub use crmonban_types::{AppProtocol, ProtocolEvent};
-pub use crmonban_types::protocols::{
+pub use crate::types::{AppProtocol, ProtocolEvent};
+pub use crate::types::protocols::{
     HttpTransaction, HttpRequest, HttpResponse,
     DnsMessage, DnsQuery, DnsAnswer,
     TlsEvent, Ja3Fingerprint,
@@ -140,7 +140,7 @@ pub use ssh::SshAnalyzer;
 pub use smtp::SmtpAnalyzer;
 
 use serde::{Deserialize, Serialize};
-use crmonban_types::{Flow, Packet};
+use crate::types::{Flow, Packet};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Legacy ProtocolAnalyzer trait (for backward compatibility)

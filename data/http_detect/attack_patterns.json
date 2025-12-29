@@ -1,0 +1,597 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2025-01-22",
+  "patterns": {
+    "path_traversal": {
+      "severity": "Critical",
+      "action": "Drop",
+      "description": "Directory traversal attempts",
+      "patterns": [
+        "../",
+        "..\\",
+        "..%2f",
+        "..%5c",
+        "..%252f",
+        "..%c0%af",
+        "..%c1%9c",
+        "....//",
+        "....\\\\",
+        "%2e%2e%2f",
+        "%2e%2e/",
+        "..%00",
+        "..%0d",
+        "..%0a",
+        "..;/",
+        "../../../etc/passwd",
+        "..\\..\\..\\windows",
+        "/etc/passwd",
+        "/etc/shadow",
+        "\\windows\\system32",
+        "/proc/self/environ"
+      ],
+      "regex": [
+        "(\\.\\./|\\.\\.\\\\|%2e%2e%2f|%2e%2e/|%2e%2e%5c){2,}",
+        "(/etc/(passwd|shadow|hosts|group|issue))",
+        "(\\\\windows\\\\(system32|win\\.ini))",
+        "(/proc/(self|[0-9]+)/(environ|cmdline))"
+      ]
+    },
+    "web_shells": {
+      "severity": "Critical",
+      "action": "Drop",
+      "description": "Known web shell filenames",
+      "patterns": [
+        "/c99.php",
+        "/c99shell.php",
+        "/c99-php",
+        "/r57.php",
+        "/r57shell.php",
+        "/wso.php",
+        "/wso2.php",
+        "/wso-php",
+        "/alfa.php",
+        "/alfashell.php",
+        "/b374k.php",
+        "/shell.php",
+        "/phpshell.php",
+        "/cmd.php",
+        "/mini.php",
+        "/marijuana.php",
+        "/geckov12.php",
+        "/geckov11.php",
+        "/upload.php",
+        "/uploader.php",
+        "/simple.php",
+        "/backdoor.php",
+        "/image_processor.php",
+        "/IndoXploit.php",
+        "/k2ll33d.php",
+        "/zerox.php",
+        "/f3rguso.php",
+        "/madnet.php",
+        "/c100.php"
+      ],
+      "regex": [
+        "/(c99|r57|wso|alfa|b374k|shell|backdoor|k2ll33d|IndoXploit)[^/]*\\.php",
+        "/[a-z0-9]{32}\\.php$",
+        "/[0-9]{1,3}\\.php$"
+      ]
+    },
+    "wordpress_probing": {
+      "severity": "High",
+      "action": "RateLimit",
+      "description": "WordPress installation probing",
+      "patterns": [
+        "/wp-admin/",
+        "/wp-login.php",
+        "/wp-config.php",
+        "/wp-content/plugins/",
+        "/wp-content/themes/",
+        "/wp-content/uploads/",
+        "/wp-includes/",
+        "/xmlrpc.php",
+        "/wp-json/",
+        "/wp-json/wp/v2/users",
+        "/readme.html",
+        "/license.txt",
+        "/wp-cron.php",
+        "/?author=",
+        "/wp-admin/install.php",
+        "/wp-admin/setup-config.php"
+      ],
+      "regex": [
+        "/wp-(admin|content|includes)/",
+        "/wp-.*\\.php"
+      ]
+    },
+    "joomla_probing": {
+      "severity": "High",
+      "action": "RateLimit",
+      "description": "Joomla installation probing",
+      "patterns": [
+        "/administrator/",
+        "/administrator/index.php",
+        "/administrator/manifests/files/joomla.xml",
+        "/configuration.php",
+        "/components/",
+        "/modules/",
+        "/plugins/",
+        "/templates/",
+        "/language/en-GB/en-GB.xml",
+        "/libraries/joomla/version.php",
+        "/htaccess.txt",
+        "/web.config.txt"
+      ],
+      "regex": [
+        "/administrator/",
+        "/components/com_[a-z]+",
+        "joomla"
+      ]
+    },
+    "drupal_probing": {
+      "severity": "High",
+      "action": "RateLimit",
+      "description": "Drupal installation probing",
+      "patterns": [
+        "/user/login",
+        "/user/register",
+        "/admin",
+        "/admin/config",
+        "/node",
+        "/sites/default/settings.php",
+        "/sites/default/files/",
+        "/core/install.php",
+        "/core/modules/",
+        "/modules/",
+        "/themes/",
+        "/CHANGELOG.txt",
+        "/core/CHANGELOG.txt"
+      ],
+      "regex": [
+        "/sites/default/",
+        "/core/",
+        "drupal"
+      ]
+    },
+    "config_files": {
+      "severity": "Critical",
+      "action": "Drop",
+      "description": "Configuration and sensitive files",
+      "patterns": [
+        "/.env",
+        "/.env.local",
+        "/.env.production",
+        "/.env.development",
+        "/config.php",
+        "/configuration.php",
+        "/wp-config.php",
+        "/database.yml",
+        "/settings.py",
+        "/settings.php",
+        "/web.config",
+        "/app.config",
+        "/application.properties",
+        "/config.json",
+        "/config.xml",
+        "/.htaccess",
+        "/.htpasswd",
+        "/phpinfo.php",
+        "/info.php",
+        "/php.ini",
+        "/.user.ini",
+        "/credentials.json",
+        "/secrets.json",
+        "/api_keys.json",
+        "/.aws/credentials",
+        "/.ssh/id_rsa",
+        "/.ssh/id_dsa",
+        "/.bash_history",
+        "/.mysql_history"
+      ],
+      "regex": [
+        "/\\.env(\\..*)?$",
+        "/(config|configuration|settings|credentials|secrets)[^/]*\\.(php|yml|yaml|json|xml|ini)",
+        "/\\.(htaccess|htpasswd|user\\.ini|bash_history)"
+      ]
+    },
+    "backup_files": {
+      "severity": "Critical",
+      "action": "Drop",
+      "description": "Backup and database dump files",
+      "patterns": [
+        "/backup.sql",
+        "/dump.sql",
+        "/database.sql",
+        "/db.sql",
+        "/backup.zip",
+        "/backup.tar",
+        "/backup.tar.gz",
+        "/backup.rar",
+        "/backup.7z",
+        "/site-backup.zip",
+        "/www.zip",
+        "/htdocs.zip",
+        "/public_html.zip",
+        "/web.zip",
+        "/backup/",
+        "/backups/",
+        "/.backup/",
+        "/old/",
+        "/temp/",
+        "/tmp/"
+      ],
+      "regex": [
+        "/(backup|dump|database|db|export)[^/]*\\.(sql|zip|tar|gz|rar|7z|bak)$",
+        "\\.(sql|bak|old|backup|temp|tmp|swp|~)$",
+        "/[^/]+\\.(zip|tar|tar\\.gz|rar|7z)$"
+      ]
+    },
+    "git_svn_exposure": {
+      "severity": "Critical",
+      "action": "Drop",
+      "description": "Version control system exposure",
+      "patterns": [
+        "/.git/",
+        "/.git/config",
+        "/.git/HEAD",
+        "/.git/index",
+        "/.git/logs/",
+        "/.git/refs/",
+        "/.gitignore",
+        "/.svn/",
+        "/.svn/entries",
+        "/.svn/wc.db",
+        "/.hg/",
+        "/.bzr/",
+        "/CVS/",
+        "/.DS_Store"
+      ],
+      "regex": [
+        "/\\.(git|svn|hg|bzr)/",
+        "/\\.(gitignore|gitmodules|DS_Store)"
+      ]
+    },
+    "database_admin": {
+      "severity": "Critical",
+      "action": "RateLimit",
+      "description": "Database administration interfaces",
+      "patterns": [
+        "/phpmyadmin",
+        "/phpmyadmin/",
+        "/phpMyAdmin",
+        "/phpMyAdmin/",
+        "/pma",
+        "/pma/",
+        "/myadmin",
+        "/myadmin/",
+        "/mysql",
+        "/mysql/",
+        "/dbadmin",
+        "/dbadmin/",
+        "/db",
+        "/db/",
+        "/admin/db",
+        "/admin/mysql",
+        "/admin/phpmyadmin",
+        "/adminer.php",
+        "/adminer/",
+        "/sql/",
+        "/sqladmin/",
+        "/database/"
+      ],
+      "regex": [
+        "/(phpmyadmin|pma|myadmin|adminer|dbadmin)",
+        "/.*admin.*(db|mysql|sql)"
+      ]
+    },
+    "admin_panels": {
+      "severity": "High",
+      "action": "RateLimit",
+      "description": "Generic admin panel paths",
+      "patterns": [
+        "/admin",
+        "/admin/",
+        "/admin.php",
+        "/admin/index.php",
+        "/administrator",
+        "/administrator/",
+        "/admin1",
+        "/admin2",
+        "/admin/admin",
+        "/admin/login",
+        "/admin/login.php",
+        "/adminpanel",
+        "/controlpanel",
+        "/cpanel",
+        "/cpanel/",
+        "/webmail",
+        "/whm",
+        "/manager",
+        "/manager/html",
+        "/panel",
+        "/login",
+        "/login.php",
+        "/signin",
+        "/signin.php"
+      ],
+      "regex": [
+        "/(admin|administrator|adminpanel|controlpanel|cpanel|manager|panel)",
+        "/(login|signin)[^/]*\\.php$"
+      ]
+    },
+    "server_status": {
+      "severity": "Medium",
+      "action": "Log",
+      "description": "Server status and info pages",
+      "patterns": [
+        "/server-status",
+        "/server-info",
+        "/status",
+        "/info",
+        "/phpinfo.php",
+        "/info.php",
+        "/test.php",
+        "/ceshi.php",
+        "/php_info.php",
+        "/1.php",
+        "/debug.php",
+        "/temp.php",
+        "/xx.php",
+        "/error.php",
+        "/_profiler/",
+        "/debug/",
+        "/.well-known/security.txt"
+      ],
+      "regex": [
+        "/(phpinfo|info|test|debug|temp|status)[^/]*\\.php$",
+        "/[0-9]{1,3}\\.php$"
+      ]
+    },
+    "upload_attempts": {
+      "severity": "High",
+      "action": "Alert",
+      "description": "File upload directory access",
+      "patterns": [
+        "/uploads/",
+        "/upload/",
+        "/files/",
+        "/media/",
+        "/images/",
+        "/img/",
+        "/tmp/",
+        "/temp/",
+        "/cache/",
+        "/assets/",
+        "/public/",
+        "/static/",
+        "/user_uploads/",
+        "/attachments/"
+      ],
+      "regex": [
+        "/(uploads?|files?|media|images?|img|tmp|temp|cache|assets)/.*\\.(php|php5|phtml|php3|inc|asp|aspx|jsp|sh|pl|py|cgi)$"
+      ]
+    },
+    "sql_injection": {
+      "severity": "Critical",
+      "action": "Drop",
+      "description": "SQL injection attempts in URL parameters",
+      "patterns": [
+        "' or '1'='1",
+        "' or 1=1--",
+        "' or 'x'='x",
+        "admin'--",
+        "admin' #",
+        "admin'/*",
+        "' union select",
+        "union all select",
+        "union select null",
+        "and 1=1",
+        "and 1=0",
+        "' and '1'='1",
+        "exec(",
+        "execute(",
+        "select * from",
+        "insert into",
+        "delete from",
+        "drop table",
+        "update set",
+        "0x31303235343830303536",
+        "benchmark(",
+        "sleep(",
+        "waitfor delay"
+      ],
+      "regex": [
+        "('|%27|\\\\x27).*(or|union|select|insert|update|delete|drop|exec|execute)",
+        "(union|select|insert|update|delete|drop).*(from|into|where|all|distinct)",
+        "(and|or)\\s+(1=1|1=0|'1'='1'|'x'='x')",
+        "(exec|execute|benchmark|sleep|waitfor)\\s*\\(",
+        "0x[0-9a-f]{10,}",
+        "--[^\\r\\n]*",
+        "/\\*.*\\*/"
+      ]
+    },
+    "xss_attempts": {
+      "severity": "High",
+      "action": "Drop",
+      "description": "Cross-site scripting attempts",
+      "patterns": [
+        "<script",
+        "</script>",
+        "javascript:",
+        "onerror=",
+        "onload=",
+        "onclick=",
+        "onmouseover=",
+        "<iframe",
+        "</iframe>",
+        "<object",
+        "<embed",
+        "eval(",
+        "alert(",
+        "prompt(",
+        "confirm(",
+        "document.cookie",
+        "document.write"
+      ],
+      "regex": [
+        "<\\s*script[^>]*>.*<\\s*/\\s*script\\s*>",
+        "javascript\\s*:",
+        "on(error|load|click|mouse[a-z]+)\\s*=",
+        "<\\s*(iframe|object|embed|img|svg)[^>]*>",
+        "(eval|alert|prompt|confirm|document\\.(cookie|write))\\s*\\("
+      ]
+    },
+    "shell_injection": {
+      "severity": "Critical",
+      "action": "Drop",
+      "description": "Shell command injection attempts",
+      "patterns": [
+        ";ls",
+        "|ls",
+        "&ls",
+        "`ls",
+        "$(ls)",
+        ";cat /etc/passwd",
+        "|cat /etc/passwd",
+        ";whoami",
+        "|whoami",
+        ";id",
+        "|id",
+        ";wget",
+        "|wget",
+        ";curl",
+        "|curl",
+        "/bin/sh",
+        "/bin/bash",
+        "cmd.exe",
+        "powershell",
+        "nc -e"
+      ],
+      "regex": [
+        "[;|&`$]\\s*(ls|cat|wget|curl|bash|sh|nc|netcat|whoami|id|uname)",
+        "(\\$\\(|`)[^)]*\\)",
+        "/(bin|usr/bin)/(sh|bash|zsh|ksh|csh|tcsh)",
+        "(cmd\\.exe|powershell|pwsh)\\s",
+        "nc\\s+-[a-z]*e"
+      ]
+    },
+    "scanner_user_agents": {
+      "severity": "Medium",
+      "action": "RateLimit",
+      "description": "Known security scanner user agents",
+      "patterns": [
+        "nikto",
+        "nmap",
+        "masscan",
+        "zmap",
+        "sqlmap",
+        "havij",
+        "acunetix",
+        "netsparker",
+        "burpsuite",
+        "w3af",
+        "metasploit",
+        "joomscan",
+        "wpscan",
+        "dirbuster",
+        "gobuster",
+        "ffuf",
+        "nuclei",
+        "openvas",
+        "nessus",
+        "qualys"
+      ],
+      "regex": [
+        "(nikto|sqlmap|nmap|acunetix|metasploit|w3af|havij|joomscan|wpscan|nuclei)"
+      ]
+    },
+    "lfi_rfi": {
+      "severity": "Critical",
+      "action": "Drop",
+      "description": "Local/Remote File Inclusion attempts",
+      "patterns": [
+        "?file=",
+        "?page=",
+        "?include=",
+        "?path=",
+        "?module=",
+        "?lang=",
+        "?theme=",
+        "file=http://",
+        "file=https://",
+        "page=http://",
+        "include=http://",
+        "file=php://",
+        "file=data://",
+        "file=expect://",
+        "php://filter",
+        "php://input",
+        "data://text/plain",
+        "expect://whoami"
+      ],
+      "regex": [
+        "(file|page|include|path|module|lang|theme|template)=(http://|https://|ftp://|php://|data://|expect://|file://)",
+        "php://(filter|input|output|fd|memory|temp|stdin|stdout|stderr)",
+        "data://text/(plain|html)",
+        "expect://[a-z]+"
+      ]
+    },
+    "robots_sitemap": {
+      "severity": "Low",
+      "action": "Log",
+      "description": "Robots and sitemap reconnaissance",
+      "patterns": [
+        "/robots.txt",
+        "/sitemap.xml",
+        "/sitemap_index.xml",
+        "/sitemap.txt",
+        "/sitemap-news.xml",
+        "/sitemap-video.xml",
+        "/sitemap-image.xml"
+      ],
+      "regex": [
+        "/(robots\\.txt|sitemap.*\\.xml)"
+      ]
+    }
+  },
+  "rate_limits": {
+    "admin_panel_attempts": {
+      "max_requests": 5,
+      "window_seconds": 300,
+      "penalty_seconds": 3600
+    },
+    "cms_probing": {
+      "max_requests": 20,
+      "window_seconds": 60,
+      "penalty_seconds": 1800
+    },
+    "scanner_activity": {
+      "max_requests": 30,
+      "window_seconds": 60,
+      "penalty_seconds": 7200
+    },
+    "failed_login": {
+      "max_requests": 3,
+      "window_seconds": 600,
+      "penalty_seconds": 3600
+    }
+  },
+  "actions": {
+    "block": {
+      "description": "Immediately drop the connection",
+      "log_level": "alert"
+    },
+    "rate_limit": {
+      "description": "Apply rate limiting rules",
+      "log_level": "warning"
+    },
+    "inspect": {
+      "description": "Deep packet inspection required",
+      "log_level": "info"
+    },
+    "log": {
+      "description": "Log for analysis, allow through",
+      "log_level": "info"
+    }
+  }
+}
