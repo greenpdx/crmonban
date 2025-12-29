@@ -27,6 +27,7 @@ pub mod shared_whitelist;
 pub mod siem;
 #[cfg(feature = "signatures")]
 pub mod signatures;
+pub mod testing;
 pub mod tls_proxy;
 pub mod zones;
 
