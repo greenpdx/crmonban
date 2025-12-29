@@ -434,16 +434,16 @@ impl BatchedWriter {
             if let Err(e) = stmt.execute(params![
                 stats.timestamp.to_rfc3339(),
                 stats.interval_secs,
-                stats.packets_processed,
-                stats.bytes_processed,
-                stats.signature_matches,
-                stats.ml_anomalies,
-                stats.port_scan_alerts,
-                stats.brute_force_alerts,
-                stats.threat_intel_hits,
-                stats.flows_tracked,
+                stats.packets_processed as i64,
+                stats.bytes_processed as i64,
+                stats.signature_matches as i64,
+                stats.ml_anomalies as i64,
+                stats.port_scan_alerts as i64,
+                stats.brute_force_alerts as i64,
+                stats.threat_intel_hits as i64,
+                stats.flows_tracked as i64,
                 stats.avg_latency_us(),
-                stats.latency_max_us,
+                stats.latency_max_us as i64,
             ]) {
                 warn!("Failed to insert detection stats: {}", e);
             }
