@@ -44,8 +44,8 @@ use crate::wasm::{WasmEngine, StageContext};
 // IP filtering with GeoIP and threat intel (Stage 0)
 use ipfilter::{Worker as IpFilterWorker, IpFilter, IpFilterConfig};
 
-// Layer 2 detection: scans, DoS, brute force (Stage 2)
-use layer2detect::Detector as Layer2Detector;
+// Layer 2-4 detection: scans, DoS, brute force (Stage 2)
+use crate::layer234::Detector as Layer2Detector;
 
 use super::pipeline::{PipelineConfig, PipelineStage, PipelineMetrics, StageProcessor};
 #[cfg(feature = "profiling")]

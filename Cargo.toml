@@ -16,8 +16,8 @@ crmonban-types = { path = "../crmonban-types" }
 # IP filtering with GeoIP support
 ipfilter = { path = "../ipfilter" }
 
-# Layer 2 detection (scans, DoS, brute force)
-layer2detect = { path = "../layer2detct" }
+# Vector similarity database for layer234 detection
+crvecdb = "0.1"
 
 # HTTP attack detection (SQL injection, XSS, path traversal, etc.)
 crmonban-detection = { path = "../httpAttack" }
@@ -111,10 +111,20 @@ colored = "*"
 
 # NFQUEUE for deep packet inspection
 nfq = "*"
+ctrlc = "3.4"
+
+# Email alerts
+lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-native-tls", "smtp-transport", "builder"] }
+
+# Utilities
+dotenvy = "0.15"
+hex = "0.4"
+gethostname = "0.5"
 
 # Packet parsing
 etherparse = "*"
 pcap = "*"
+pcap-file = "2.0"
 
 # Profiling/Benchmarking (optional for profiling feature)
 hdrhistogram = { version = "*", optional = true }
@@ -150,6 +160,14 @@ path = "src/bin/validate_patterns.rs"
 [[bin]]
 name = "validate_nginx_logs"
 path = "src/bin/validate_nginx_logs.rs"
+
+[[bin]]
+name = "layer234_pcap"
+path = "src/bin/layer234_pcap.rs"
+
+[[bin]]
+name = "layer234_nfqueue"
+path = "src/bin/layer234_nfqueue.rs"
 
 [lib]
 name = "crmonban"
