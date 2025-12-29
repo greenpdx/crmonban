@@ -185,7 +185,7 @@ event_type = "rate_limit"
 
 # Nginx access log monitoring for web attacks
 [services.nginx_access]
-enabled = false
+enabled = true
 log_path = "/var/log/nginx/access.log"
 max_failures = 5
 find_time = 60

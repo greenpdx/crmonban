@@ -1,4 +1,5 @@
 pub mod brute_force;
+pub mod cloudflare;
 pub mod config;
 pub mod database;
 pub mod dos;

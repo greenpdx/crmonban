@@ -147,6 +147,10 @@ required-features = ["flow-tracking", "signatures"]
 name = "validate_patterns"
 path = "src/bin/validate_patterns.rs"
 
+[[bin]]
+name = "validate_nginx_logs"
+path = "src/bin/validate_nginx_logs.rs"
+
 [lib]
 name = "crmonban"
 path = "src/lib.rs"

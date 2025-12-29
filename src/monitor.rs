@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::cloudflare::CloudflareChecker;
 use crate::config::ServiceConfig;
 use crate::models::{AttackEvent, AttackEventType};
 
@@ -155,6 +156,8 @@ pub enum MonitorEvent {
 pub struct LogMonitorManager {
     monitors: HashMap<String, LogMonitor>,
     event_counts: HashMap<(IpAddr, String), Vec<chrono::DateTime<Utc>>>,
+    cloudflare_checker: CloudflareChecker,
+    skip_cloudflare_ips: bool,
 }
 
 impl LogMonitorManager {
@@ -163,6 +166,18 @@ impl LogMonitorManager {
         Self {
             monitors: HashMap::new(),
             event_counts: HashMap::new(),
+            cloudflare_checker: CloudflareChecker::new(),
+            skip_cloudflare_ips: true, // Don't ban Cloudflare proxy IPs by default
+        }
+    }
+
+    /// Create a new monitor manager with Cloudflare IP filtering option
+    pub fn with_cloudflare_filter(skip_cloudflare: bool) -> Self {
+        Self {
+            monitors: HashMap::new(),
+            event_counts: HashMap::new(),
+            cloudflare_checker: CloudflareChecker::new(),
+            skip_cloudflare_ips: skip_cloudflare,
         }
     }
 
@@ -197,6 +212,18 @@ impl LogMonitorManager {
                 Ok(events) => {
                     for event in events {
                         let ip = event.ip;
+
+                        // Check if this is a Cloudflare proxy IP
+                        let is_cloudflare = self.cloudflare_checker.is_cloudflare_ip(ip);
+                        if is_cloudflare && self.skip_cloudflare_ips {
+                            debug!(
+                                "Skipping Cloudflare proxy IP {} for service {} (attack logged but won't ban)",
+                                ip, service
+                            );
+                            // Still record the attack event, but don't trigger ban
+                            output_events.push(MonitorEvent::Attack(event));
+                            continue;
+                        }
 
                         // Record the event
                         output_events.push(MonitorEvent::Attack(event));
