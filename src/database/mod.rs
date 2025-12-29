@@ -670,29 +670,34 @@ impl Database {
         let hour_ago = (now - chrono::Duration::hours(1)).to_rfc3339();
         let today = today_start.and_utc().to_rfc3339();
 
-        let total_bans: u64 =
+        let total_bans: i64 =
             conn.query_row("SELECT COUNT(*) FROM bans", [], |row| row.get(0))?;
+        let total_bans = total_bans as u64;
 
-        let active_bans: u64 = conn.query_row(
+        let active_bans: i64 = conn.query_row(
             "SELECT COUNT(*) FROM bans WHERE expires_at IS NULL OR expires_at > ?",
             [now.to_rfc3339()],
             |row| row.get(0),
         )?;
+        let active_bans = active_bans as u64;
 
-        let total_events: u64 =
+        let total_events: i64 =
             conn.query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+        let total_events = total_events as u64;
 
-        let events_today: u64 = conn.query_row(
+        let events_today: i64 = conn.query_row(
             "SELECT COUNT(*) FROM events WHERE timestamp > ?",
             [&today],
             |row| row.get(0),
         )?;
+        let events_today = events_today as u64;
 
-        let events_this_hour: u64 = conn.query_row(
+        let events_this_hour: i64 = conn.query_row(
             "SELECT COUNT(*) FROM events WHERE timestamp > ?",
             [&hour_ago],
             |row| row.get(0),
         )?;
+        let events_this_hour = events_this_hour as u64;
 
         // Top countries
         let mut stmt = conn.prepare(
@@ -702,7 +707,11 @@ impl Database {
              GROUP BY i.country_code ORDER BY cnt DESC LIMIT 10",
         )?;
         let top_countries: Vec<(String, u64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| {
+                let code: String = row.get(0)?;
+                let cnt: i64 = row.get(1)?;
+                Ok((code, cnt as u64))
+            })?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -714,7 +723,11 @@ impl Database {
              GROUP BY i.as_org ORDER BY cnt DESC LIMIT 10",
         )?;
         let top_asns: Vec<(String, u64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| {
+                let org: String = row.get(0)?;
+                let cnt: i64 = row.get(1)?;
+                Ok((org, cnt as u64))
+            })?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -723,7 +736,11 @@ impl Database {
             "SELECT service, COUNT(*) as cnt FROM events GROUP BY service ORDER BY cnt DESC",
         )?;
         let events_by_service: Vec<(String, u64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| {
+                let svc: String = row.get(0)?;
+                let cnt: i64 = row.get(1)?;
+                Ok((svc, cnt as u64))
+            })?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -732,7 +749,11 @@ impl Database {
             "SELECT event_type, COUNT(*) as cnt FROM events GROUP BY event_type ORDER BY cnt DESC",
         )?;
         let events_by_type: Vec<(String, u64)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| {
+                let typ: String = row.get(0)?;
+                let cnt: i64 = row.get(1)?;
+                Ok((typ, cnt as u64))
+            })?
             .filter_map(|r| r.ok())
             .collect();
 
