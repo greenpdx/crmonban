@@ -50,6 +50,10 @@ pub mod tls;
 pub mod types;
 pub mod weights;
 
+// Extra Layer 2-4 infrastructure attack detection (feature-gated)
+#[cfg(feature = "extra234")]
+pub mod extra234;
+
 // Re-export types from crmonban-types (pipeline interface)
 pub use crate::types::{
     // Core pipeline types
@@ -115,6 +119,26 @@ pub use self::l2_state::{
     ArpStateTracker, ArpSpoofingAlert, ArpStats,
     DhcpStateTracker, DhcpStarvationAlert, RogueDhcpAlert,
     RaStateTracker, RaSpoofingAlert, RaFloodAlert,
+};
+
+// Re-export extra234 infrastructure attack detection (feature-gated)
+#[cfg(feature = "extra234")]
+pub use self::extra234::{
+    // BGP
+    BgpMessage, BgpMsgType, BgpUpdate, PathAttribute, BgpStateTracker,
+    // STP
+    BpduPacket, BpduType, BridgeId, StpTracker,
+    // CDP/LLDP
+    CdpPacket, CdpTlv, LldpPacket, LldpTlv, DiscoveryTracker,
+    // OSPF/RIP
+    OspfPacket, OspfType, RipPacket, RipEntry, RoutingTracker,
+    // GRE/VXLAN
+    GreHeader, VxlanHeader, TunnelTracker,
+    // 802.1X
+    EapolPacket, EapolType, EapPacket, EapCode, Dot1xTracker,
+    // Feature indices
+    indices as extra234_indices,
+    EXTENDED_VECTOR_DIM,
 };
 
 #[cfg(test)]

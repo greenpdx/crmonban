@@ -267,6 +267,18 @@ proto-enip = []
 proto-rfb = []
 proto-ike = []
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Layer 2-4 Infrastructure Attack Detection (extra234)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Extends layer234 module with detection for:
+# - BGP hijacking (AS path anomalies, prefix hijacking)
+# - STP root bridge attacks (priority manipulation, TC floods)
+# - CDP/LLDP spoofing (fake device announcements)
+# - OSPF/RIP injection (route poisoning, DR manipulation)
+# - GRE/VXLAN tunnel detection (unauthorized encapsulation)
+# - 802.1X bypass (hub bypass, rogue authenticator)
+extra234 = []
+
 [dev-dependencies]
 tempfile = "*"
 

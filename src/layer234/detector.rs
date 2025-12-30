@@ -1306,6 +1306,91 @@ fn threat_to_detection(threat: &ThreatType) -> (DetectionType, DetectionSubType)
                 CustomSubType::new("layer3", "ipv6_ra_flood", "IPv6 RA Flood", "Router advertisement flood", Severity::High)
             ))
         }
+        // Infrastructure attacks (extra234 feature)
+        #[cfg(feature = "extra234")]
+        ThreatType::BgpHijack { .. } => {
+            (DetectionType::Custom("routing_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("routing", "bgp_hijack", "BGP Hijack", "BGP prefix hijacking attempt", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::BgpPrefixFlap { .. } => {
+            (DetectionType::Custom("routing_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("routing", "bgp_flap", "BGP Prefix Flap", "Rapid BGP prefix flapping", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::StpRootAttack { .. } => {
+            (DetectionType::Custom("layer2_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer2", "stp_root", "STP Root Attack", "STP root bridge manipulation", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::StpTcFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("layer2", "stp_tc_flood", "STP TC Flood", "STP topology change flood", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::CdpSpoof { .. } => {
+            (DetectionType::Custom("discovery_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("discovery", "cdp_spoof", "CDP Spoofing", "Fake CDP device announcement", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::LldpSpoof { .. } => {
+            (DetectionType::Custom("discovery_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("discovery", "lldp_spoof", "LLDP Spoofing", "Fake LLDP neighbor discovery", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::OspfNeighborInject { .. } => {
+            (DetectionType::Custom("routing_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("routing", "ospf_inject", "OSPF Injection", "Unauthorized OSPF neighbor", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::OspfDrManipulation { .. } => {
+            (DetectionType::Custom("routing_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("routing", "ospf_dr", "OSPF DR Manipulation", "OSPF designated router manipulation", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::RipPoisoning { .. } => {
+            (DetectionType::Custom("routing_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("routing", "rip_poison", "RIP Poisoning", "RIP route poisoning attack", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::GreTunnel { .. } => {
+            (DetectionType::Custom("tunnel_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("tunnel", "gre", "Unauthorized GRE Tunnel", "Unauthorized GRE encapsulation", Severity::Medium)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::VxlanUnauthorized { .. } => {
+            (DetectionType::Custom("tunnel_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("tunnel", "vxlan", "Unauthorized VXLAN", "Unauthorized VXLAN overlay traffic", Severity::Medium)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::Dot1xHubBypass { .. } => {
+            (DetectionType::Custom("dot1x_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("dot1x", "hub_bypass", "802.1X Hub Bypass", "Multiple MACs behind authenticated port", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::EapFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("dot1x", "eap_flood", "EAP Flood", "EAP-Start packet flood", Severity::Medium)
+            ))
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::RogueAuthenticator { .. } => {
+            (DetectionType::Custom("dot1x_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("dot1x", "rogue_auth", "Rogue Authenticator", "Unauthorized 802.1X authenticator", Severity::Critical)
+            ))
+        }
     }
 }
 
@@ -1348,6 +1433,35 @@ fn threat_to_severity(threat: &ThreatType) -> Severity {
         }
         ThreatType::Ipv6RaSpoofing { .. } => Severity::Critical,
         ThreatType::Ipv6RaFlood { .. } => Severity::High,
+        // Infrastructure attacks (extra234 feature)
+        #[cfg(feature = "extra234")]
+        ThreatType::BgpHijack { .. } => Severity::Critical,
+        #[cfg(feature = "extra234")]
+        ThreatType::BgpPrefixFlap { .. } => Severity::High,
+        #[cfg(feature = "extra234")]
+        ThreatType::StpRootAttack { .. } => Severity::Critical,
+        #[cfg(feature = "extra234")]
+        ThreatType::StpTcFlood { .. } => Severity::High,
+        #[cfg(feature = "extra234")]
+        ThreatType::CdpSpoof { .. } => Severity::High,
+        #[cfg(feature = "extra234")]
+        ThreatType::LldpSpoof { .. } => Severity::High,
+        #[cfg(feature = "extra234")]
+        ThreatType::OspfNeighborInject { .. } => Severity::Critical,
+        #[cfg(feature = "extra234")]
+        ThreatType::OspfDrManipulation { .. } => Severity::Critical,
+        #[cfg(feature = "extra234")]
+        ThreatType::RipPoisoning { .. } => Severity::High,
+        #[cfg(feature = "extra234")]
+        ThreatType::GreTunnel { .. } => Severity::Medium,
+        #[cfg(feature = "extra234")]
+        ThreatType::VxlanUnauthorized { .. } => Severity::Medium,
+        #[cfg(feature = "extra234")]
+        ThreatType::Dot1xHubBypass { .. } => Severity::High,
+        #[cfg(feature = "extra234")]
+        ThreatType::EapFlood { .. } => Severity::Medium,
+        #[cfg(feature = "extra234")]
+        ThreatType::RogueAuthenticator { .. } => Severity::Critical,
     }
 }
 
@@ -1408,6 +1522,71 @@ fn format_threat_message(threat: &ThreatType, signature: Option<&str>) -> String
         }
         ThreatType::Ipv6RaFlood { unique_routers, ra_per_sec } => {
             format!("IPv6 RA flood detected - {} routers, {:.1} RA/s", unique_routers, ra_per_sec)
+        }
+        // Infrastructure attacks (extra234 feature)
+        #[cfg(feature = "extra234")]
+        ThreatType::BgpHijack { prefix, suspicious_as, original_as } => {
+            if let Some(orig) = original_as {
+                format!("BGP hijacking detected - prefix {} claimed by AS{} (was AS{})", prefix, suspicious_as, orig)
+            } else {
+                format!("BGP hijacking detected - prefix {} announced by unknown AS{}", prefix, suspicious_as)
+            }
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::BgpPrefixFlap { prefix, flap_count } => {
+            format!("BGP prefix flapping - {} flapped {} times", prefix, flap_count)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::StpRootAttack { attacker_mac, claimed_priority } => {
+            format!("STP root bridge attack - {} claiming priority {}", attacker_mac, claimed_priority)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::StpTcFlood { tc_count, interval_ms } => {
+            format!("STP TC flood - {} topology changes in {}ms", tc_count, interval_ms)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::CdpSpoof { device_id, claimed_ip } => {
+            if let Some(ip) = claimed_ip {
+                format!("CDP spoofing - fake device '{}' claiming IP {}", device_id, ip)
+            } else {
+                format!("CDP spoofing - fake device announcement '{}'", device_id)
+            }
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::LldpSpoof { chassis_id, port_id } => {
+            format!("LLDP spoofing - fake neighbor chassis {} port {}", chassis_id, port_id)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::OspfNeighborInject { router_id, area_id } => {
+            format!("OSPF neighbor injection - unauthorized router {} in area {}", router_id, area_id)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::OspfDrManipulation { claimed_dr, area_id } => {
+            format!("OSPF DR manipulation - {} claiming DR in area {}", claimed_dr, area_id)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::RipPoisoning { route, metric } => {
+            format!("RIP route poisoning - {} with metric {}", route, metric)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::GreTunnel { src_ip, dst_ip, inner_proto } => {
+            format!("Unauthorized GRE tunnel - {} -> {} (inner proto 0x{:04x})", src_ip, dst_ip, inner_proto)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::VxlanUnauthorized { vni, vtep_ip } => {
+            format!("Unauthorized VXLAN traffic - VNI {} to VTEP {}", vni, vtep_ip)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::Dot1xHubBypass { port_macs, port_id } => {
+            format!("802.1X hub bypass - {} MACs behind authenticated port {}", port_macs, port_id)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::EapFlood { eap_starts_per_sec } => {
+            format!("EAP flood attack - {:.1} EAP-Start/sec", eap_starts_per_sec)
+        }
+        #[cfg(feature = "extra234")]
+        ThreatType::RogueAuthenticator { src_mac } => {
+            format!("Rogue 802.1X authenticator - unauthorized EAP-Success from {}", src_mac)
         }
     };
 

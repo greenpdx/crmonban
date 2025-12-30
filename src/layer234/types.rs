@@ -156,6 +156,95 @@ pub enum ThreatType {
         unique_routers: u32,
         ra_per_sec: f32,
     },
+
+    // =========================================================================
+    // Infrastructure Attacks (extra234 feature)
+    // =========================================================================
+
+    /// BGP hijacking - unauthorized AS announcing prefixes
+    #[cfg(feature = "extra234")]
+    BgpHijack {
+        prefix: String,
+        suspicious_as: u32,
+        original_as: Option<u32>,
+    },
+    /// BGP prefix flapping - rapid withdrawal/announcement
+    #[cfg(feature = "extra234")]
+    BgpPrefixFlap {
+        prefix: String,
+        flap_count: u32,
+    },
+    /// STP root bridge attack - priority manipulation
+    #[cfg(feature = "extra234")]
+    StpRootAttack {
+        attacker_mac: String,
+        claimed_priority: u16,
+    },
+    /// STP Topology Change flood
+    #[cfg(feature = "extra234")]
+    StpTcFlood {
+        tc_count: u32,
+        interval_ms: u32,
+    },
+    /// CDP spoofing - fake device announcement
+    #[cfg(feature = "extra234")]
+    CdpSpoof {
+        device_id: String,
+        claimed_ip: Option<String>,
+    },
+    /// LLDP spoofing - fake neighbor discovery
+    #[cfg(feature = "extra234")]
+    LldpSpoof {
+        chassis_id: String,
+        port_id: String,
+    },
+    /// OSPF neighbor injection - unauthorized router
+    #[cfg(feature = "extra234")]
+    OspfNeighborInject {
+        router_id: String,
+        area_id: String,
+    },
+    /// OSPF DR manipulation
+    #[cfg(feature = "extra234")]
+    OspfDrManipulation {
+        claimed_dr: String,
+        area_id: String,
+    },
+    /// RIP route poisoning - hop count 16 or metric manipulation
+    #[cfg(feature = "extra234")]
+    RipPoisoning {
+        route: String,
+        metric: u32,
+    },
+    /// Unauthorized GRE tunnel detected
+    #[cfg(feature = "extra234")]
+    GreTunnel {
+        src_ip: String,
+        dst_ip: String,
+        inner_proto: u16,
+    },
+    /// Unauthorized VXLAN tunnel detected
+    #[cfg(feature = "extra234")]
+    VxlanUnauthorized {
+        vni: u32,
+        vtep_ip: String,
+    },
+    /// 802.1X hub bypass - multiple MACs behind authenticated port
+    #[cfg(feature = "extra234")]
+    Dot1xHubBypass {
+        port_macs: u32,
+        port_id: String,
+    },
+    /// EAP-Start flood attack
+    #[cfg(feature = "extra234")]
+    EapFlood {
+        eap_starts_per_sec: f32,
+    },
+    /// Rogue 802.1X authenticator detected
+    #[cfg(feature = "extra234")]
+    RogueAuthenticator {
+        src_mac: String,
+    },
 }
 
 impl ThreatType {
@@ -181,6 +270,35 @@ impl ThreatType {
             ThreatType::IcmpTunnel { .. } => "IcmpTunnel",
             ThreatType::Ipv6RaSpoofing { .. } => "Ipv6RaSpoofing",
             ThreatType::Ipv6RaFlood { .. } => "Ipv6RaFlood",
+            // Infrastructure attacks (extra234)
+            #[cfg(feature = "extra234")]
+            ThreatType::BgpHijack { .. } => "BgpHijack",
+            #[cfg(feature = "extra234")]
+            ThreatType::BgpPrefixFlap { .. } => "BgpPrefixFlap",
+            #[cfg(feature = "extra234")]
+            ThreatType::StpRootAttack { .. } => "StpRootAttack",
+            #[cfg(feature = "extra234")]
+            ThreatType::StpTcFlood { .. } => "StpTcFlood",
+            #[cfg(feature = "extra234")]
+            ThreatType::CdpSpoof { .. } => "CdpSpoof",
+            #[cfg(feature = "extra234")]
+            ThreatType::LldpSpoof { .. } => "LldpSpoof",
+            #[cfg(feature = "extra234")]
+            ThreatType::OspfNeighborInject { .. } => "OspfNeighborInject",
+            #[cfg(feature = "extra234")]
+            ThreatType::OspfDrManipulation { .. } => "OspfDrManipulation",
+            #[cfg(feature = "extra234")]
+            ThreatType::RipPoisoning { .. } => "RipPoisoning",
+            #[cfg(feature = "extra234")]
+            ThreatType::GreTunnel { .. } => "GreTunnel",
+            #[cfg(feature = "extra234")]
+            ThreatType::VxlanUnauthorized { .. } => "VxlanUnauthorized",
+            #[cfg(feature = "extra234")]
+            ThreatType::Dot1xHubBypass { .. } => "Dot1xHubBypass",
+            #[cfg(feature = "extra234")]
+            ThreatType::EapFlood { .. } => "EapFlood",
+            #[cfg(feature = "extra234")]
+            ThreatType::RogueAuthenticator { .. } => "RogueAuthenticator",
         }
     }
 }
