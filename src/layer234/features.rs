@@ -1,7 +1,7 @@
 use super::types::{FeatureVector, VECTOR_DIM};
 use crate::types::Packet;
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Arc;
 
 /// Default auth ports for brute force detection
@@ -98,6 +98,12 @@ impl WindowStats {
 
         // DoS-specific features (64-71)
         self.extract_dos_rate_features(&mut vec[64..72]);
+
+        // Layer 2-3 attack features (72-87)
+        self.extract_arp_features(&mut vec[72..76]);
+        self.extract_dhcp_features(&mut vec[76..80]);
+        self.extract_icmp_tunnel_features(&mut vec[80..84]);
+        self.extract_ipv6_ra_features(&mut vec[84..88]);
 
         vec
     }
@@ -940,6 +946,328 @@ impl WindowStats {
             out[7] = exhaustion_score.min(1.0);
         }
     }
+
+    /// Extract ARP-based features for detecting ARP spoofing/flooding (indices 72-75)
+    ///
+    /// These features analyze ARP traffic patterns:
+    /// - 72: ARP request ratio (high request ratio in short time = scan/flood)
+    /// - 73: Gratuitous ARP ratio (unsolicited replies = potential spoofing)
+    /// - 74: MAC-IP binding changes (different MACs claiming same IP)
+    /// - 75: Unique IPs claimed by single MAC (one MAC claiming many IPs = MITM)
+    ///
+    /// Note: ARP packets are not captured by the standard IP-layer Packet structure.
+    /// ARP feature extraction requires raw packet capture with ethertype 0x0806.
+    /// This method provides placeholder features based on available Ethernet MAC data.
+    fn extract_arp_features(&self, out: &mut [f32]) {
+        // ARP packets operate at Layer 2 and don't go through the IP stack
+        // The current Packet structure captures IP-layer packets, so we can only
+        // analyze MAC address patterns from Ethernet headers as a proxy
+
+        // Count packets with Ethernet info
+        let eth_packets: Vec<_> = self
+            .packets
+            .iter()
+            .filter(|p| p.ethernet.is_some())
+            .collect();
+
+        if eth_packets.is_empty() {
+            return;
+        }
+
+        // 72: Reserved for ARP request ratio (requires raw capture)
+        // out[0] = 0.0; (default)
+
+        // 73: Reserved for gratuitous ARP ratio (requires raw capture)
+        // out[1] = 0.0; (default)
+
+        // 74: MAC address diversity (proxy for binding changes)
+        // Track unique source MACs per destination IP
+        let mut ip_src_macs: HashMap<IpAddr, HashSet<[u8; 6]>> = HashMap::new();
+        for p in &eth_packets {
+            if let Some(eth) = &p.ethernet {
+                ip_src_macs
+                    .entry(p.dst_ip())
+                    .or_default()
+                    .insert(eth.src_mac);
+            }
+        }
+        let multi_mac_targets = ip_src_macs.values().filter(|macs| macs.len() > 3).count();
+        out[2] = (multi_mac_targets as f32 / ip_src_macs.len().max(1) as f32).min(1.0);
+
+        // 75: IPs per source MAC (many different IPs from single MAC = suspicious)
+        let mut mac_dst_ips: HashMap<[u8; 6], HashSet<IpAddr>> = HashMap::new();
+        for p in &eth_packets {
+            if let Some(eth) = &p.ethernet {
+                mac_dst_ips
+                    .entry(eth.src_mac)
+                    .or_default()
+                    .insert(p.dst_ip());
+            }
+        }
+        let max_ips_per_mac = mac_dst_ips.values().map(|ips| ips.len()).max().unwrap_or(0);
+        out[3] = (max_ips_per_mac as f32 / 20.0).min(1.0);
+    }
+
+    /// Extract DHCP-based features for detecting DHCP starvation/rogue servers (indices 76-79)
+    ///
+    /// These features analyze DHCP traffic patterns:
+    /// - 76: DHCP Discover ratio (high discover rate = starvation attempt)
+    /// - 77: Unique requesting MACs (many unique MACs = starvation)
+    /// - 78: Unique DHCP servers (multiple servers = potential rogue)
+    /// - 79: DHCP request rate (requests per second)
+    ///
+    /// Note: Full DHCP parsing requires raw packet data. This method uses
+    /// UDP port-based detection as a proxy for DHCP traffic patterns.
+    fn extract_dhcp_features(&self, out: &mut [f32]) {
+        // DHCP runs on UDP port 67 (server) / 68 (client)
+        let dhcp_packets: Vec<_> = self
+            .packets
+            .iter()
+            .filter(|p| {
+                if let Some(udp) = p.layer4.as_udp() {
+                    // DHCP ports
+                    udp.dst_port == 67 || udp.dst_port == 68 || udp.src_port == 67 || udp.src_port == 68
+                } else {
+                    false
+                }
+            })
+            .collect();
+
+        if dhcp_packets.is_empty() {
+            return;
+        }
+
+        let total = dhcp_packets.len() as f32;
+
+        // 76: Client-to-server ratio (port 67 = server, 68 = client)
+        // High ratio of client requests indicates potential starvation
+        let client_count = dhcp_packets
+            .iter()
+            .filter(|p| {
+                p.layer4.as_udp().map(|u| u.dst_port == 67).unwrap_or(false)
+            })
+            .count();
+        out[0] = client_count as f32 / total;
+
+        // 77: Unique requesting MACs (normalized)
+        let unique_macs: HashSet<[u8; 6]> = dhcp_packets
+            .iter()
+            .filter_map(|p| p.ethernet.as_ref())
+            .map(|e| e.src_mac)
+            .collect();
+        out[1] = (unique_macs.len() as f32 / 50.0).min(1.0);
+
+        // 78: Unique DHCP server sources (responses from port 67)
+        let server_ips: HashSet<IpAddr> = dhcp_packets
+            .iter()
+            .filter(|p| {
+                p.layer4.as_udp().map(|u| u.src_port == 67).unwrap_or(false)
+            })
+            .map(|p| p.src_ip())
+            .collect();
+        out[2] = (server_ips.len() as f32 / 3.0).min(1.0);
+
+        // 79: DHCP request rate (packets per second)
+        let duration_s = (self.end_time_ns.saturating_sub(self.start_time_ns)) as f64 / 1_000_000_000.0;
+        if duration_s > 0.001 {
+            let rps = total as f64 / duration_s;
+            out[3] = (rps / 100.0).min(1.0) as f32;
+        }
+    }
+
+    /// Extract ICMP tunneling features (indices 80-83)
+    ///
+    /// These features detect data exfiltration via ICMP:
+    /// - 80: Average ICMP payload size (large payloads = tunnel indicator)
+    /// - 81: Payload entropy (high entropy = encrypted tunnel data)
+    /// - 82: Echo request/reply asymmetry (more requests than replies = tunnel)
+    /// - 83: Timing regularity (regular intervals = automated tunnel)
+    ///
+    /// Note: Full entropy calculation requires raw packet data.
+    /// This method uses packet-level metrics as proxies.
+    fn extract_icmp_tunnel_features(&self, out: &mut [f32]) {
+        let icmp_packets: Vec<_> = self
+            .packets
+            .iter()
+            .filter(|p| p.layer4.as_icmp().is_some())
+            .collect();
+
+        if icmp_packets.is_empty() {
+            return;
+        }
+
+        // 80: Average ICMP payload size (normalized)
+        // Normal ICMP echo has 32-64 byte payload; tunnels use larger
+        let total_payload: usize = icmp_packets
+            .iter()
+            .map(|p| {
+                // ICMP payload is after the 8-byte ICMP header
+                p.payload_len().saturating_sub(8)
+            })
+            .sum();
+        let avg_payload = total_payload as f32 / icmp_packets.len() as f32;
+        // Normalize: 64 bytes is normal, >256 is very suspicious
+        out[0] = ((avg_payload - 64.0).max(0.0) / 192.0).min(1.0);
+
+        // 81: Payload size variance as entropy proxy
+        // High variance in payload sizes can indicate data tunneling
+        let sizes: Vec<f32> = icmp_packets
+            .iter()
+            .map(|p| p.payload_len() as f32)
+            .collect();
+        let mean_size = sizes.iter().sum::<f32>() / sizes.len() as f32;
+        let variance = sizes.iter().map(|s| (s - mean_size).powi(2)).sum::<f32>() / sizes.len() as f32;
+        // High variance with large mean suggests varied data payloads
+        let entropy_proxy = if mean_size > 64.0 && variance > 100.0 {
+            ((variance.sqrt() / mean_size) * (mean_size / 256.0)).min(1.0)
+        } else {
+            0.0
+        };
+        out[1] = entropy_proxy;
+
+        // 82: Echo request/reply asymmetry
+        let echo_requests = icmp_packets
+            .iter()
+            .filter(|p| {
+                p.layer4
+                    .as_icmp()
+                    .map(|i| i.icmp_type == 8 || i.icmp_type == 128)
+                    .unwrap_or(false)
+            })
+            .count();
+        let echo_replies = icmp_packets
+            .iter()
+            .filter(|p| {
+                p.layer4
+                    .as_icmp()
+                    .map(|i| i.icmp_type == 0 || i.icmp_type == 129)
+                    .unwrap_or(false)
+            })
+            .count();
+        // Asymmetry: many requests, few replies (or vice versa for reverse tunnel)
+        let asymmetry = if echo_requests > 0 || echo_replies > 0 {
+            let ratio = echo_requests as f32 / (echo_requests + echo_replies).max(1) as f32;
+            (ratio - 0.5).abs() * 2.0 // 0 when balanced, 1 when fully asymmetric
+        } else {
+            0.0
+        };
+        out[2] = asymmetry;
+
+        // 83: Timing regularity (low variance in inter-packet intervals = tunnel)
+        if icmp_packets.len() >= 3 {
+            let mut intervals: Vec<f64> = Vec::new();
+            for i in 1..icmp_packets.len() {
+                let delta = icmp_packets[i]
+                    .timestamp_ns()
+                    .saturating_sub(icmp_packets[i - 1].timestamp_ns()) as f64;
+                intervals.push(delta);
+            }
+
+            let mean = intervals.iter().sum::<f64>() / intervals.len() as f64;
+            let variance = intervals.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
+                / intervals.len() as f64;
+
+            // Coefficient of variation: low CV = regular timing
+            let cv = if mean > 0.0 { variance.sqrt() / mean } else { 1.0 };
+            // Invert: low CV (regular) = high score
+            out[3] = (1.0 - cv.min(1.0) as f32).max(0.0);
+        }
+    }
+
+    /// Extract IPv6 Router Advertisement features (indices 84-87)
+    ///
+    /// These features detect RA spoofing/flooding:
+    /// - 84: RA packets per second
+    /// - 85: Unique router sources
+    /// - 86: Prefix advertisement changes
+    /// - 87: RAs with zero lifetime (network denial)
+    ///
+    /// Note: Full RA parsing requires raw packet data. This method uses
+    /// ICMPv6 type detection and source IP analysis as proxies.
+    fn extract_ipv6_ra_features(&self, out: &mut [f32]) {
+        // ICMPv6 Router Advertisement: type 134
+        // Router Solicitation: type 133
+        let ra_packets: Vec<_> = self
+            .packets
+            .iter()
+            .filter(|p| {
+                // Check for ICMPv6 RA (type 134) or RS (type 133)
+                if let IpAddr::V6(_) = p.src_ip() {
+                    if let Some(icmp6) = p.layer4.as_icmpv6() {
+                        return icmp6.icmp_type == 134 || icmp6.icmp_type == 133;
+                    }
+                }
+                false
+            })
+            .collect();
+
+        if ra_packets.is_empty() {
+            return;
+        }
+
+        // Count actual RAs (type 134)
+        let actual_ras: Vec<_> = ra_packets
+            .iter()
+            .filter(|p| {
+                p.layer4.as_icmpv6().map(|i| i.icmp_type == 134).unwrap_or(false)
+            })
+            .collect();
+
+        if actual_ras.is_empty() {
+            return;
+        }
+
+        let total = actual_ras.len() as f32;
+
+        // 84: RA packets per second
+        let duration_s = (self.end_time_ns.saturating_sub(self.start_time_ns)) as f64 / 1_000_000_000.0;
+        if duration_s > 0.001 {
+            let raps = total as f64 / duration_s;
+            // More than 5 RAs per second is suspicious
+            out[0] = (raps / 5.0).min(1.0) as f32;
+        }
+
+        // 85: Unique router sources (IPv6 addresses sending RAs)
+        let unique_routers: HashSet<Ipv6Addr> = actual_ras
+            .iter()
+            .filter_map(|p| {
+                if let IpAddr::V6(v6) = p.src_ip() {
+                    Some(v6)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // More than 3 routers advertising is suspicious
+        out[1] = (unique_routers.len() as f32 / 3.0).min(1.0);
+
+        // 86: RA frequency concentration (proxy for prefix changes)
+        // If RAs come in bursts, it may indicate attack
+        if actual_ras.len() >= 2 {
+            let mut intervals: Vec<f64> = Vec::new();
+            for i in 1..actual_ras.len() {
+                let delta = actual_ras[i]
+                    .timestamp_ns()
+                    .saturating_sub(actual_ras[i - 1].timestamp_ns()) as f64;
+                intervals.push(delta);
+            }
+            // Count very short intervals (< 100ms = burst)
+            let burst_count = intervals.iter().filter(|&&i| i < 100_000_000.0).count();
+            out[2] = (burst_count as f32 / intervals.len() as f32).min(1.0);
+        }
+
+        // 87: Link-local vs global source ratio
+        // RAs from non-link-local addresses are suspicious
+        let non_link_local = unique_routers
+            .iter()
+            .filter(|r| {
+                let octets = r.octets();
+                // Link-local starts with fe80::/10
+                !(octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80)
+            })
+            .count();
+        out[3] = (non_link_local as f32 / unique_routers.len().max(1) as f32).min(1.0);
+    }
 }
 
 #[derive(Default)]
@@ -1315,10 +1643,11 @@ mod tests {
 
     #[test]
     fn test_dos_feature_vector_dimension() {
-        // Verify the feature vector is the correct size (72)
+        // Verify the feature vector is the correct size (88)
+        // Extended from 72 to include Layer 2-3 attack features (72-87)
         let stats = WindowStats::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
         let vec = stats.extract_features();
-        assert_eq!(vec.len(), 72, "Feature vector should have 72 dimensions");
+        assert_eq!(vec.len(), 88, "Feature vector should have 88 dimensions");
     }
 
     #[test]

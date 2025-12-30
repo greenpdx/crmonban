@@ -40,8 +40,10 @@ pub mod config;
 pub mod detector;
 pub mod error;
 pub mod features;
+pub mod l2_state;
 pub mod output;
 pub mod parser;
+pub mod protocols;
 pub mod session;
 pub mod store;
 pub mod tls;
@@ -100,6 +102,20 @@ pub use self::session::{
 
 // Re-export detection weights
 pub use self::weights::DetectionWeights;
+
+// Re-export Layer 2-3 protocol parsers
+pub use self::protocols::{
+    ArpPacket, ArpOp, DhcpPacket, DhcpMessageType,
+    Icmpv6Ra, Ipv6Prefix, VlanTag, IcmpTunnelMetrics,
+    detect_vlan_hopping, calculate_entropy,
+};
+
+// Re-export Layer 2-3 state trackers
+pub use self::l2_state::{
+    ArpStateTracker, ArpSpoofingAlert, ArpStats,
+    DhcpStateTracker, DhcpStarvationAlert, RogueDhcpAlert,
+    RaStateTracker, RaSpoofingAlert, RaFloodAlert,
+};
 
 #[cfg(test)]
 mod tests {

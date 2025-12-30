@@ -2,13 +2,14 @@ use anyhow::{Context, Result};
 use etherparse::SlicedPacket;
 use nfq::{Queue, Verdict};
 use regex::Regex;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::config::DpiConfig;
+use crate::config::{DpiConfig, DpiPattern};
 use crate::monitor::MonitorEvent;
 
 /// Connection tracking key
@@ -76,6 +77,25 @@ struct CompiledRule {
     description: String,
 }
 
+/// Rule categories loaded from external file
+#[derive(Debug, Default, Deserialize)]
+pub struct DpiRulesFile {
+    #[serde(default)]
+    pub sqli: Vec<DpiPattern>,
+    #[serde(default)]
+    pub xss: Vec<DpiPattern>,
+    #[serde(default)]
+    pub cmdi: Vec<DpiPattern>,
+    #[serde(default)]
+    pub path_traversal: Vec<DpiPattern>,
+    #[serde(default)]
+    pub shellcode: Vec<DpiPattern>,
+    #[serde(default)]
+    pub protocol_anomaly: Vec<DpiPattern>,
+    #[serde(default)]
+    pub tls_anomaly: Vec<DpiPattern>,
+}
+
 /// Deep Packet Inspector
 pub struct DpiEngine {
     config: DpiConfig,
@@ -86,52 +106,44 @@ pub struct DpiEngine {
 impl DpiEngine {
     /// Create a new DPI engine
     pub fn new(config: DpiConfig) -> Result<Self> {
+        // Load rules from file or embedded defaults
+        let rules_file = Self::load_rules(&config)?;
+
         let mut rules = Vec::new();
 
         // SQL Injection patterns
         if config.detect_sqli {
-            rules.extend(Self::compile_sqli_rules()?);
+            rules.extend(Self::compile_dpi_patterns(&rules_file.sqli)?);
         }
 
         // XSS patterns
         if config.detect_xss {
-            rules.extend(Self::compile_xss_rules()?);
+            rules.extend(Self::compile_dpi_patterns(&rules_file.xss)?);
         }
 
         // Command injection patterns
         if config.detect_cmdi {
-            rules.extend(Self::compile_cmdi_rules()?);
+            rules.extend(Self::compile_dpi_patterns(&rules_file.cmdi)?);
         }
 
         // Path traversal patterns
         if config.detect_path_traversal {
-            rules.extend(Self::compile_path_traversal_rules()?);
+            rules.extend(Self::compile_dpi_patterns(&rules_file.path_traversal)?);
         }
 
         // Shellcode patterns
         if config.detect_shellcode {
-            rules.extend(Self::compile_shellcode_rules()?);
+            rules.extend(Self::compile_dpi_patterns(&rules_file.shellcode)?);
         }
 
         // Protocol anomaly patterns
         if config.detect_protocol_anomaly {
-            rules.extend(Self::compile_protocol_anomaly_rules()?);
-            rules.extend(Self::compile_tls_anomaly_rules()?);
+            rules.extend(Self::compile_dpi_patterns(&rules_file.protocol_anomaly)?);
+            rules.extend(Self::compile_dpi_patterns(&rules_file.tls_anomaly)?);
         }
 
-        // Custom patterns
-        for custom in &config.custom_patterns {
-            if let Ok(regex) = Regex::new(&custom.pattern) {
-                rules.push(CompiledRule {
-                    name: custom.name.clone(),
-                    pattern: regex,
-                    severity: ThreatSeverity::from(custom.severity.as_str()),
-                    description: custom.description.clone(),
-                });
-            } else {
-                warn!("Failed to compile custom DPI pattern: {}", custom.name);
-            }
-        }
+        // Custom patterns from config (additional patterns on top of rules file)
+        rules.extend(Self::compile_dpi_patterns(&config.custom_patterns)?);
 
         info!("DPI engine initialized with {} rules", rules.len());
 
@@ -142,330 +154,43 @@ impl DpiEngine {
         })
     }
 
-    /// Compile SQL injection detection rules
-    fn compile_sqli_rules() -> Result<Vec<CompiledRule>> {
-        let patterns = vec![
-            (
-                "sqli_union",
-                r"(?i)(\bunion\b.*\bselect\b|\bselect\b.*\bunion\b)",
-                ThreatSeverity::High,
-                "SQL UNION injection attempt",
-            ),
-            (
-                "sqli_comment",
-                r#"('|")\s*(--|#|/\*)"#,
-                ThreatSeverity::Medium,
-                "SQL comment injection",
-            ),
-            (
-                "sqli_or_bypass",
-                r"(?i)'\s*(or|and)\s*'",
-                ThreatSeverity::High,
-                "SQL OR/AND bypass attempt",
-            ),
-            (
-                "sqli_stacked",
-                r"(?i);\s*(drop|delete|insert|update|truncate|alter)\s",
-                ThreatSeverity::Critical,
-                "SQL stacked query injection",
-            ),
-            (
-                "sqli_sleep",
-                r"(?i)(sleep|benchmark|waitfor|delay)\s*\(",
-                ThreatSeverity::High,
-                "SQL time-based injection",
-            ),
-            (
-                "sqli_information_schema",
-                r"(?i)information_schema\.(tables|columns|schemata)",
-                ThreatSeverity::High,
-                "SQL information schema access",
-            ),
-            (
-                "sqli_hex_encode",
-                r"(?i)(0x[0-9a-f]{16,}|char\s*\(\s*\d+\s*(,\s*\d+\s*)+\))",
-                ThreatSeverity::Medium,
-                "SQL hex/char encoding",
-            ),
-        ];
-
-        Self::compile_patterns(patterns)
+    /// Load rules from external file or embedded defaults
+    fn load_rules(config: &DpiConfig) -> Result<DpiRulesFile> {
+        if let Some(path) = &config.rules_file {
+            // Load from specified external file
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("Failed to read DPI rules file: {}", path.display()))?;
+            toml::from_str(&content)
+                .with_context(|| format!("Failed to parse DPI rules file: {}", path.display()))
+        } else {
+            // Use embedded default rules
+            Ok(Self::default_rules())
+        }
     }
 
-    /// Compile XSS detection rules
-    fn compile_xss_rules() -> Result<Vec<CompiledRule>> {
-        let patterns = vec![
-            (
-                "xss_script_tag",
-                r"(?i)<script[^>]*>",
-                ThreatSeverity::High,
-                "XSS script tag injection",
-            ),
-            (
-                "xss_event_handler",
-                r"(?i)\bon(error|load|click|mouse|key|focus|blur|change|submit)\s*=",
-                ThreatSeverity::High,
-                "XSS event handler injection",
-            ),
-            (
-                "xss_javascript_uri",
-                r"(?i)javascript\s*:",
-                ThreatSeverity::High,
-                "XSS javascript URI",
-            ),
-            (
-                "xss_data_uri",
-                r"(?i)data\s*:\s*(text/html|application/javascript)",
-                ThreatSeverity::Medium,
-                "XSS data URI injection",
-            ),
-            (
-                "xss_svg_onload",
-                r"(?i)<svg[^>]*\bonload\s*=",
-                ThreatSeverity::High,
-                "XSS SVG onload injection",
-            ),
-            (
-                "xss_iframe",
-                r"(?i)<iframe[^>]*\bsrc\s*=",
-                ThreatSeverity::Medium,
-                "XSS iframe injection",
-            ),
-            (
-                "xss_expression",
-                r"(?i)(expression|behavior)\s*\(",
-                ThreatSeverity::Medium,
-                "XSS CSS expression",
-            ),
-        ];
-
-        Self::compile_patterns(patterns)
+    /// Embedded default rules (compiled into binary)
+    fn default_rules() -> DpiRulesFile {
+        toml::from_str(include_str!("../data/dpi_rules.toml"))
+            .expect("Default DPI rules must be valid TOML")
     }
 
-    /// Compile command injection detection rules
-    fn compile_cmdi_rules() -> Result<Vec<CompiledRule>> {
-        let patterns = vec![
-            (
-                "cmdi_pipe",
-                r"[|;&`]\s*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|python|perl|ruby|php)\b",
-                ThreatSeverity::Critical,
-                "Command injection via pipe/chain",
-            ),
-            (
-                "cmdi_subshell",
-                r"\$\([^)]*\)|\$\{[^}]*\}|`[^`]*`",
-                ThreatSeverity::High,
-                "Command injection via subshell",
-            ),
-            (
-                "cmdi_reverse_shell",
-                r"(?i)(nc|ncat|netcat|bash|sh|python|perl|ruby|php).*(-e|exec|system|popen)",
-                ThreatSeverity::Critical,
-                "Potential reverse shell attempt",
-            ),
-            (
-                "cmdi_etc_passwd",
-                r"/etc/(passwd|shadow|group)",
-                ThreatSeverity::High,
-                "Sensitive file access attempt",
-            ),
-            (
-                "cmdi_proc_self",
-                r"/proc/self/(environ|cmdline|fd)",
-                ThreatSeverity::High,
-                "Process info disclosure attempt",
-            ),
-        ];
-
-        Self::compile_patterns(patterns)
-    }
-
-    /// Compile path traversal detection rules
-    fn compile_path_traversal_rules() -> Result<Vec<CompiledRule>> {
-        let patterns = vec![
-            (
-                "path_traversal_dotdot",
-                r"(\.\.[\\/]){2,}",
-                ThreatSeverity::High,
-                "Path traversal via ../",
-            ),
-            (
-                "path_traversal_encoded",
-                r"(%2e%2e[\\/]|%252e%252e[\\/]|\.\.%2f|\.\.%5c)",
-                ThreatSeverity::High,
-                "Encoded path traversal",
-            ),
-            (
-                "path_traversal_null",
-                r"%00|\\x00",
-                ThreatSeverity::High,
-                "Null byte injection",
-            ),
-            (
-                "path_absolute_unix",
-                r"^/(etc|var|usr|tmp|root|home)/",
-                ThreatSeverity::Medium,
-                "Absolute Unix path access",
-            ),
-            (
-                "path_absolute_windows",
-                r"[a-zA-Z]:\\\\(windows|winnt|system32)",
-                ThreatSeverity::Medium,
-                "Absolute Windows path access",
-            ),
-        ];
-
-        Self::compile_patterns(patterns)
-    }
-
-    /// Compile shellcode detection rules
-    fn compile_shellcode_rules() -> Result<Vec<CompiledRule>> {
-        let patterns = vec![
-            (
-                "shellcode_nop_sled",
-                r"(\x90{10,}|%90{10,})",
-                ThreatSeverity::Critical,
-                "NOP sled detected",
-            ),
-            (
-                "shellcode_x86_common",
-                r"(\xcd\x80|\x0f\x05|\xff\xe4)",
-                ThreatSeverity::Critical,
-                "x86 syscall/jmp esp shellcode",
-            ),
-            (
-                "shellcode_format_string",
-                r"%[0-9]*\$[nsx]|%[0-9]*n",
-                ThreatSeverity::High,
-                "Format string vulnerability",
-            ),
-        ];
-
-        Self::compile_patterns(patterns)
-    }
-
-    /// Compile protocol anomaly detection rules
-    fn compile_protocol_anomaly_rules() -> Result<Vec<CompiledRule>> {
-        let patterns = vec![
-            (
-                "http_method_invalid",
-                r"^(CONNECT|TRACE|TRACK|DEBUG)\s+",
-                ThreatSeverity::Medium,
-                "Suspicious HTTP method",
-            ),
-            (
-                "http_smuggling",
-                r"(?i)(transfer-encoding\s*:\s*chunked.*content-length|content-length.*transfer-encoding\s*:\s*chunked)",
-                ThreatSeverity::High,
-                "HTTP request smuggling attempt",
-            ),
-            (
-                "http_crlf_injection",
-                r"%0d%0a|%0D%0A",
-                ThreatSeverity::High,
-                "HTTP CRLF injection",
-            ),
-            (
-                "http_host_injection",
-                r"(?i)^host\s*:.*@",
-                ThreatSeverity::Medium,
-                "HTTP Host header injection",
-            ),
-        ];
-
-        Self::compile_patterns(patterns)
-    }
-
-    /// Compile TLS/SSL anomaly detection rules
-    fn compile_tls_anomaly_rules() -> Result<Vec<CompiledRule>> {
-        // TLS record types and handshake detection via byte patterns
-        // TLS records start with: ContentType (1 byte) | Version (2 bytes) | Length (2 bytes)
-        // ContentType: 0x14=ChangeCipherSpec, 0x15=Alert, 0x16=Handshake, 0x17=Application
-        // Version: 0x0301=TLS1.0, 0x0302=TLS1.1, 0x0303=TLS1.2, 0x0304=TLS1.3
-        let patterns = vec![
-            (
-                "tls_sslv2_client_hello",
-                // SSLv2 ClientHello - deprecated and insecure
-                r"^\x80[\x20-\xff]\x01\x00\x02",
-                ThreatSeverity::High,
-                "SSLv2 ClientHello detected - deprecated protocol",
-            ),
-            (
-                "tls_sslv3_handshake",
-                // SSLv3 - deprecated and vulnerable (POODLE)
-                r"^\x16\x03\x00",
-                ThreatSeverity::Medium,
-                "SSLv3 detected - vulnerable to POODLE",
-            ),
-            (
-                "tls_heartbleed_probe",
-                // Heartbeat request with suspicious length
-                r"^\x18\x03[\x00-\x03]",
-                ThreatSeverity::Critical,
-                "Potential Heartbleed probe",
-            ),
-            (
-                "tls_export_cipher",
-                // EXPORT cipher suites in ClientHello - weak crypto
-                r"\x00\x03|\x00\x06|\x00\x08|\x00\x0b|\x00\x0e|\x00\x11|\x00\x14|\x00\x17|\x00\x19|\x00\x26",
-                ThreatSeverity::High,
-                "EXPORT cipher suite offered - weak cryptography",
-            ),
-            (
-                "tls_null_cipher",
-                // NULL cipher suites - no encryption
-                r"\x00\x00|\x00\x01|\x00\x02|\x00\x2c|\x00\x2d|\x00\x2e|\x00\x3b",
-                ThreatSeverity::Critical,
-                "NULL cipher suite - no encryption",
-            ),
-            (
-                "tls_anonymous_dh",
-                // Anonymous DH - no authentication
-                r"\x00\x18|\x00\x1b|\x00\x34|\x00\x3a|\x00\x46|\x00\x6c",
-                ThreatSeverity::High,
-                "Anonymous DH cipher suite - no authentication",
-            ),
-            (
-                "tls_rc4_cipher",
-                // RC4 cipher suites - broken
-                r"\x00\x04|\x00\x05|\x00\x24|\x00\x28|\x00\x8a|\x00\x8e|\x00\x92|\xc0\x02|\xc0\x07|\xc0\x0c|\xc0\x11",
-                ThreatSeverity::Medium,
-                "RC4 cipher suite - broken encryption",
-            ),
-            (
-                "tls_des_cipher",
-                // DES/3DES cipher suites - weak
-                r"\x00\x09|\x00\x0c|\x00\x0f|\x00\x12|\x00\x15|\x00\x1a|\x00\x1d|\x00\x21",
-                ThreatSeverity::Medium,
-                "DES/3DES cipher suite - weak encryption",
-            ),
-            (
-                "tls_renegotiation_attack",
-                // Empty renegotiation_info in handshake without SCSV
-                r"\xff\x01\x00\x01\x00",
-                ThreatSeverity::Medium,
-                "Potential TLS renegotiation attack",
-            ),
-        ];
-
-        Self::compile_patterns(patterns)
-    }
-
-    /// Helper to compile pattern tuples into CompiledRules
-    fn compile_patterns(
-        patterns: Vec<(&str, &str, ThreatSeverity, &str)>,
-    ) -> Result<Vec<CompiledRule>> {
+    /// Compile DpiPattern slice into CompiledRules
+    fn compile_dpi_patterns(patterns: &[DpiPattern]) -> Result<Vec<CompiledRule>> {
         patterns
-            .into_iter()
-            .map(|(name, pattern, severity, desc)| {
-                let regex = Regex::new(pattern)
-                    .with_context(|| format!("Failed to compile pattern: {}", name))?;
-                Ok(CompiledRule {
-                    name: name.to_string(),
-                    pattern: regex,
-                    severity,
-                    description: desc.to_string(),
-                })
+            .iter()
+            .filter_map(|p| {
+                match Regex::new(&p.pattern) {
+                    Ok(regex) => Some(Ok(CompiledRule {
+                        name: p.name.clone(),
+                        pattern: regex,
+                        severity: ThreatSeverity::from(p.severity.as_str()),
+                        description: p.description.clone(),
+                    })),
+                    Err(e) => {
+                        warn!("Failed to compile DPI pattern '{}': {}", p.name, e);
+                        None
+                    }
+                }
             })
             .collect()
     }

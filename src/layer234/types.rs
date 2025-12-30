@@ -32,8 +32,31 @@ pub enum DetectorStage {
 }
 
 // Feature vector configuration
-pub const VECTOR_DIM: usize = 72; // Expanded from 64 to include DoS detection features (64-71)
+// Extended to 88 dimensions to include Layer 2-3 attack features (72-87)
+pub const VECTOR_DIM: usize = 88;
 pub type FeatureVector = [f32; VECTOR_DIM];
+
+// Layer 2-3 feature indices documentation:
+// 72-75: ARP features
+//   72: ARP request ratio (requests / total ARP)
+//   73: Gratuitous ARP ratio
+//   74: MAC-IP binding change rate
+//   75: Unique IPs claimed by single MAC
+// 76-79: DHCP features
+//   76: DHCP Discover ratio
+//   77: Unique requesting MACs (normalized)
+//   78: Unique DHCP servers offering
+//   79: DHCP request rate
+// 80-83: ICMP tunneling features
+//   80: Average ICMP payload size (normalized)
+//   81: ICMP payload entropy
+//   82: Echo request/reply asymmetry
+//   83: ICMP timing regularity (tunnel indicator)
+// 84-87: IPv6 RA features
+//   84: RA packets per second
+//   85: Unique router sources
+//   86: Prefix advertisement changes
+//   87: RAs with zero lifetime (DoS indicator)
 
 // =============================================================================
 // Internal Threat Classification Types
@@ -80,6 +103,59 @@ pub enum ThreatType {
         connection_rate: f32,
         half_open_ratio: f32,
     },
+
+    // =========================================================================
+    // Layer 2 Attacks
+    // =========================================================================
+
+    /// ARP spoofing/cache poisoning - MAC-IP binding changed
+    ArpSpoofing {
+        spoofed_ip: String,       // Serializable form of Ipv4Addr
+        attacker_mac: String,     // Hex string of MAC
+        original_mac: String,     // Original MAC that was replaced
+        change_count: u32,
+    },
+    /// ARP flood - high rate of gratuitous ARPs or one MAC claiming multiple IPs
+    ArpFlood {
+        packets_per_sec: f32,
+        unique_ips_claimed: u32,
+    },
+    /// VLAN hopping - double-tagged 802.1Q frame detected
+    VlanHopping {
+        outer_vlan: u16,
+        inner_vlan: u16,
+    },
+    /// DHCP starvation - many unique MACs requesting IPs
+    DhcpStarvation {
+        unique_macs: u32,
+        requests_per_sec: f32,
+    },
+    /// Rogue DHCP server detected
+    RogueDhcp {
+        server_ip: String,        // Serializable form
+        offers_count: u32,
+    },
+
+    // =========================================================================
+    // Layer 3 Attacks
+    // =========================================================================
+
+    /// ICMP tunneling - data exfiltration via ICMP echo payloads
+    IcmpTunnel {
+        avg_payload_size: u32,
+        packets_per_sec: f32,
+        entropy: f32,             // Payload entropy (0.0-1.0)
+    },
+    /// IPv6 Router Advertisement spoofing
+    Ipv6RaSpoofing {
+        src_ip: String,           // Serializable form of Ipv6Addr
+        router_lifetime: u16,
+    },
+    /// IPv6 RA flood - too many router advertisements
+    Ipv6RaFlood {
+        unique_routers: u32,
+        ra_per_sec: f32,
+    },
 }
 
 impl ThreatType {
@@ -95,6 +171,16 @@ impl ThreatType {
             ThreatType::UdpFlood { .. } => "UdpFlood",
             ThreatType::IcmpFlood { .. } => "IcmpFlood",
             ThreatType::ConnectionExhaustion { .. } => "ConnectionExhaustion",
+            // Layer 2 attacks
+            ThreatType::ArpSpoofing { .. } => "ArpSpoofing",
+            ThreatType::ArpFlood { .. } => "ArpFlood",
+            ThreatType::VlanHopping { .. } => "VlanHopping",
+            ThreatType::DhcpStarvation { .. } => "DhcpStarvation",
+            ThreatType::RogueDhcp { .. } => "RogueDhcp",
+            // Layer 3 attacks
+            ThreatType::IcmpTunnel { .. } => "IcmpTunnel",
+            ThreatType::Ipv6RaSpoofing { .. } => "Ipv6RaSpoofing",
+            ThreatType::Ipv6RaFlood { .. } => "Ipv6RaFlood",
         }
     }
 }
@@ -129,6 +215,20 @@ pub struct DetectorConfig {
     pub dos_min_packet_rate: f32,
     /// Half-open ratio threshold for SYN flood detection
     pub dos_half_open_threshold: f32,
+
+    // Layer 2 detection settings
+    /// Enable ARP spoofing/flood detection
+    pub arp_detection: bool,
+    /// Enable DHCP starvation/rogue server detection
+    pub dhcp_detection: bool,
+    /// Enable VLAN hopping detection
+    pub vlan_detection: bool,
+
+    // Layer 3 detection settings
+    /// Enable ICMP tunneling detection
+    pub icmp_tunnel_detection: bool,
+    /// Enable IPv6 RA spoofing/flood detection
+    pub ipv6_ra_detection: bool,
 }
 
 impl Default for DetectorConfig {
@@ -144,6 +244,13 @@ impl Default for DetectorConfig {
             min_packets_for_detection: 10,
             dos_min_packet_rate: 0.1,
             dos_half_open_threshold: 0.7,
+            // Layer 2 defaults
+            arp_detection: true,
+            dhcp_detection: true,
+            vlan_detection: true,
+            // Layer 3 defaults
+            icmp_tunnel_detection: true,
+            ipv6_ra_detection: true,
         }
     }
 }

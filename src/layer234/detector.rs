@@ -14,7 +14,7 @@ use crate::types::{
     Packet, PacketAnalysis, StageProcessor,
 };
 use crate::types::event::{
-    DetectionSubType, ScanSubType, DosSubType, AnomalySubType,
+    DetectionSubType, ScanSubType, DosSubType, AnomalySubType, CustomSubType,
 };
 use std::net::IpAddr;
 use std::future::Future;
@@ -602,6 +602,13 @@ impl DetectorBuilder {
                 min_packets_for_detection: config.detector.min_packets,
                 dos_min_packet_rate: config.dos.min_packet_rate,
                 dos_half_open_threshold: config.dos.half_open_threshold,
+                // Layer 2 detection (default enabled)
+                arp_detection: true,
+                dhcp_detection: true,
+                vlan_detection: true,
+                // Layer 3 detection (default enabled)
+                icmp_tunnel_detection: true,
+                ipv6_ra_detection: true,
             },
             signature_path: config.performance.signature_path.clone(),
             baseline_path: config.performance.baseline_path.clone(),
@@ -1257,6 +1264,48 @@ fn threat_to_detection(threat: &ThreatType) -> (DetectionType, DetectionSubType)
         ThreatType::Anomaly { .. } => {
             (DetectionType::AnomalyDetection, DetectionSubType::Anomaly(AnomalySubType::BehaviorAnomaly))
         }
+        // Layer 2 attacks
+        ThreatType::ArpSpoofing { .. } => {
+            (DetectionType::Custom("layer2_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer2", "arp_spoofing", "ARP Spoofing", "ARP cache poisoning attack", Severity::Critical)
+            ))
+        }
+        ThreatType::ArpFlood { .. } => {
+            (DetectionType::Custom("layer2_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer2", "arp_flood", "ARP Flood", "High rate of ARP packets", Severity::High)
+            ))
+        }
+        ThreatType::VlanHopping { .. } => {
+            (DetectionType::Custom("layer2_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer2", "vlan_hopping", "VLAN Hopping", "Double-tagged 802.1Q frame", Severity::Critical)
+            ))
+        }
+        ThreatType::DhcpStarvation { .. } => {
+            (DetectionType::Custom("layer2_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer2", "dhcp_starvation", "DHCP Starvation", "DHCP address pool exhaustion", Severity::High)
+            ))
+        }
+        ThreatType::RogueDhcp { .. } => {
+            (DetectionType::Custom("layer2_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer2", "rogue_dhcp", "Rogue DHCP Server", "Unauthorized DHCP server detected", Severity::Critical)
+            ))
+        }
+        // Layer 3 attacks
+        ThreatType::IcmpTunnel { .. } => {
+            (DetectionType::DataExfiltration, DetectionSubType::Custom(
+                CustomSubType::new("layer3", "icmp_tunnel", "ICMP Tunnel", "Data exfiltration via ICMP", Severity::High)
+            ))
+        }
+        ThreatType::Ipv6RaSpoofing { .. } => {
+            (DetectionType::Custom("layer3_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer3", "ipv6_ra_spoofing", "IPv6 RA Spoofing", "Rogue router advertisement", Severity::Critical)
+            ))
+        }
+        ThreatType::Ipv6RaFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("layer3", "ipv6_ra_flood", "IPv6 RA Flood", "Router advertisement flood", Severity::High)
+            ))
+        }
     }
 }
 
@@ -1280,6 +1329,25 @@ fn threat_to_severity(threat: &ThreatType) -> Severity {
                 Severity::Low
             }
         }
+        // Layer 2 attacks - generally high severity (MITM potential)
+        ThreatType::ArpSpoofing { .. } => Severity::Critical,
+        ThreatType::ArpFlood { .. } => Severity::High,
+        ThreatType::VlanHopping { .. } => Severity::Critical,
+        ThreatType::DhcpStarvation { .. } => Severity::High,
+        ThreatType::RogueDhcp { .. } => Severity::Critical,
+        // Layer 3 attacks
+        ThreatType::IcmpTunnel { entropy, .. } => {
+            // Higher entropy suggests encrypted tunnel - more suspicious
+            if *entropy > 0.9 {
+                Severity::Critical
+            } else if *entropy > 0.7 {
+                Severity::High
+            } else {
+                Severity::Medium
+            }
+        }
+        ThreatType::Ipv6RaSpoofing { .. } => Severity::Critical,
+        ThreatType::Ipv6RaFlood { .. } => Severity::High,
     }
 }
 
@@ -1312,6 +1380,34 @@ fn format_threat_message(threat: &ThreatType, signature: Option<&str>) -> String
         }
         ThreatType::Anomaly { deviation_score } => {
             format!("Anomaly detected - deviation score {:.2}", deviation_score)
+        }
+        // Layer 2 attacks
+        ThreatType::ArpSpoofing { spoofed_ip, attacker_mac, original_mac, change_count } => {
+            format!("ARP spoofing detected - IP {} changed from MAC {} to {} ({} changes)",
+                spoofed_ip, original_mac, attacker_mac, change_count)
+        }
+        ThreatType::ArpFlood { packets_per_sec, unique_ips_claimed } => {
+            format!("ARP flood detected - {:.0} pps, {} unique IPs claimed", packets_per_sec, unique_ips_claimed)
+        }
+        ThreatType::VlanHopping { outer_vlan, inner_vlan } => {
+            format!("VLAN hopping attempt - double-tagged frame: outer VLAN {}, inner VLAN {}", outer_vlan, inner_vlan)
+        }
+        ThreatType::DhcpStarvation { unique_macs, requests_per_sec } => {
+            format!("DHCP starvation attack - {} unique MACs, {:.1} req/s", unique_macs, requests_per_sec)
+        }
+        ThreatType::RogueDhcp { server_ip, offers_count } => {
+            format!("Rogue DHCP server detected - {} sent {} offers", server_ip, offers_count)
+        }
+        // Layer 3 attacks
+        ThreatType::IcmpTunnel { avg_payload_size, packets_per_sec, entropy } => {
+            format!("ICMP tunneling detected - avg payload {}B, {:.1} pps, entropy {:.2}",
+                avg_payload_size, packets_per_sec, entropy)
+        }
+        ThreatType::Ipv6RaSpoofing { src_ip, router_lifetime } => {
+            format!("IPv6 RA spoofing detected - rogue router {} (lifetime: {}s)", src_ip, router_lifetime)
+        }
+        ThreatType::Ipv6RaFlood { unique_routers, ra_per_sec } => {
+            format!("IPv6 RA flood detected - {} routers, {:.1} RA/s", unique_routers, ra_per_sec)
         }
     };
 

@@ -1,0 +1,276 @@
+# DPI Detection Rules for crmonban
+# Categories can be enabled/disabled in main config via detect_* flags
+#
+# Each rule has:
+#   name        - Unique identifier for the rule
+#   pattern     - Regex pattern (Rust regex syntax)
+#   severity    - low, medium, high, critical
+#   description - Human-readable description
+
+# =============================================================================
+# SQL Injection Detection
+# =============================================================================
+
+[[sqli]]
+name = "sqli_union"
+pattern = "(?i)(\\bunion\\b.*\\bselect\\b|\\bselect\\b.*\\bunion\\b)"
+severity = "high"
+description = "SQL UNION injection attempt"
+
+[[sqli]]
+name = "sqli_comment"
+pattern = "('|\")\\s*(--|#|/\\*)"
+severity = "medium"
+description = "SQL comment injection"
+
+[[sqli]]
+name = "sqli_or_bypass"
+pattern = "(?i)'\\s*(or|and)\\s*'"
+severity = "high"
+description = "SQL OR/AND bypass attempt"
+
+[[sqli]]
+name = "sqli_stacked"
+pattern = "(?i);\\s*(drop|delete|insert|update|truncate|alter)\\s"
+severity = "critical"
+description = "SQL stacked query injection"
+
+[[sqli]]
+name = "sqli_sleep"
+pattern = "(?i)(sleep|benchmark|waitfor|delay)\\s*\\("
+severity = "high"
+description = "SQL time-based injection"
+
+[[sqli]]
+name = "sqli_information_schema"
+pattern = "(?i)information_schema\\.(tables|columns|schemata)"
+severity = "high"
+description = "SQL information schema access"
+
+[[sqli]]
+name = "sqli_hex_encode"
+pattern = "(?i)(0x[0-9a-f]{16,}|char\\s*\\(\\s*\\d+\\s*(,\\s*\\d+\\s*)+\\))"
+severity = "medium"
+description = "SQL hex/char encoding"
+
+# =============================================================================
+# Cross-Site Scripting (XSS) Detection
+# =============================================================================
+
+[[xss]]
+name = "xss_script_tag"
+pattern = "(?i)<script[^>]*>"
+severity = "high"
+description = "XSS script tag injection"
+
+[[xss]]
+name = "xss_event_handler"
+pattern = "(?i)\\bon(error|load|click|mouse|key|focus|blur|change|submit)\\s*="
+severity = "high"
+description = "XSS event handler injection"
+
+[[xss]]
+name = "xss_javascript_uri"
+pattern = "(?i)javascript\\s*:"
+severity = "high"
+description = "XSS javascript URI"
+
+[[xss]]
+name = "xss_data_uri"
+pattern = "(?i)data\\s*:\\s*(text/html|application/javascript)"
+severity = "medium"
+description = "XSS data URI injection"
+
+[[xss]]
+name = "xss_svg_onload"
+pattern = "(?i)<svg[^>]*\\bonload\\s*="
+severity = "high"
+description = "XSS SVG onload injection"
+
+[[xss]]
+name = "xss_iframe"
+pattern = "(?i)<iframe[^>]*\\bsrc\\s*="
+severity = "medium"
+description = "XSS iframe injection"
+
+[[xss]]
+name = "xss_expression"
+pattern = "(?i)(expression|behavior)\\s*\\("
+severity = "medium"
+description = "XSS CSS expression"
+
+# =============================================================================
+# Command Injection Detection
+# =============================================================================
+
+[[cmdi]]
+name = "cmdi_pipe"
+pattern = "[|;&`]\\s*(cat|ls|id|whoami|uname|pwd|wget|curl|nc|bash|sh|python|perl|ruby|php)\\b"
+severity = "critical"
+description = "Command injection via pipe/chain"
+
+[[cmdi]]
+name = "cmdi_subshell"
+pattern = "\\$\\([^)]*\\)|\\$\\{[^}]*\\}|`[^`]*`"
+severity = "high"
+description = "Command injection via subshell"
+
+[[cmdi]]
+name = "cmdi_reverse_shell"
+pattern = "(?i)(nc|ncat|netcat|bash|sh|python|perl|ruby|php).*(-e|exec|system|popen)"
+severity = "critical"
+description = "Potential reverse shell attempt"
+
+[[cmdi]]
+name = "cmdi_etc_passwd"
+pattern = "/etc/(passwd|shadow|group)"
+severity = "high"
+description = "Sensitive file access attempt"
+
+[[cmdi]]
+name = "cmdi_proc_self"
+pattern = "/proc/self/(environ|cmdline|fd)"
+severity = "high"
+description = "Process info disclosure attempt"
+
+# =============================================================================
+# Path Traversal Detection
+# =============================================================================
+
+[[path_traversal]]
+name = "path_traversal_dotdot"
+pattern = "(\\.\\.[/\\\\]){2,}"
+severity = "high"
+description = "Path traversal via ../"
+
+[[path_traversal]]
+name = "path_traversal_encoded"
+pattern = "(%2e%2e[/\\\\]|%252e%252e[/\\\\]|\\.\\.\\.%2f|\\.\\.\\.%5c)"
+severity = "high"
+description = "Encoded path traversal"
+
+[[path_traversal]]
+name = "path_traversal_null"
+pattern = "%00|\\\\x00"
+severity = "high"
+description = "Null byte injection"
+
+[[path_traversal]]
+name = "path_absolute_unix"
+pattern = "^/(etc|var|usr|tmp|root|home)/"
+severity = "medium"
+description = "Absolute Unix path access"
+
+[[path_traversal]]
+name = "path_absolute_windows"
+pattern = "[a-zA-Z]:\\\\\\\\(windows|winnt|system32)"
+severity = "medium"
+description = "Absolute Windows path access"
+
+# =============================================================================
+# Shellcode/Exploit Detection
+# =============================================================================
+
+[[shellcode]]
+name = "shellcode_nop_sled"
+pattern = "(\\x90{10,}|%90{10,})"
+severity = "critical"
+description = "NOP sled detected"
+
+[[shellcode]]
+name = "shellcode_x86_common"
+pattern = "(\\xcd\\x80|\\x0f\\x05|\\xff\\xe4)"
+severity = "critical"
+description = "x86 syscall/jmp esp shellcode"
+
+[[shellcode]]
+name = "shellcode_format_string"
+pattern = "%[0-9]*\\$[nsx]|%[0-9]*n"
+severity = "high"
+description = "Format string vulnerability"
+
+# =============================================================================
+# Protocol Anomaly Detection
+# =============================================================================
+
+[[protocol_anomaly]]
+name = "http_method_invalid"
+pattern = "^(CONNECT|TRACE|TRACK|DEBUG)\\s+"
+severity = "medium"
+description = "Suspicious HTTP method"
+
+[[protocol_anomaly]]
+name = "http_smuggling"
+pattern = "(?i)(transfer-encoding\\s*:\\s*chunked.*content-length|content-length.*transfer-encoding\\s*:\\s*chunked)"
+severity = "high"
+description = "HTTP request smuggling attempt"
+
+[[protocol_anomaly]]
+name = "http_crlf_injection"
+pattern = "%0d%0a|%0D%0A"
+severity = "high"
+description = "HTTP CRLF injection"
+
+[[protocol_anomaly]]
+name = "http_host_injection"
+pattern = "(?i)^host\\s*:.*@"
+severity = "medium"
+description = "HTTP Host header injection"
+
+# =============================================================================
+# TLS/SSL Anomaly Detection
+# =============================================================================
+
+[[tls_anomaly]]
+name = "tls_sslv2_client_hello"
+pattern = "^\\x80[\\x20-\\xff]\\x01\\x00\\x02"
+severity = "high"
+description = "SSLv2 ClientHello detected - deprecated protocol"
+
+[[tls_anomaly]]
+name = "tls_sslv3_handshake"
+pattern = "^\\x16\\x03\\x00"
+severity = "medium"
+description = "SSLv3 detected - vulnerable to POODLE"
+
+[[tls_anomaly]]
+name = "tls_heartbleed_probe"
+pattern = "^\\x18\\x03[\\x00-\\x03]"
+severity = "critical"
+description = "Potential Heartbleed probe"
+
+[[tls_anomaly]]
+name = "tls_export_cipher"
+pattern = "\\x00\\x03|\\x00\\x06|\\x00\\x08|\\x00\\x0b|\\x00\\x0e|\\x00\\x11|\\x00\\x14|\\x00\\x17|\\x00\\x19|\\x00\\x26"
+severity = "high"
+description = "EXPORT cipher suite offered - weak cryptography"
+
+[[tls_anomaly]]
+name = "tls_null_cipher"
+pattern = "\\x00\\x00|\\x00\\x01|\\x00\\x02|\\x00\\x2c|\\x00\\x2d|\\x00\\x2e|\\x00\\x3b"
+severity = "critical"
+description = "NULL cipher suite - no encryption"
+
+[[tls_anomaly]]
+name = "tls_anonymous_dh"
+pattern = "\\x00\\x18|\\x00\\x1b|\\x00\\x34|\\x00\\x3a|\\x00\\x46|\\x00\\x6c"
+severity = "high"
+description = "Anonymous DH cipher suite - no authentication"
+
+[[tls_anomaly]]
+name = "tls_rc4_cipher"
+pattern = "\\x00\\x04|\\x00\\x05|\\x00\\x24|\\x00\\x28|\\x00\\x8a|\\x00\\x8e|\\x00\\x92|\\xc0\\x02|\\xc0\\x07|\\xc0\\x0c|\\xc0\\x11"
+severity = "medium"
+description = "RC4 cipher suite - broken encryption"
+
+[[tls_anomaly]]
+name = "tls_des_cipher"
+pattern = "\\x00\\x09|\\x00\\x0c|\\x00\\x0f|\\x00\\x12|\\x00\\x15|\\x00\\x1a|\\x00\\x1d|\\x00\\x21"
+severity = "medium"
+description = "DES/3DES cipher suite - weak encryption"
+
+[[tls_anomaly]]
+name = "tls_renegotiation_attack"
+pattern = "\\xff\\x01\\x00\\x01\\x00"
+severity = "medium"
+description = "Potential TLS renegotiation attack"

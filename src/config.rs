@@ -796,6 +796,11 @@ pub struct DpiConfig {
     /// Action on match: "ban", "log", "drop"
     #[serde(default = "default_dpi_action")]
     pub action: String,
+
+    /// Path to external rules file (optional)
+    /// If not set, uses embedded default rules from data/dpi_rules.toml
+    #[serde(default)]
+    pub rules_file: Option<std::path::PathBuf>,
 }
 
 /// Custom DPI pattern
@@ -859,6 +864,7 @@ impl Default for DpiConfig {
             detect_protocol_anomaly: true,
             custom_patterns: vec![],
             action: default_dpi_action(),
+            rules_file: None,
         }
     }
 }
