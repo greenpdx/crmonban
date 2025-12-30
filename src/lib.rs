@@ -6,6 +6,7 @@ pub mod brute_force;
 pub mod cloudflare;
 pub mod config;
 pub mod database;
+pub mod feedback;
 pub mod dos;
 #[cfg(feature = "dbus")]
 pub mod dbus;

@@ -38,6 +38,10 @@ smallvec = "1.11"
 nom = { version = "*", optional = true }
 parking_lot = { version = "*", optional = true }
 
+# Hyperscan high-performance regex matching (optional)
+# Requires libhyperscan-dev on Debian/Ubuntu: apt install libhyperscan-dev
+hyperscan = { version = "0.3", optional = true }
+
 # Flow tracking and protocol analysis dependencies (optional)
 md5 = { version = "*", optional = true }
 
@@ -180,6 +184,8 @@ dbus = ["dep:zbus"]
 crrouter = []
 # Signature-based detection (Suricata/Snort rule compatibility)
 signatures = ["dep:nom", "dep:parking_lot"]
+# Hyperscan acceleration for signature matching (10-50x faster)
+hyperscan = ["signatures", "dep:hyperscan"]
 # Flow tracking for ML/anomaly detection (Stage 2)
 flow-tracking = ["dep:parking_lot"]
 # Protocol analyzers with JA3 fingerprinting (Stage 3)

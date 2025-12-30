@@ -32,6 +32,12 @@ pub mod matcher;
 pub mod loader;
 pub mod storage;
 
+#[cfg(feature = "hyperscan")]
+pub mod hyperscan;
+
+#[cfg(feature = "hyperscan")]
+pub use hyperscan::HyperscanMatcher;
+
 pub use ast::*;
 pub use parser::{parse_rule, apply_content_modifiers, ParseError};
 pub use matcher::{
@@ -150,9 +156,10 @@ impl Default for SignatureConfig {
 }
 
 /// Default classtypes to exclude from signature loading
-/// These are handled by other pipeline stages:
+/// These are handled by other pipeline stages or are low-priority:
 /// - Layer 2-4: layer2detect (scans, DoS, brute force)
 /// - HTTP/DNS/TLS: ProtocolAnalysis (web attacks, DNS tunneling, TLS attacks)
+/// - Low-value: games, chat, policy violations, etc.
 fn default_excluded_classtypes() -> Vec<String> {
     vec![
         // L2-4: Handled by layer2detect
@@ -160,17 +167,34 @@ fn default_excluded_classtypes() -> Vec<String> {
         "network-scan".into(),              // Network scanning
         "denial-of-service".into(),         // DoS/DDoS attacks
         "attempted-dos".into(),             // DoS attempts
-        "misc-attack".into(),               // Generic network attacks (often scans)
 
-        // HTTP: Handled by ProtocolAnalysis + httpAttack
+        // HTTP: Handled by ProtocolAnalysis + http_detect
         "web-application-attack".into(),    // SQL injection, XSS, etc.
         "web-application-activity".into(),  // HTTP anomalies
 
-        // DNS: Handled by ProtocolAnalysis DNS detection
-        // Note: Keep "dns" protocol rules for C2 domain matching
+        // Low-priority / noise reduction
+        "misc-activity".into(),             // Generic activity (4,716 rules - mostly noise)
+        "misc-attack".into(),               // Generic attacks
+        "policy-violation".into(),          // Policy violations (not security threats)
+        "pup-activity".into(),              // Potentially unwanted programs
+        "protocol-command-decode".into(),   // Protocol anomalies (handled by parsers)
+        "unknown".into(),                   // Uncategorized rules
+        "not-suspicious".into(),            // Explicitly not suspicious
+        "bad-unknown".into(),               // Unknown but suspicious (high FP rate)
+    ]
+}
 
-        // TLS: Handled by ProtocolAnalysis TLS detection
-        // Note: Keep ja3.hash rules for malware fingerprinting
+/// High-priority classtypes to include (used when strict filtering is enabled)
+/// These represent actual security threats that signatures are best at detecting
+pub fn high_priority_classtypes() -> Vec<String> {
+    vec![
+        "trojan-activity".into(),           // Malware C2, droppers (14,439 rules)
+        "command-and-control".into(),       // C2 traffic (5,025 rules)
+        "domain-c2".into(),                 // C2 domains (8,835 rules)
+        "exploit-kit".into(),               // Exploit kits (4,663 rules)
+        "credential-theft".into(),          // Credential stealing (1,674 rules)
+        "targeted-activity".into(),         // APT/targeted attacks (1,094 rules)
+        "social-engineering".into(),        // Phishing campaigns (1,750 rules)
     ]
 }
 

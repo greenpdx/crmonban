@@ -1325,7 +1325,7 @@ fn format_threat_message(threat: &ThreatType, signature: Option<&str>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::types::VECTOR_DIM;
+    use crate::layer234::types::VECTOR_DIM;
 
     #[test]
     fn test_builder() {

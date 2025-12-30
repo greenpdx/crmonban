@@ -484,8 +484,11 @@ pub struct SignatureEngine {
     rules: HashMap<u32, Rule>,
     /// Rules by protocol
     rules_by_protocol: HashMap<Protocol, Vec<u32>>,
-    /// Pre-filter pattern matcher
+    /// Pre-filter pattern matcher (Aho-Corasick)
     prefilter: Option<PatternMatcher>,
+    /// Hyperscan matcher (optional, for acceleration)
+    #[cfg(feature = "hyperscan")]
+    hyperscan_matcher: Option<super::HyperscanMatcher>,
     /// PCRE pattern cache
     pcre_cache: RwLock<PcreCache>,
     /// Threshold state
@@ -507,6 +510,8 @@ impl SignatureEngine {
             rules: HashMap::new(),
             rules_by_protocol: HashMap::new(),
             prefilter: None,
+            #[cfg(feature = "hyperscan")]
+            hyperscan_matcher: None,
             pcre_cache: RwLock::new(PcreCache::new()),
             threshold_state: RwLock::new(ThresholdState::new()),
             flowbits_state: RwLock::new(FlowbitsState::new()),
@@ -646,6 +651,44 @@ impl SignatureEngine {
             let rules: Vec<_> = self.rules.values().cloned().collect();
             self.prefilter = PatternMatcher::build(&rules, self.config.prefilter_min_length);
         }
+
+        // Also rebuild hyperscan matcher if available
+        #[cfg(feature = "hyperscan")]
+        self.rebuild_hyperscan();
+    }
+
+    /// Build Hyperscan matcher for accelerated pattern matching
+    #[cfg(feature = "hyperscan")]
+    pub fn rebuild_hyperscan(&mut self) {
+        use tracing::info;
+
+        let rules: Vec<_> = self.rules.values().cloned().collect();
+        match super::HyperscanMatcher::new(&rules) {
+            Ok(matcher) => {
+                info!(
+                    "Hyperscan matcher built: {} patterns, {} rules",
+                    matcher.pattern_count(),
+                    matcher.rule_count()
+                );
+                self.hyperscan_matcher = Some(matcher);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to build Hyperscan matcher: {}", e);
+                self.hyperscan_matcher = None;
+            }
+        }
+    }
+
+    /// Check if Hyperscan matcher is available
+    #[cfg(feature = "hyperscan")]
+    pub fn has_hyperscan(&self) -> bool {
+        self.hyperscan_matcher.is_some()
+    }
+
+    /// Get Hyperscan pattern count
+    #[cfg(feature = "hyperscan")]
+    pub fn hyperscan_pattern_count(&self) -> usize {
+        self.hyperscan_matcher.as_ref().map(|h| h.pattern_count()).unwrap_or(0)
     }
 
     /// Get statistics
@@ -677,6 +720,24 @@ impl SignatureEngine {
         flow_state: &FlowState,
     ) -> Vec<MatchResult> {
         self.match_packet_with_stream(packet, proto_ctx, flow_state, None, None)
+    }
+
+    /// Match packet using Hyperscan-accelerated matching (if available)
+    ///
+    /// Falls back to standard AC matching if Hyperscan is not available.
+    #[cfg(feature = "hyperscan")]
+    #[inline]
+    pub fn match_packet_hyperscan(
+        &self,
+        packet: &Packet,
+        proto_ctx: &ProtocolContext,
+        flow_state: &FlowState,
+    ) -> Vec<MatchResult> {
+        if let Some(ref hs) = self.hyperscan_matcher {
+            hs.match_packet(packet, proto_ctx, flow_state)
+        } else {
+            self.match_packet(packet, proto_ctx, flow_state)
+        }
     }
 
     /// Match packet against all rules, including stream data
