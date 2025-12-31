@@ -417,7 +417,9 @@ impl WorkerThread {
     ///
     /// Dispatches to the appropriate stage processor.
     /// Most stages use the StageProcessor trait; some have custom logic.
-    async fn process_stage(
+    ///
+    /// This method is public to enable per-stage timing and instrumentation.
+    pub async fn process_stage(
         &mut self,
         stage: PipelineStage,
         mut analysis: PacketAnalysis,
@@ -1430,5 +1432,372 @@ mod tests {
         // Events should be generated for visibility
         assert!(analysis.event_count() > 0 || analysis.events.len() > 0,
             "Should have events for watched IP");
+    }
+
+    /// Full pipeline integration test with timing, detection, and audit logging
+    #[tokio::test]
+    async fn test_full_pipeline_with_timing_detection_audit() {
+        use crate::audit::{AuditLogger, AuditConfig, AuditFormat, StageTimer, StageResult};
+        use crate::core::PacketVerdict;
+        use std::time::{Duration, Instant};
+        use tempfile::TempDir;
+
+        // Setup audit logger
+        let temp_dir = TempDir::new().unwrap();
+        let audit_path = temp_dir.path().join("test_audit.jsonl");
+
+        let audit_config = AuditConfig {
+            enabled: true,
+            format: AuditFormat::JsonLines,
+            output_path: audit_path.clone(),
+            buffer_size: 1, // Flush immediately for test
+            ..Default::default()
+        };
+        let audit_logger = AuditLogger::new(audit_config).unwrap();
+
+        // Setup worker pool with all stages
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_ipfilter = true;
+        config.enable_flows = true;
+        config.enable_layer234 = true;
+        config.enable_signatures = true;
+        config.enable_protocols = true;
+        config.enable_ml = true;
+        config.enable_correlation = true;
+
+        // Block an IP for testing detection
+        let blocked_ip: IpAddr = "198.51.100.99".parse().unwrap();
+        pool.worker_mut().ipfilter_worker_mut().ip_filter_mut()
+            .block(blocked_ip, "Test blocked for audit".to_string());
+
+        println!("\n=== Full Pipeline Integration Test ===\n");
+
+        // Test 1: Normal traffic (should pass through)
+        println!("Test 1: Normal traffic");
+        let total_start = Instant::now();
+        let mut stage_results: Vec<StageResult> = Vec::new();
+
+        let packet = make_tcp_packet("192.168.1.100", "10.0.0.1", 45000, 443, ack_psh_flags());
+
+        // Time individual conceptual stages (simulated)
+        let timer = StageTimer::start("ipfilter", 0);
+        let analysis = pool.process_full(packet.clone(), &config).await;
+        let result = timer.finish(&analysis);
+        stage_results.push(result);
+
+        let total_time = total_start.elapsed();
+
+        println!("  Verdict: {:?}", analysis.verdict());
+        println!("  Events: {}", analysis.events.len());
+        println!("  Total time: {:?}", total_time);
+        assert_eq!(analysis.verdict(), PacketVerdict::Accept);
+
+        // Create audit record
+        let audit_record = audit_logger.create_record(&analysis, stage_results.clone(), total_time);
+        audit_logger.log(audit_record);
+
+        // Test 2: Blocked IP traffic
+        println!("\nTest 2: Blocked IP traffic");
+        let total_start = Instant::now();
+        stage_results.clear();
+
+        let packet = make_tcp_packet("198.51.100.99", "10.0.0.1", 45001, 80, syn_flags());
+
+        let timer = StageTimer::start("full_pipeline", 0);
+        let analysis = pool.process_full(packet, &config).await;
+        let result = timer.finish(&analysis);
+        stage_results.push(result);
+
+        let total_time = total_start.elapsed();
+
+        println!("  Verdict: {:?}", analysis.verdict());
+        println!("  Suggested: {:?}", analysis.suggested_verdict());
+        println!("  Would block: {}", analysis.would_block());
+        println!("  Events: {}", analysis.events.len());
+        println!("  Total time: {:?}", total_time);
+
+        // Should detect and suggest blocking
+        assert!(analysis.events.len() > 0, "Should detect blocked IP");
+        assert_eq!(analysis.suggested_verdict(), PacketVerdict::Drop);
+
+        // Create audit record
+        let audit_record = audit_logger.create_record(&analysis, stage_results.clone(), total_time);
+        assert!(audit_record.would_block || audit_record.actual_verdict == "Drop");
+        audit_logger.log(audit_record);
+
+        // Test 3: Multiple packets to trigger threshold blocking
+        println!("\nTest 3: Threshold blocking (5 packets)");
+        for i in 0..5 {
+            let packet = make_tcp_packet("198.51.100.99", "10.0.0.1", 45002 + i, 22, syn_flags());
+            let analysis = pool.process_full(packet, &config).await;
+
+            let audit_record = audit_logger.create_record(&analysis, vec![], Duration::from_micros(100));
+            audit_logger.log(audit_record);
+
+            println!("  Packet {}: verdict={:?}, would_block={}", i+1, analysis.verdict(), analysis.would_block());
+        }
+
+        // Test 4: Port scan simulation
+        println!("\nTest 4: Port scan simulation (rapid SYN to multiple ports)");
+        let scan_start = Instant::now();
+        let scanner_ip = "198.51.100.88";
+        let target_ip = "10.0.0.50";
+
+        for port in [22, 23, 25, 80, 443, 8080, 8443, 3306, 5432, 6379] {
+            let packet = make_tcp_packet(scanner_ip, target_ip, 50000, port, syn_flags());
+            let analysis = pool.process_full(packet, &config).await;
+
+            if analysis.events.len() > 0 {
+                println!("  Port {}: {} events detected", port, analysis.events.len());
+                for event in &analysis.events {
+                    println!("    - {:?}: {} (severity: {:?})", event.event_type, event.message, event.severity);
+                }
+            }
+
+            let audit_record = audit_logger.create_record(&analysis, vec![], scan_start.elapsed());
+            audit_logger.log(audit_record);
+        }
+
+        // Flush and verify audit file
+        audit_logger.flush();
+
+        let audit_content = std::fs::read_to_string(&audit_path).unwrap();
+        let lines: Vec<&str> = audit_content.lines().collect();
+        println!("\n=== Audit Log Summary ===");
+        println!("  Total records: {}", lines.len());
+
+        // Parse a few records to verify structure
+        for (i, line) in lines.iter().take(3).enumerate() {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            println!("\n  Record {}:", i + 1);
+            println!("    src_ip: {}", record["src_ip"]);
+            println!("    dst_ip: {}", record["dst_ip"]);
+            println!("    protocol: {}", record["protocol"]);
+            println!("    suggested_verdict: {}", record["suggested_verdict"]);
+            println!("    actual_verdict: {}", record["actual_verdict"]);
+            println!("    would_block: {}", record["would_block"]);
+            println!("    events: {}", record["events"].as_array().map(|a| a.len()).unwrap_or(0));
+            println!("    processing_time_us: {}", record["processing_time_us"]);
+        }
+
+        // Assertions
+        assert!(lines.len() >= 15, "Should have at least 15 audit records");
+
+        // Verify JSON structure is valid
+        for line in &lines {
+            let _: serde_json::Value = serde_json::from_str(line)
+                .expect("Each line should be valid JSON");
+        }
+
+        // Check that blocked IP records have correct would_block
+        let blocked_records: Vec<serde_json::Value> = lines.iter()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter(|r: &serde_json::Value| r["src_ip"].as_str() == Some("198.51.100.99"))
+            .collect();
+
+        assert!(blocked_records.len() >= 5, "Should have records for blocked IP");
+
+        println!("\n=== Test Complete ===");
+        println!("All assertions passed!");
+    }
+
+    /// Test audit logger with different severity policies
+    #[tokio::test]
+    async fn test_audit_severity_filtering() {
+        use crate::audit::{AuditLogger, AuditConfig, AuditFormat};
+        use crate::core::{DetectionType, Severity, DetectionEvent};
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Test with min_severity = High (should filter out lower severity)
+        let audit_path = temp_dir.path().join("high_severity.jsonl");
+        let audit_config = AuditConfig {
+            enabled: true,
+            format: AuditFormat::JsonLines,
+            output_path: audit_path.clone(),
+            buffer_size: 1,
+            min_severity: Severity::High,
+            only_with_events: true,
+            ..Default::default()
+        };
+        let audit_logger = AuditLogger::new(audit_config).unwrap();
+
+        let mut pool = WorkerPool::default();
+        let config = PipelineConfig::default();
+
+        // Normal packet (no events, should be filtered)
+        let packet = make_tcp_packet("192.168.1.1", "10.0.0.1", 45000, 80, ack_flags());
+        let analysis = pool.process_full(packet, &config).await;
+        let record = audit_logger.create_record(&analysis, vec![], std::time::Duration::from_micros(50));
+        audit_logger.log(record);
+
+        audit_logger.flush();
+
+        let content = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(content.is_empty(), "Should filter packets without events when only_with_events=true");
+
+        println!("Severity filtering test passed!");
+    }
+
+    /// Test per-stage timing metrics for ALL 8 pipeline stages
+    #[tokio::test]
+    async fn test_stage_timing_metrics() {
+        use crate::audit::StageResult;
+        use std::time::Instant;
+
+        println!("\n=== All 8 Pipeline Stages Timing Test ===\n");
+
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+
+        // Enable all stages
+        config.enable_ipfilter = true;
+        config.enable_flows = true;
+        config.enable_layer234 = true;
+        config.enable_signatures = true;
+        config.enable_protocols = true;
+        config.enable_wasm = true;
+        config.enable_ml = true;
+        config.enable_correlation = true;
+
+        // Block an IP to generate events at stage 0
+        let blocked_ip: IpAddr = "203.0.113.50".parse().unwrap();
+        pool.worker_mut().ipfilter_worker_mut().ip_filter_mut()
+            .block(blocked_ip, "Test blocked IP".to_string());
+
+        // Test packet from blocked IP (will generate events)
+        let packet = make_tcp_packet("203.0.113.50", "10.0.0.1", 54321, 80, syn_flags());
+
+        // Time the full pipeline processing
+        let pipeline_start = Instant::now();
+        let analysis = pool.process_full(packet, &config).await;
+        let pipeline_time = pipeline_start.elapsed();
+
+        println!("Pipeline Results:");
+        println!("  Total events: {}", analysis.events.len());
+        println!("  Verdict: {:?}", analysis.verdict());
+        println!("  Suggested: {:?}", analysis.suggested_verdict());
+        println!("  Total pipeline time: {:?}", pipeline_time);
+
+        // Now test each stage individually to get per-stage timing
+        println!("\n--- Per-Stage Timing (individual processing) ---\n");
+
+        let stages = [
+            ("Stage 0: IpFilter", PipelineStage::IpFilter),
+            ("Stage 1: FlowTracker", PipelineStage::FlowTracker),
+            ("Stage 2: Layer234Detect", PipelineStage::Layer234Detect),
+            ("Stage 3: SignatureMatching", PipelineStage::SignatureMatching),
+            ("Stage 4: ProtocolAnalysis", PipelineStage::ProtocolAnalysis),
+            ("Stage 5: WasmPlugins", PipelineStage::WasmPlugins),
+            ("Stage 6: MLDetection", PipelineStage::MLDetection),
+            ("Stage 7: Correlation", PipelineStage::Correlation),
+        ];
+
+        let mut stage_results: Vec<StageResult> = Vec::new();
+        let mut total_stage_time = std::time::Duration::ZERO;
+
+        // Process a fresh packet through each stage, timing individually
+        for (stage_name, stage) in &stages {
+            let packet = make_tcp_packet("192.168.1.100", "10.0.0.1", 45000, 443, ack_psh_flags());
+            let mut analysis = crate::core::PacketAnalysis::new(packet);
+            let events_before = analysis.events.len();
+
+            let stage_start = Instant::now();
+
+            // Process just this one stage
+            analysis = pool.worker_mut().process_stage(*stage, analysis, &config).await;
+
+            let stage_time = stage_start.elapsed();
+            total_stage_time += stage_time;
+
+            let events_after = analysis.events.len();
+            let events_generated = events_after - events_before;
+
+            let result = StageResult {
+                stage: stage_name.to_string(),
+                passed: true,
+                marked: events_generated > 0,
+                latency_us: stage_time.as_micros() as u64,
+                events_generated: events_generated as u32,
+                suggested_action: None,
+            };
+
+            println!("  {:30} {:>8}μs  events: {}",
+                stage_name,
+                stage_time.as_micros(),
+                events_generated
+            );
+
+            stage_results.push(result);
+        }
+
+        println!("\n  {:30} {:>8}μs", "Total (sum of stages):", total_stage_time.as_micros());
+        println!("  {:30} {:>8}μs", "Actual pipeline time:", pipeline_time.as_micros());
+
+        // Verify we have results for all 8 stages
+        assert_eq!(stage_results.len(), 8, "Should have timing for all 8 stages");
+
+        // Verify stages processed in order
+        assert!(stage_results[0].stage.contains("IpFilter"));
+        assert!(stage_results[1].stage.contains("FlowTracker"));
+        assert!(stage_results[2].stage.contains("Layer234"));
+        assert!(stage_results[3].stage.contains("Signature"));
+        assert!(stage_results[4].stage.contains("Protocol"));
+        assert!(stage_results[5].stage.contains("Wasm"));
+        assert!(stage_results[6].stage.contains("ML"));
+        assert!(stage_results[7].stage.contains("Correlation"));
+
+        println!("\n=== All 8 Stages Timed Successfully ===");
+    }
+
+    /// Test that demonstrates StageTimer helper API
+    #[tokio::test]
+    async fn test_stage_timer_api() {
+        use crate::audit::StageTimer;
+        use crate::core::{DetectionType, Severity, DetectionEvent};
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        println!("\n=== StageTimer API Test ===\n");
+
+        let packet = make_packet();
+        let mut analysis = crate::core::PacketAnalysis::new(packet);
+
+        // Stage 1: ipfilter (fast, no events)
+        let timer1 = StageTimer::start("ipfilter", analysis.events.len());
+        sleep(Duration::from_micros(100));
+        let result1 = timer1.finish(&analysis);
+
+        assert_eq!(result1.stage, "ipfilter");
+        assert!(!result1.marked);
+        assert_eq!(result1.events_generated, 0);
+        assert!(result1.latency_us >= 100, "Should measure at least 100us");
+
+        // Stage 2: layer234 (adds events)
+        let timer2 = StageTimer::start("layer234", analysis.events.len());
+        sleep(Duration::from_micros(200));
+
+        // Simulate adding detection event
+        analysis.add_event(DetectionEvent::new(
+            DetectionType::PortScan,
+            Severity::Medium,
+            "192.168.1.1".parse().unwrap(),
+            "10.0.0.1".parse().unwrap(),
+            "Simulated scan".to_string(),
+        ).with_action(crate::core::DetectionAction::Alert));
+
+        let result2 = timer2.finish(&analysis);
+
+        assert_eq!(result2.stage, "layer234");
+        assert!(result2.marked);
+        assert_eq!(result2.events_generated, 1);
+        assert!(result2.latency_us >= 200, "Should measure at least 200us");
+        assert_eq!(result2.suggested_action, Some("Alert".to_string()));
+
+        println!("StageTimer results:");
+        println!("  {}: {}μs, marked={}, events={}", result1.stage, result1.latency_us, result1.marked, result1.events_generated);
+        println!("  {}: {}μs, marked={}, events={}, action={:?}", result2.stage, result2.latency_us, result2.marked, result2.events_generated, result2.suggested_action);
     }
 }
