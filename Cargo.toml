@@ -164,11 +164,6 @@ name = "pcap_replay"
 path = "src/bin/pcap_replay.rs"
 
 [[bin]]
-name = "attack_detection_test"
-path = "src/bin/attack_detection_test.rs"
-required-features = ["flow-tracking", "signatures"]
-
-[[bin]]
 name = "validate_patterns"
 path = "src/bin/validate_patterns.rs"
 

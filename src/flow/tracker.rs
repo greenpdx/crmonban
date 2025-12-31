@@ -76,7 +76,14 @@ impl FlowTracker {
         self.maybe_cleanup();
 
         // Return flow reference (need to get it again due to borrow checker)
-        let flow = self.table.get(&key).unwrap();
+        // Flow was just created/updated, so it should always exist unless cleanup
+        // removed it (which shouldn't happen since we just updated its timeout)
+        if self.table.get(&key).is_none() {
+            // Re-create the flow if it was somehow removed during cleanup
+            let _ = self.table.get_or_create(pkt);
+        }
+        // Safe: we either had the flow or just re-created it
+        let flow = self.table.get(&key).expect("Flow should exist after get_or_create");
         (flow, direction)
     }
 

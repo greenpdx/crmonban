@@ -2,12 +2,10 @@
 pub mod types;
 pub use types::*;
 
-pub mod brute_force;
 pub mod cloudflare;
 pub mod config;
 pub mod database;
 pub mod feedback;
-pub mod dos;
 #[cfg(feature = "dbus")]
 pub mod dbus;
 pub mod dpi;
@@ -25,7 +23,6 @@ pub mod layer234;
 #[cfg(feature = "wireless")]
 pub mod wireless;
 pub mod port_scan_monitor;
-pub mod scan_detect;
 pub mod shared_whitelist;
 pub mod siem;
 #[cfg(feature = "signatures")]
@@ -1297,7 +1294,7 @@ async fn start_packet_engine(
     // Create pipeline config from packet engine config
     let pipeline_config = engine::PipelineConfig {
         enable_flows: true,
-        enable_layer2detect: true,
+        enable_layer234: true,
         enable_signatures: config.signatures_enabled,
         enable_ml: config.ml_detection,
         enable_correlation: false,

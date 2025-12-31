@@ -11,14 +11,12 @@
 //!
 //! 0. IP Filter - IP blocklist, GeoIP, threat intel IOCs
 //! 1. Flow Tracking - connection state tracking
-//! 2. Port Scan Detection - NULL/XMAS/FIN/Maimon/ACK/SYN scans
-//! 2b. DoS Detection - flood/amplification attacks
-//! 3. Brute Force Detection - session-based login attempt tracking
-//! 4. Signature Matching - Aho-Corasick + rule verification
-//! 5. Protocol Analysis - HTTP/DNS/TLS/SSH parsers
-//! 6. WASM Plugins - custom detection plugins (Rust/WASM)
-//! 7. ML Anomaly Detection - flow-based scoring
-//! 8. Correlation - DB write + alert generation (only if marked)
+//! 2. Layer2 Detection - scans, DoS, brute force via vector similarity
+//! 3. Signature Matching - Aho-Corasick + rule verification
+//! 4. Protocol Analysis - HTTP/DNS/TLS/SSH parsers
+//! 5. WASM Plugins - custom detection plugins (Rust/WASM)
+//! 6. ML Anomaly Detection - flow-based scoring
+//! 7. Correlation - DB write + alert generation (only if marked)
 //!
 //! Stage order is configurable via PipelineConfig::stage_order.
 //! Each stage has pass_count and marked_count counters for debugging.
@@ -29,14 +27,11 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tracing::{trace, debug};
 
-use crate::brute_force::BruteForceTracker;
 use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet, AlertAnalyzer, AnalyzerDecision};
 use crate::correlation::{CorrelationEngine, CorrelationConfig, CorrelationResult};
-use crate::dos::DoSDetector;
 use crate::flow::{FlowTracker, FlowConfig};
 use crate::ml::{MLEngine, MLConfig, AnomalyCategory};
 use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent};
-use crate::scan_detect::{ScanDetectEngine, ScanDetectConfig, Classification, AlertType};
 use crate::signatures::SignatureEngine;
 use crate::signatures::matcher::{ProtocolContext, FlowState};
 use crate::wasm::{WasmEngine, StageContext};
@@ -44,8 +39,8 @@ use crate::wasm::{WasmEngine, StageContext};
 // IP filtering with GeoIP and threat intel (Stage 0)
 use crate::ipfilter::{Worker as IpFilterWorker, IpFilter, IpFilterConfig};
 
-// Layer 2-4 detection: scans, DoS, brute force (Stage 2)
-use crate::layer234::Detector as Layer2Detector;
+// Layer 2-4 detection: scans, DoS, brute force (Stage 2) - uses layer234 module
+use crate::layer234::Detector as Layer234Detector;
 
 use super::pipeline::{PipelineConfig, PipelineStage, PipelineMetrics, StageProcessor};
 #[cfg(feature = "profiling")]
@@ -63,9 +58,6 @@ pub struct WorkerConfig {
     /// Rules directory for signature matching
     #[serde(default)]
     pub rules_dir: Option<std::path::PathBuf>,
-    /// Scan detection configuration
-    #[serde(default)]
-    pub scan_detect: ScanDetectConfig,
 }
 
 impl Default for WorkerConfig {
@@ -75,7 +67,6 @@ impl Default for WorkerConfig {
             queue_depth: 1000,
             cpu_affinity: false,
             rules_dir: Some("/var/lib/crmonban/data/rules".into()),
-            scan_detect: ScanDetectConfig::default(),
         }
     }
 }
@@ -95,6 +86,7 @@ impl WorkerConfig {
 ///
 /// Each WorkerThread has its own instances of all detection engines.
 /// For parallel processing, create multiple WorkerThread instances via WorkerPool.
+#[allow(dead_code)]
 pub struct WorkerThread {
     /// Configuration
     config: WorkerConfig,
@@ -117,34 +109,25 @@ pub struct WorkerThread {
     // Stage 1: Flow Tracking
     flow_tracker: FlowTracker,
 
-    // Stage 2: Layer 2 Detection (scans, DoS, brute force)
-    layer2_detector: Layer2Detector,
+    // Stage 2: Layer 2-4 Detection (scans, DoS, brute force)
+    layer234_detector: Layer234Detector,
 
-    // Stage 2 (DEPRECATED): Port Scan Detection
-    scan_detect_engine: ScanDetectEngine,
-
-    // Stage 2b: DoS/Flood Detection
-    dos_detector: DoSDetector,
-
-    // Stage 3: Brute Force Detection
-    brute_force_tracker: BruteForceTracker,
-
-    // Stage 4: Signature Matching
+    // Stage 3: Signature Matching
     signature_engine: Option<SignatureEngine>,
 
-    // Stage 5: Protocol Analysis
+    // Stage 4: Protocol Analysis
     protocol_detector: ProtocolDetector,
 
-    // Stage 6: WASM Plugin Processing
+    // Stage 5: WASM Plugin Processing
     wasm_engine: WasmEngine,
 
     // Accumulated stage context for WASM plugins
     stage_context: StageContext,
 
-    // Stage 7: ML Anomaly Detection
+    // Stage 6: ML Anomaly Detection
     ml_engine: MLEngine,
 
-    // Stage 8: Correlation
+    // Stage 7: Correlation
     correlation_engine: CorrelationEngine,
 
     // Alert Analyzer - decides block/continue after detection events
@@ -163,10 +146,7 @@ pub struct WorkerThread {
 impl WorkerThread {
     /// Create a new worker thread
     pub fn new(config: WorkerConfig) -> Self {
-        // Clone scan_detect config before moving config
-        let scan_detect_config = config.scan_detect.clone();
-
-        // Stage 4: Load signature engine if rules_dir is configured
+        // Stage 3: Load signature engine if rules_dir is configured
         let signature_engine = config.rules_dir.as_ref()
             .and_then(|dir| SignatureEngine::load_from_dir(dir));
 
@@ -190,40 +170,31 @@ impl WorkerThread {
             // Stage 1: Flow Tracking
             flow_tracker: FlowTracker::new(FlowConfig::default()),
 
-            // Stage 2: Layer 2 Detection (scans, DoS, brute force)
-            layer2_detector: Layer2Detector::builder()
+            // Stage 2: Layer 2-4 Detection (scans, DoS, brute force)
+            layer234_detector: Layer234Detector::builder()
                 .with_scan_detection(true)
                 .with_bruteforce_detection(true)
                 .with_dos_detection(true)
                 .with_anomaly_detection(false)  // ML handles anomaly detection
                 .build()
-                .expect("Failed to create Layer2Detector"),
+                .expect("Failed to create Layer234Detector"),
 
-            // Stage 2 (DEPRECATED): Port Scan Detection
-            scan_detect_engine: ScanDetectEngine::new(scan_detect_config),
-
-            // Stage 2b: DoS/Flood Detection
-            dos_detector: DoSDetector::new(),
-
-            // Stage 3: Brute Force Detection
-            brute_force_tracker: BruteForceTracker::new(),
-
-            // Stage 4: Signature Matching
+            // Stage 3: Signature Matching
             signature_engine,
 
-            // Stage 5: Protocol Analysis
+            // Stage 4: Protocol Analysis
             protocol_detector: ProtocolDetector::new(ProtocolConfig::default()),
 
-            // Stage 6: WASM Plugin Processing
+            // Stage 5: WASM Plugin Processing
             wasm_engine: WasmEngine::new(),
 
             // Accumulated stage context for WASM plugins
             stage_context: StageContext::new(),
 
-            // Stage 7: ML Anomaly Detection
+            // Stage 6: ML Anomaly Detection
             ml_engine: MLEngine::new(MLConfig::default()),
 
-            // Stage 8: Correlation
+            // Stage 7: Correlation
             correlation_engine: CorrelationEngine::new(CorrelationConfig::default()),
 
             // Alert Analyzer
@@ -355,7 +326,7 @@ impl WorkerThread {
         &mut self,
         stage: PipelineStage,
         mut analysis: PacketAnalysis,
-        config: &PipelineConfig,
+        _config: &PipelineConfig,
     ) -> PacketAnalysis {
         match stage {
             // Stage 0: IP Filtering (includes GeoIP + threat intel IOCs)
@@ -370,76 +341,16 @@ impl WorkerThread {
                 self.flow_tracker.process_analysis(analysis)
             }
 
-            // Stage 2: Layer 2 Detection (scans, DoS, brute force via vector similarity)
-            PipelineStage::Layer2Detect => {
-                trace!("Stage 2: Layer 2 detection (scans, DoS, brute force)");
-                self.layer2_detector.process(&mut analysis).await;
+            // Stage 2: Layer 2-4 Detection (scans, DoS, brute force via vector similarity)
+            PipelineStage::Layer234Detect => {
+                trace!("Stage 2: Layer 2-4 detection (scans, DoS, brute force)");
+                self.layer234_detector.process(&mut analysis).await;
                 analysis
             }
 
-            // Stage 2 (DEPRECATED): Port Scan Detection - custom logic for detailed event construction
-            PipelineStage::ScanDetection => {
-                trace!("Stage 2: Port scan detection");
-                if let Some(alert) = self.scan_detect_engine.process_packet(&analysis.packet) {
-                    let severity = match alert.severity() {
-                        s if s >= 8 => Severity::Critical,
-                        s if s >= 6 => Severity::High,
-                        s if s >= 4 => Severity::Medium,
-                        _ => Severity::Low,
-                    };
-                    let classification_str = match alert.classification {
-                        Classification::Normal => "normal",
-                        Classification::Suspicious => "suspicious",
-                        Classification::ProbableScan => "probable scan",
-                        Classification::LikelyAttack => "likely attack",
-                        Classification::ConfirmedScan => "confirmed scan",
-                        Classification::NetworkIssue => "network issue",
-                        Classification::Unverifiable => "unverifiable",
-                    };
-                    let (alert_type_str, score) = match &alert.alert_type {
-                        AlertType::Suspicious { score } => ("suspicious activity", *score),
-                        AlertType::ProbableScan { score, .. } => ("probable port scan", *score),
-                        AlertType::LikelyAttack { score, .. } => ("likely attack", *score),
-                        AlertType::ConfirmedScan { score, .. } => ("confirmed scan", *score),
-                        AlertType::VerifiedAttack { score, .. } => ("verified attack", *score),
-                        AlertType::NetworkIssue { .. } => ("network issue", 0.0),
-                    };
-                    let evidence = alert.top_rules.first()
-                        .map(|(rule, _)| rule.clone())
-                        .unwrap_or_default();
-
-                    analysis.add_event(
-                        DetectionEvent::new(
-                            DetectionType::PortScan,
-                            severity,
-                            alert.src_ip,
-                            analysis.packet.dst_ip(),
-                            format!("{} {} ({}): {} unique ports, score={:.1}",
-                                classification_str, alert_type_str, evidence,
-                                alert.unique_ports, score),
-                        )
-                        .with_detector("scan_detect")
-                        .with_ports(analysis.packet.src_port(), analysis.packet.dst_port())
-                    );
-                }
-                analysis
-            }
-
-            // Stage 2b: DoS/Flood Detection - use StageProcessor
-            PipelineStage::DoSDetection => {
-                trace!("Stage 2b: DoS/Flood detection");
-                self.dos_detector.process(analysis, config).await
-            }
-
-            // Stage 3: Brute Force Detection - use StageProcessor
-            PipelineStage::BruteForceDetection => {
-                trace!("Stage 3: Brute force detection");
-                self.brute_force_tracker.process(analysis, config).await
-            }
-
-            // Stage 4: Signature Matching - custom logic (SignatureEngine is Option)
+            // Stage 3: Signature Matching - custom logic (SignatureEngine is Option)
             PipelineStage::SignatureMatching => {
-                trace!("Stage 4: Signature matching");
+                trace!("Stage 3: Signature matching");
                 if let Some(ref engine) = self.signature_engine {
                     // Build flow state from analysis
                     let flow_state = if let Some(ref flow) = analysis.flow {
@@ -478,9 +389,9 @@ impl WorkerThread {
                 analysis
             }
 
-            // Stage 5: Protocol Analysis - custom logic for protocol-specific detection
+            // Stage 4: Protocol Analysis - custom logic for protocol-specific detection
             PipelineStage::ProtocolAnalysis => {
-                trace!("Stage 5: Protocol analysis");
+                trace!("Stage 4: Protocol analysis");
 
                 if let Some(ref mut flow) = analysis.flow {
                     let proto_events = self.protocol_detector.analyze(&analysis.packet, flow);
@@ -539,9 +450,9 @@ impl WorkerThread {
                 analysis
             }
 
-            // Stage 6: WASM Plugin Processing
+            // Stage 5: WASM Plugin Processing
             PipelineStage::WasmPlugins => {
-                trace!("Stage 6: WASM plugins");
+                trace!("Stage 5: WASM plugins");
 
                 let context = self.stage_context.clone()
                     .with_stage(PipelineStage::WasmPlugins);
@@ -556,9 +467,9 @@ impl WorkerThread {
                 analysis
             }
 
-            // Stage 7: ML Anomaly Detection
+            // Stage 6: ML Anomaly Detection
             PipelineStage::MLDetection => {
-                trace!("Stage 7: ML detection");
+                trace!("Stage 6: ML detection");
 
                 if let Some(ref flow) = analysis.flow {
                     if let Some(anomaly_score) = self.ml_engine.process_flow(flow) {
@@ -601,9 +512,9 @@ impl WorkerThread {
                 analysis
             }
 
-            // Stage 8: Correlation (final stage) - processes events from all stages
+            // Stage 7: Correlation (final stage) - processes events from all stages
             PipelineStage::Correlation => {
-                trace!("Stage 8: Correlation");
+                trace!("Stage 7: Correlation");
 
                 // Take events to process through correlation
                 let events = analysis.take_events();
@@ -671,16 +582,6 @@ impl WorkerThread {
     /// Get number of workers
     pub fn worker_count(&self) -> usize {
         self.config.actual_workers()
-    }
-
-    /// Get reference to scan detect engine
-    pub fn scan_detect_engine(&self) -> &ScanDetectEngine {
-        &self.scan_detect_engine
-    }
-
-    /// Get reference to brute force tracker
-    pub fn brute_force_tracker(&self) -> &BruteForceTracker {
-        &self.brute_force_tracker
     }
 
     /// Get reference to stage metrics
@@ -960,15 +861,11 @@ mod tests {
     }
 
     /// Disable all stages except the specified one
-    #[allow(deprecated)]
     fn config_single_stage(stage: PipelineStage) -> PipelineConfig {
         let mut config = PipelineConfig::default();
         config.enable_ipfilter = stage == PipelineStage::IpFilter;
         config.enable_flows = stage == PipelineStage::FlowTracker;
-        config.enable_layer2detect = stage == PipelineStage::Layer2Detect;
-        config.enable_scan_detect = stage == PipelineStage::ScanDetection;
-        config.enable_dos = stage == PipelineStage::DoSDetection;
-        config.enable_brute_force = stage == PipelineStage::BruteForceDetection;
+        config.enable_layer234 = stage == PipelineStage::Layer234Detect;
         config.enable_signatures = stage == PipelineStage::SignatureMatching;
         config.enable_protocols = stage == PipelineStage::ProtocolAnalysis;
         config.enable_wasm = stage == PipelineStage::WasmPlugins;
@@ -1008,12 +905,12 @@ mod tests {
     async fn test_worker_pool_event_generation() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
-        config.enable_scan_detect = true;
+        config.enable_layer234 = true;
 
         // Single packet won't trigger detection - need multiple SYN packets to different ports
         let syn_flags = syn_flags();
 
-        // Send SYN packets to multiple ports to trigger scan detection
+        // Send SYN packets to multiple ports to trigger layer2 detection
         let mut total_events = 0;
         for port in 1..100 {
             let packet = make_tcp_packet("10.0.0.99", "192.168.1.1", 45678, port, syn_flags.clone());
@@ -1021,7 +918,7 @@ mod tests {
             total_events += events.len();
         }
 
-        // Should generate at least some events from scan detection
+        // Should generate at least some events from layer2 detection
         assert!(total_events > 0 || pool.packets_processed() == 99);
         assert_eq!(pool.packets_processed(), 99);
     }
@@ -1070,40 +967,12 @@ mod tests {
         // Flow tracking verified via stage metrics pass_count above
     }
 
-    /// Test 2: Scan Detection stage
-    /// Sends multiple SYN packets to different ports to trigger scan detection
+    /// Test 2: Layer234Detect stage (v4 spec - replaces scan/dos/brute force)
+    /// Tests the unified layer234 stage processes packets
     #[tokio::test]
-    async fn test_stage2_scan_detection() {
+    async fn test_stage2_layer234() {
         let mut pool = WorkerPool::default();
-        let mut config = PipelineConfig::default();
-        config.enable_scan_detect = true;
-
-        let syn_flags = syn_flags();
-
-        // Send SYN packets to many different ports (port scan behavior)
-        // This tests that the scan detection stage processes packets correctly
-        for port in 1..200 {
-            let packet = make_tcp_packet("10.0.0.50", "192.168.1.1", 45678, port, syn_flags.clone());
-            let _events = pool.process(packet, &config).await;
-        }
-
-        // Check stage metrics
-        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::ScanDetection) {
-            let snap = metrics.snapshot();
-            assert!(snap.pass_count >= 100, "ScanDetection should process many packets");
-            println!("ScanDetection: pass={}, marked={}", snap.pass_count, snap.marked_count);
-        }
-
-        // Verify all packets were processed through the pipeline
-        assert_eq!(pool.packets_processed(), 199);
-    }
-
-    /// Test 2b: Layer2Detect stage (v4 spec - replaces scan/dos/brute force)
-    /// Tests the unified layer2detect stage processes packets
-    #[tokio::test]
-    async fn test_stage2_layer2detect() {
-        let mut pool = WorkerPool::default();
-        let config = config_single_stage(PipelineStage::Layer2Detect);
+        let config = config_single_stage(PipelineStage::Layer234Detect);
 
         let syn_flags = syn_flags();
 
@@ -1114,66 +983,21 @@ mod tests {
         }
 
         // Check stage metrics
-        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::Layer2Detect) {
+        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::Layer234Detect) {
             let snap = metrics.snapshot();
-            assert!(snap.pass_count >= 40, "Layer2Detect should process packets");
-            println!("Layer2Detect: pass={}, marked={}", snap.pass_count, snap.marked_count);
+            assert!(snap.pass_count >= 40, "Layer234Detect should process packets");
+            println!("Layer234Detect: pass={}, marked={}", snap.pass_count, snap.marked_count);
         }
 
         // Verify packets were processed through the pipeline
         assert_eq!(pool.packets_processed(), 49);
     }
 
-    /// Test 3: Brute Force Detection stage (DEPRECATED - tests backward compatibility)
-    /// Sends multiple short sessions to trigger brute force detection
-    #[allow(deprecated)]
-    #[tokio::test]
-    async fn test_stage3_brute_force_detection() {
-        let mut pool = WorkerPool::default();
-        let mut config = PipelineConfig::default();
-        config.enable_brute_force = true;
-        config.enable_correlation = true;
-        // Add deprecated stage to stage_order for backward compatibility testing
-        config.stage_order.push(PipelineStage::BruteForceDetection);
-
-        let syn_flags = syn_flags();
-        let rst_flags = rst_flags();
-
-        let mut detected = false;
-
-        // Simulate multiple quick SSH sessions (brute force pattern)
-        for i in 0..15 {
-            // SYN (session start)
-            let syn_pkt = make_tcp_packet("10.0.0.100", "192.168.1.1", 40000 + i, 22, syn_flags.clone());
-            let _ = pool.process(syn_pkt, &config).await;
-
-            // RST (quick session end - failed login)
-            let rst_pkt = make_tcp_packet("10.0.0.100", "192.168.1.1", 40000 + i, 22, rst_flags.clone());
-            let events = pool.process(rst_pkt, &config).await;
-
-            for event in &events {
-                if matches!(event.event_type, DetectionType::BruteForce) {
-                    detected = true;
-                    println!("Brute force detected: {}", event.message);
-                }
-            }
-        }
-
-        // Check stage metrics
-        if let Some(metrics) = pool.stage_metrics().get(PipelineStage::BruteForceDetection) {
-            let snap = metrics.snapshot();
-            assert!(snap.pass_count >= 10, "BruteForce should process session packets");
-            println!("BruteForce: pass={}, marked={}", snap.pass_count, snap.marked_count);
-        }
-
-        assert!(detected, "Brute force attack should be detected after multiple failed SSH sessions");
-    }
-
-    /// Test 4: Signature Matching stage
+    /// Test 3: Signature Matching stage
     /// Tests that signature matching stage processes packets without errors
     /// Note: By default no rules are loaded, so no matches will occur
     #[tokio::test]
-    async fn test_stage4_signature_matching() {
+    async fn test_stage3_signature_matching() {
         let mut pool = WorkerPool::default();
         let mut config = PipelineConfig::default();
         config.enable_signatures = true;

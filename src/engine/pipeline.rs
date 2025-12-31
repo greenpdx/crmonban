@@ -46,9 +46,9 @@ pub struct PipelineConfig {
     pub enable_ipfilter: bool,
     /// Enable flow tracking
     pub enable_flows: bool,
-    /// Enable Layer 2 detection (Stage 2) - scans, DoS, brute force
+    /// Enable Layer 2-4 detection (Stage 2) - scans, DoS, brute force
     /// Replaces: enable_scan_detect, enable_dos, enable_brute_force
-    pub enable_layer2detect: bool,
+    pub enable_layer234: bool,
     /// Enable protocol analysis
     pub enable_protocols: bool,
     /// Enable signature matching
@@ -57,32 +57,22 @@ pub struct PipelineConfig {
     pub enable_ml: bool,
     /// Enable correlation
     pub enable_correlation: bool,
-    /// Enable port scan detection (DEPRECATED - use enable_layer2detect)
-    #[deprecated(note = "Use enable_layer2detect instead")]
-    pub enable_scan_detect: bool,
-    /// Enable brute force detection (DEPRECATED - use enable_layer2detect)
-    #[deprecated(note = "Use enable_layer2detect instead")]
-    pub enable_brute_force: bool,
-    /// Enable DoS/flood detection (DEPRECATED - use enable_layer2detect)
-    #[deprecated(note = "Use enable_layer2detect instead")]
-    pub enable_dos: bool,
     /// Enable WASM plugin processing
     pub enable_wasm: bool,
     /// Stats update interval (seconds)
     pub stats_interval_secs: u64,
     /// Stage execution order (configurable for optimization)
-    /// Default order: IpFilter, Flow, Layer2Detect, Signatures, Protocols, Wasm, ML, Correlation
+    /// Default order: IpFilter, Flow, Layer234Detect, Signatures, Protocols, Wasm, ML, Correlation
     #[serde(default = "default_stage_order")]
     pub stage_order: Vec<PipelineStage>,
 }
 
-/// Default stage order per v4 spec (with Layer2Detect replacing individual stages)
-#[allow(deprecated)]
+/// Default stage order per v4 spec (with Layer234Detect replacing individual stages)
 fn default_stage_order() -> Vec<PipelineStage> {
     vec![
         PipelineStage::IpFilter,        // Stage 0: IP filtering + GeoIP + Threat Intel
         PipelineStage::FlowTracker,     // Stage 1: Connection tracking
-        PipelineStage::Layer2Detect,    // Stage 2: Scans, DoS, brute force (replaces Stages 2, 2b, 3)
+        PipelineStage::Layer234Detect,    // Stage 2: Scans, DoS, brute force (replaces Stages 2, 2b, 3)
         PipelineStage::SignatureMatching,   // Stage 3: Signature matching
         PipelineStage::ProtocolAnalysis,    // Stage 4: Protocol parsing
         PipelineStage::WasmPlugins,         // Stage 5: WASM plugins
@@ -91,21 +81,17 @@ fn default_stage_order() -> Vec<PipelineStage> {
     ]
 }
 
-#[allow(deprecated)]
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             buffer_size: 10_000,
             enable_ipfilter: true,       // Stage 0: IP filtering enabled by default
             enable_flows: true,          // Stage 1: Flow tracking enabled
-            enable_layer2detect: true,   // Stage 2: Layer 2 detection enabled
+            enable_layer234: true,   // Stage 2: Layer 2-4 detection enabled
             enable_protocols: false,
             enable_signatures: false,
             enable_ml: false,
             enable_correlation: false,
-            enable_scan_detect: false,   // DEPRECATED - use enable_layer2detect
-            enable_brute_force: false,   // DEPRECATED - use enable_layer2detect
-            enable_dos: false,           // DEPRECATED - use enable_layer2detect
             enable_wasm: false,
             stats_interval_secs: 1,
             stage_order: default_stage_order(),
@@ -113,17 +99,13 @@ impl Default for PipelineConfig {
     }
 }
 
-#[allow(deprecated)]
 impl PipelineConfig {
     /// Check if a stage is enabled based on its type
     pub fn is_stage_enabled(&self, stage: PipelineStage) -> bool {
         match stage {
             PipelineStage::IpFilter => self.enable_ipfilter,
             PipelineStage::FlowTracker => self.enable_flows,
-            PipelineStage::Layer2Detect => self.enable_layer2detect,
-            PipelineStage::ScanDetection => self.enable_scan_detect,
-            PipelineStage::DoSDetection => self.enable_dos,
-            PipelineStage::BruteForceDetection => self.enable_brute_force,
+            PipelineStage::Layer234Detect => self.enable_layer234,
             PipelineStage::SignatureMatching => self.enable_signatures,
             PipelineStage::ProtocolAnalysis => self.enable_protocols,
             PipelineStage::WasmPlugins => self.enable_wasm,
@@ -270,31 +252,20 @@ pub enum PipelineStage {
     IpFilter,
     /// Flow tracking (Stage 1)
     FlowTracker,
-    /// Layer 2 detection (Stage 2) - scans, DoS, brute force via vector similarity
-    /// Replaces: ScanDetection, DoSDetection, BruteForceDetection
-    Layer2Detect,
-    /// Port scan detection (Stage 2 - DEPRECATED, use Layer2Detect)
-    #[deprecated(note = "Use Layer2Detect instead")]
-    ScanDetection,
-    /// DoS/Flood detection (Stage 2b - DEPRECATED, use Layer2Detect)
-    #[deprecated(note = "Use Layer2Detect instead")]
-    DoSDetection,
-    /// Brute force detection (Stage 3 - DEPRECATED, use Layer2Detect)
-    #[deprecated(note = "Use Layer2Detect instead")]
-    BruteForceDetection,
-    /// Signature matching (Stage 4) - Aho-Corasick + rules
+    /// Layer 2-4 detection (Stage 2) - scans, DoS, brute force via vector similarity
+    Layer234Detect,
+    /// Signature matching (Stage 3) - Aho-Corasick + rules
     SignatureMatching,
-    /// Protocol analysis (Stage 5) - HTTP/DNS/TLS/SSH parsers
+    /// Protocol analysis (Stage 4) - HTTP/DNS/TLS/SSH parsers
     ProtocolAnalysis,
-    /// WASM plugin processing (Stage 6) - custom detection plugins
+    /// WASM plugin processing (Stage 5) - custom detection plugins
     WasmPlugins,
-    /// ML/Anomaly detection (Stage 7) - flow-based scoring
+    /// ML/Anomaly detection (Stage 6) - flow-based scoring
     MLDetection,
-    /// Correlation (Stage 8) - DB write + alert generation
+    /// Correlation (Stage 7) - DB write + alert generation
     Correlation,
 }
 
-#[allow(deprecated)]
 impl PipelineStage {
     /// Get all stages in default order (v4 spec)
     pub fn all() -> Vec<Self> {
@@ -306,10 +277,7 @@ impl PipelineStage {
         match self {
             PipelineStage::IpFilter => "ip_filter",
             PipelineStage::FlowTracker => "flow_tracker",
-            PipelineStage::Layer2Detect => "layer2_detect",
-            PipelineStage::ScanDetection => "scan_detection",
-            PipelineStage::DoSDetection => "dos_detection",
-            PipelineStage::BruteForceDetection => "brute_force_detection",
+            PipelineStage::Layer234Detect => "layer234",
             PipelineStage::SignatureMatching => "signature_matching",
             PipelineStage::ProtocolAnalysis => "protocol_analysis",
             PipelineStage::WasmPlugins => "wasm_plugins",
@@ -323,10 +291,7 @@ impl PipelineStage {
         match self {
             PipelineStage::IpFilter => 0,
             PipelineStage::FlowTracker => 1,
-            PipelineStage::Layer2Detect => 2,
-            PipelineStage::ScanDetection => 2,  // DEPRECATED - same as Layer2Detect
-            PipelineStage::DoSDetection => 2,   // DEPRECATED - same as Layer2Detect
-            PipelineStage::BruteForceDetection => 2, // DEPRECATED - same as Layer2Detect
+            PipelineStage::Layer234Detect => 2,
             PipelineStage::SignatureMatching => 3,
             PipelineStage::ProtocolAnalysis => 4,
             PipelineStage::WasmPlugins => 5,
@@ -449,7 +414,7 @@ mod tests {
         // Check defaults (v4 spec)
         assert!(config.enable_ipfilter);       // Stage 0 enabled by default
         assert!(config.enable_flows);          // Stage 1 enabled by default
-        assert!(config.enable_layer2detect);   // Stage 2 enabled by default (replaces scan/dos/brute)
+        assert!(config.enable_layer234);   // Stage 2 enabled by default (replaces scan/dos/brute)
         assert!(!config.enable_signatures);    // Off by default
         assert!(!config.enable_wasm);          // Off by default
         assert_eq!(config.buffer_size, 10_000);
@@ -458,7 +423,7 @@ mod tests {
         // Verify v4 stage order
         assert_eq!(config.stage_order[0], PipelineStage::IpFilter);
         assert_eq!(config.stage_order[1], PipelineStage::FlowTracker);
-        assert_eq!(config.stage_order[2], PipelineStage::Layer2Detect);
+        assert_eq!(config.stage_order[2], PipelineStage::Layer234Detect);
         assert_eq!(config.stage_order[3], PipelineStage::SignatureMatching);
         assert_eq!(config.stage_order[4], PipelineStage::ProtocolAnalysis);
         assert_eq!(config.stage_order[5], PipelineStage::WasmPlugins);
@@ -469,12 +434,12 @@ mod tests {
     #[test]
     fn test_pipeline_stages_order() {
         let stages = PipelineStage::all();
-        // v4 spec: 8 stages (Layer2Detect replaces ScanDetection, DoSDetection, BruteForceDetection)
+        // v4 spec: 8 stages (Layer234Detect replaces ScanDetection, DoSDetection, BruteForceDetection)
         assert_eq!(stages.len(), 8);
-        // Verify order: IpFilter, Flow, Layer2Detect, Sig, Proto, Wasm, ML, Corr
+        // Verify order: IpFilter, Flow, Layer234Detect, Sig, Proto, Wasm, ML, Corr
         assert_eq!(stages[0], PipelineStage::IpFilter);
         assert_eq!(stages[1], PipelineStage::FlowTracker);
-        assert_eq!(stages[2], PipelineStage::Layer2Detect);
+        assert_eq!(stages[2], PipelineStage::Layer234Detect);
         assert_eq!(stages[3], PipelineStage::SignatureMatching);
         assert_eq!(stages[4], PipelineStage::ProtocolAnalysis);
         assert_eq!(stages[5], PipelineStage::WasmPlugins);
@@ -482,14 +447,14 @@ mod tests {
         assert_eq!(stages[7], PipelineStage::Correlation);
     }
 
-    #[allow(deprecated)]
     #[test]
     fn test_stage_names() {
         assert_eq!(PipelineStage::IpFilter.name(), "ip_filter");
         assert_eq!(PipelineStage::FlowTracker.name(), "flow_tracker");
-        assert_eq!(PipelineStage::Layer2Detect.name(), "layer2_detect");
-        assert_eq!(PipelineStage::ScanDetection.name(), "scan_detection");
-        assert_eq!(PipelineStage::BruteForceDetection.name(), "brute_force_detection");
+        assert_eq!(PipelineStage::Layer234Detect.name(), "layer234");
+        assert_eq!(PipelineStage::SignatureMatching.name(), "signature_matching");
+        assert_eq!(PipelineStage::ProtocolAnalysis.name(), "protocol_analysis");
+        assert_eq!(PipelineStage::WasmPlugins.name(), "wasm_plugins");
         assert_eq!(PipelineStage::MLDetection.name(), "ml_detection");
         assert_eq!(PipelineStage::Correlation.name(), "correlation");
     }
@@ -516,7 +481,7 @@ mod tests {
         // Should be able to get each v4 stage
         assert!(metrics.get(PipelineStage::IpFilter).is_some());
         assert!(metrics.get(PipelineStage::FlowTracker).is_some());
-        assert!(metrics.get(PipelineStage::Layer2Detect).is_some());
+        assert!(metrics.get(PipelineStage::Layer234Detect).is_some());
         assert!(metrics.get(PipelineStage::WasmPlugins).is_some());
         assert!(metrics.get(PipelineStage::Correlation).is_some());
     }
@@ -526,13 +491,13 @@ mod tests {
         let mut config = PipelineConfig::default();
         assert!(config.is_stage_enabled(PipelineStage::IpFilter));
         assert!(config.is_stage_enabled(PipelineStage::FlowTracker));
-        assert!(config.is_stage_enabled(PipelineStage::Layer2Detect));
+        assert!(config.is_stage_enabled(PipelineStage::Layer234Detect));
 
         config.enable_ipfilter = false;
         assert!(!config.is_stage_enabled(PipelineStage::IpFilter));
 
-        config.enable_layer2detect = false;
-        assert!(!config.is_stage_enabled(PipelineStage::Layer2Detect));
+        config.enable_layer234 = false;
+        assert!(!config.is_stage_enabled(PipelineStage::Layer234Detect));
 
         config.enable_flows = false;
         assert!(!config.is_stage_enabled(PipelineStage::FlowTracker));
