@@ -1687,7 +1687,8 @@ mod tests {
         println!("  Total pipeline time: {:?}", pipeline_time);
 
         // Now test each stage individually to get per-stage timing
-        println!("\n--- Per-Stage Timing (individual processing) ---\n");
+        // Important: We cascade through stages so flows are established properly
+        println!("\n--- Per-Stage Timing (cascaded processing with flow) ---\n");
 
         let stages = [
             ("Stage 0: IpFilter", PipelineStage::IpFilter),
@@ -1703,15 +1704,18 @@ mod tests {
         let mut stage_results: Vec<StageResult> = Vec::new();
         let mut total_stage_time = std::time::Duration::ZERO;
 
-        // Process a fresh packet through each stage, timing individually
+        // Create a single packet and cascade it through all stages
+        // This ensures flow is established in Stage 1 and available for Stages 4 & 6
+        let packet = make_tcp_packet("192.168.1.100", "10.0.0.1", 45000, 443, ack_psh_flags());
+        let mut analysis = crate::core::PacketAnalysis::new(packet);
+
         for (stage_name, stage) in &stages {
-            let packet = make_tcp_packet("192.168.1.100", "10.0.0.1", 45000, 443, ack_psh_flags());
-            let mut analysis = crate::core::PacketAnalysis::new(packet);
             let events_before = analysis.events.len();
+            let had_flow = analysis.flow.is_some();
 
             let stage_start = Instant::now();
 
-            // Process just this one stage
+            // Process this stage (analysis carries forward including flow)
             analysis = pool.worker_mut().process_stage(*stage, analysis, &config).await;
 
             let stage_time = stage_start.elapsed();
@@ -1719,6 +1723,7 @@ mod tests {
 
             let events_after = analysis.events.len();
             let events_generated = events_after - events_before;
+            let has_flow_now = analysis.flow.is_some();
 
             let result = StageResult {
                 stage: stage_name.to_string(),
@@ -1729,10 +1734,19 @@ mod tests {
                 suggested_action: None,
             };
 
-            println!("  {:30} {:>8}μs  events: {}",
+            let flow_status = if !had_flow && has_flow_now {
+                " [flow created]"
+            } else if has_flow_now {
+                " [has flow]"
+            } else {
+                " [no flow]"
+            };
+
+            println!("  {:30} {:>8}μs  events: {}{}",
                 stage_name,
                 stage_time.as_micros(),
-                events_generated
+                events_generated,
+                flow_status
             );
 
             stage_results.push(result);

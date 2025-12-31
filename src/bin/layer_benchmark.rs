@@ -74,35 +74,73 @@ impl LayerBenchmark {
 
 /// Generate test packets for benchmarking
 fn generate_test_packets(count: usize, packet_size: usize) -> Vec<Packet> {
+    generate_test_packets_with_attack_ratio(count, packet_size, 0)
+}
+
+/// Generate test packets with attack traffic ratio (0-100%)
+fn generate_test_packets_with_attack_ratio(count: usize, packet_size: usize, attack_percent: usize) -> Vec<Packet> {
     let mut packets = Vec::with_capacity(count);
+    let attack_count = (count * attack_percent) / 100;
 
     for i in 0..count {
-        let src_ip = IpAddr::V4(Ipv4Addr::new(
-            192, 168, (i / 256) as u8, (i % 256) as u8
-        ));
-        let dst_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let is_attack = i < attack_count;
+
+        let (src_ip, dst_ip, src_port, dst_port, flags) = if is_attack {
+            // Attack traffic - 3 types rotating
+            match i % 3 {
+                0 => {
+                    // Port scan - same src, different dst ports
+                    let src = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 50));
+                    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+                    let flags = TcpFlags { syn: true, ..Default::default() };
+                    (src, dst, 45000, 1 + (i % 65000) as u16, flags)
+                }
+                1 => {
+                    // SYN flood - different src, same dst port
+                    let src = IpAddr::V4(Ipv4Addr::new(
+                        192, 168, ((i / 256) % 256) as u8, (i % 256) as u8
+                    ));
+                    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+                    let flags = TcpFlags { syn: true, ..Default::default() };
+                    (src, dst, 40000 + (i % 10000) as u16, 80, flags)
+                }
+                _ => {
+                    // SSH brute force - same src, same dst port 22
+                    let src = IpAddr::V4(Ipv4Addr::new(192, 168, 100, 100));
+                    let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+                    let flags = TcpFlags { syn: true, ack: true, psh: true, ..Default::default() };
+                    (src, dst, 50000 + (i % 10000) as u16, 22, flags)
+                }
+            }
+        } else {
+            // Normal traffic
+            let src = IpAddr::V4(Ipv4Addr::new(
+                192, 168, (i / 256) as u8, (i % 256) as u8
+            ));
+            let dst = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+            let port = match i % 5 {
+                0 => 80,
+                1 => 443,
+                2 => 8080,
+                3 => 3000,
+                _ => 8443,
+            };
+            let flags = TcpFlags {
+                syn: false,
+                ack: true,
+                psh: i % 4 == 0,
+                ..Default::default()
+            };
+            (src, dst, 50000 + (i % 10000) as u16, port, flags)
+        };
 
         let mut pkt = Packet::new(i as u64, src_ip, dst_ip, IpProtocol::Tcp, "eth0");
         pkt.raw_len = packet_size as u32;
 
-        // Set TCP fields
         if let Some(tcp) = pkt.tcp_mut() {
-            tcp.src_port = 50000 + (i % 10000) as u16;
-            tcp.dst_port = match i % 5 {
-                0 => 80,
-                1 => 443,
-                2 => 22,
-                3 => 8080,
-                _ => 3306,
-            };
-            tcp.flags = TcpFlags {
-                syn: i % 3 == 0,
-                ack: i % 3 != 0,
-                fin: i % 20 == 0,
-                rst: i % 50 == 0,
-                psh: i % 4 == 0,
-                ..Default::default()
-            };
+            tcp.src_port = src_port;
+            tcp.dst_port = dst_port;
+            tcp.flags = flags;
         }
 
         packets.push(pkt);
@@ -701,6 +739,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut iterations = 100_000usize;
     let mut packet_size = 1500usize;
+    let mut attack_ratio = 0usize;
     let warmup = 1000usize;
 
     let mut i = 1;
@@ -714,13 +753,22 @@ fn main() {
                 packet_size = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(packet_size);
                 i += 1;
             }
+            "--attack-ratio" | "-a" => {
+                attack_ratio = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                attack_ratio = attack_ratio.min(100);
+                i += 1;
+            }
             "--help" | "-h" => {
                 println!("Usage: layer_benchmark [OPTIONS]");
                 println!();
                 println!("Options:");
                 println!("  -n, --iterations N    Number of operations per layer (default: 100000)");
                 println!("  -s, --packet-size N   Packet size in bytes (default: 1500)");
+                println!("  -a, --attack-ratio N  Percentage of attack traffic 0-100 (default: 0)");
                 println!("  -h, --help            Show this help");
+                println!();
+                println!("Examples:");
+                println!("  layer_benchmark -n 1000 -a 33    # 1000 packets, 33% attack traffic");
                 return;
             }
             _ => {}
@@ -732,12 +780,19 @@ fn main() {
     println!("=========================");
     println!("Iterations: {}", iterations);
     println!("Packet size: {} bytes", packet_size);
+    if attack_ratio > 0 {
+        println!("Attack ratio: {}% ({} attack, {} normal)",
+            attack_ratio,
+            (iterations * attack_ratio) / 100,
+            iterations - (iterations * attack_ratio) / 100);
+        println!("Attack types: Port scan, SYN flood, SSH brute force");
+    }
     println!("Warmup: {} operations", warmup);
     println!();
 
     // Generate test data
     println!("Generating test data...");
-    let packets = generate_test_packets(iterations + warmup, packet_size);
+    let packets = generate_test_packets_with_attack_ratio(iterations + warmup, packet_size, attack_ratio);
     let http_requests = generate_http_requests(iterations + warmup);
 
     let mut results = Vec::new();
