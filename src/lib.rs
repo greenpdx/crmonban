@@ -22,6 +22,8 @@ pub mod models;
 pub mod monitor;
 pub mod journald_monitor;
 pub mod layer234;
+#[cfg(feature = "wireless")]
+pub mod wireless;
 pub mod port_scan_monitor;
 pub mod scan_detect;
 pub mod shared_whitelist;

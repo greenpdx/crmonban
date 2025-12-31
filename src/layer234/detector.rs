@@ -1391,6 +1391,146 @@ fn threat_to_detection(threat: &ThreatType) -> (DetectionType, DetectionSubType)
                 CustomSubType::new("dot1x", "rogue_auth", "Rogue Authenticator", "Unauthorized 802.1X authenticator", Severity::Critical)
             ))
         }
+        // Advanced Layer 3-4 attacks (extra34 feature)
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentOverlap { .. } => {
+            (DetectionType::Custom("fragmentation_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer3", "fragment_overlap", "Fragment Overlap (Teardrop)", "Overlapping IP fragments", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentOversized { .. } => {
+            (DetectionType::Custom("fragmentation_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer3", "fragment_oversized", "Oversized Fragment (Ping of Death)", "Reassembled packet exceeds 64KB", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("layer3", "fragment_flood", "Fragment Flood", "High rate of incomplete fragments", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentTiny { .. } => {
+            (DetectionType::Custom("evasion".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer3", "fragment_tiny", "Tiny Fragment", "Evasion technique via tiny fragments", Severity::Medium)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::IpSpoofBogon { .. } => {
+            (DetectionType::Custom("spoofing".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer3", "ip_bogon", "Bogon Source IP", "Source IP from reserved/invalid range", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::IpSpoofMartian { .. } => {
+            (DetectionType::Custom("spoofing".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer3", "ip_martian", "Martian Source IP", "Impossible source address", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::LandAttack { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("layer34", "land", "Land Attack", "Source equals destination (src==dst)", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::IcmpRedirect { .. } => {
+            (DetectionType::Custom("layer3_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer3", "icmp_redirect", "ICMP Redirect", "Route manipulation via ICMP redirect", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::IcmpSourceQuench { .. } => {
+            (DetectionType::Custom("layer3_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer3", "icmp_source_quench", "ICMP Source Quench", "Deprecated ICMP type used as attack vector", Severity::Medium)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpRstInjection { .. } => {
+            (DetectionType::Custom("tcp_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer4", "tcp_rst_injection", "TCP RST Injection", "Spoofed RST to terminate connections", Severity::High)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpSessionHijack { .. } => {
+            (DetectionType::Custom("tcp_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("layer4", "tcp_hijack", "TCP Session Hijack", "Sequence number manipulation detected", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpSynAckReflection { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("layer4", "synack_reflection", "SYN-ACK Reflection", "Reflection attack using spoofed SYN", Severity::High)
+            ))
+        }
+        // 802.11 Wireless attacks (wireless feature)
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiDeauthFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("wireless", "deauth_flood", "WiFi Deauth Flood", "802.11 deauthentication flood attack", Severity::High)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiDisassocFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("wireless", "disassoc_flood", "WiFi Disassoc Flood", "802.11 disassociation flood attack", Severity::High)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiEvilTwin { .. } => {
+            (DetectionType::Custom("wireless_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("wireless", "evil_twin", "Evil Twin AP", "Rogue AP impersonating legitimate network", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiFakeAp { .. } => {
+            (DetectionType::Custom("wireless_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("wireless", "fake_ap", "Fake AP", "Unknown/unauthorized access point", Severity::High)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiBeaconFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("wireless", "beacon_flood", "Beacon Flood", "Excessive beacon frames from single source", Severity::Medium)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiKarmaAttack { .. } => {
+            (DetectionType::Custom("wireless_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("wireless", "karma", "Karma Attack", "AP responding to all probe requests", Severity::Critical)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiAuthFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("wireless", "auth_flood", "Auth Flood", "802.11 authentication flood", Severity::High)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiProbeFlood { .. } => {
+            (DetectionType::DoS, DetectionSubType::Custom(
+                CustomSubType::new("wireless", "probe_flood", "Probe Flood", "Excessive probe requests", Severity::Medium)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiPmkidCapture { .. } => {
+            (DetectionType::Custom("wireless_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("wireless", "pmkid_capture", "PMKID Capture", "PMKID capture attempt detected", Severity::High)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiHandshakeCapture { .. } => {
+            (DetectionType::Custom("wireless_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("wireless", "handshake_capture", "Handshake Capture", "WPA handshake capture detected", Severity::High)
+            ))
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiKrackAttack { .. } => {
+            (DetectionType::Custom("wireless_attack".into()), DetectionSubType::Custom(
+                CustomSubType::new("wireless", "krack", "KRACK Attack", "Key reinstallation attack detected", Severity::Critical)
+            ))
+        }
     }
 }
 
@@ -1462,6 +1602,54 @@ fn threat_to_severity(threat: &ThreatType) -> Severity {
         ThreatType::EapFlood { .. } => Severity::Medium,
         #[cfg(feature = "extra234")]
         ThreatType::RogueAuthenticator { .. } => Severity::Critical,
+        // Advanced Layer 3-4 attacks (extra34 feature)
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentOverlap { .. } => Severity::Critical,
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentOversized { .. } => Severity::Critical,
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentFlood { .. } => Severity::High,
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentTiny { .. } => Severity::Medium,
+        #[cfg(feature = "extra34")]
+        ThreatType::IpSpoofBogon { .. } => Severity::High,
+        #[cfg(feature = "extra34")]
+        ThreatType::IpSpoofMartian { .. } => Severity::Critical,
+        #[cfg(feature = "extra34")]
+        ThreatType::LandAttack { .. } => Severity::Critical,
+        #[cfg(feature = "extra34")]
+        ThreatType::IcmpRedirect { .. } => Severity::High,
+        #[cfg(feature = "extra34")]
+        ThreatType::IcmpSourceQuench { .. } => Severity::Medium,
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpRstInjection { .. } => Severity::High,
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpSessionHijack { .. } => Severity::Critical,
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpSynAckReflection { .. } => Severity::High,
+        // 802.11 Wireless attacks (wireless feature)
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiDeauthFlood { .. } => Severity::High,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiDisassocFlood { .. } => Severity::High,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiEvilTwin { .. } => Severity::Critical,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiFakeAp { .. } => Severity::High,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiBeaconFlood { .. } => Severity::Medium,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiKarmaAttack { .. } => Severity::Critical,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiAuthFlood { .. } => Severity::High,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiProbeFlood { .. } => Severity::Medium,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiPmkidCapture { .. } => Severity::High,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiHandshakeCapture { .. } => Severity::High,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiKrackAttack { .. } => Severity::Critical,
     }
 }
 
@@ -1587,6 +1775,100 @@ fn format_threat_message(threat: &ThreatType, signature: Option<&str>) -> String
         #[cfg(feature = "extra234")]
         ThreatType::RogueAuthenticator { src_mac } => {
             format!("Rogue 802.1X authenticator - unauthorized EAP-Success from {}", src_mac)
+        }
+        // Advanced Layer 3-4 attacks (extra34 feature)
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentOverlap { id, offset1, offset2 } => {
+            format!("Fragment overlap (Teardrop) - ID {} offsets {} and {} overlap", id, offset1, offset2)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentOversized { id, total_size } => {
+            format!("Oversized fragment (Ping of Death) - ID {} would reassemble to {} bytes", id, total_size)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentFlood { fragments_per_sec, incomplete_count } => {
+            format!("Fragment flood - {:.1} frags/sec, {} incomplete reassemblies", fragments_per_sec, incomplete_count)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentTiny { id, fragment_size } => {
+            format!("Tiny fragment detected - ID {} size {} bytes (evasion technique)", id, fragment_size)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::IpSpoofBogon { src_ip, bogon_type } => {
+            format!("Bogon source IP {} - {}", src_ip, bogon_type)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::IpSpoofMartian { src_ip } => {
+            format!("Martian source IP {} - impossible address", src_ip)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::LandAttack { ip, port } => {
+            format!("Land attack detected - {}:{} == {}:{}", ip, port, ip, port)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::IcmpRedirect { gateway, target } => {
+            format!("ICMP redirect attack - gateway {} redirecting to {}", gateway, target)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::IcmpSourceQuench { target } => {
+            format!("ICMP source quench to {} - deprecated attack vector", target)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpRstInjection { flow, seq_delta } => {
+            format!("TCP RST injection on {} - seq delta {}", flow, seq_delta)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpSessionHijack { flow, seq_jump } => {
+            format!("TCP session hijack on {} - sequence jump of {} bytes", flow, seq_jump)
+        }
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpSynAckReflection { target, rate } => {
+            format!("SYN-ACK reflection to {} - {:.1} SYN-ACK/sec", target, rate)
+        }
+        // 802.11 Wireless attacks (wireless feature)
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiDeauthFlood { bssid, rate, reason_code } => {
+            format!("WiFi deauth flood on {} - {:.1} deauths/sec (reason {})", bssid, rate, reason_code)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiDisassocFlood { bssid, rate } => {
+            format!("WiFi disassoc flood on {} - {:.1} disassocs/sec", bssid, rate)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiEvilTwin { ssid, legitimate_bssid, rogue_bssid } => {
+            format!("Evil twin detected for '{}' - legit {} vs rogue {}", ssid, legitimate_bssid, rogue_bssid)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiFakeAp { ssid, bssid } => {
+            format!("Fake AP detected - '{}' at {}", ssid, bssid)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiBeaconFlood { source_mac, ssid_count } => {
+            format!("Beacon flood from {} - {} unique SSIDs", source_mac, ssid_count)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiKarmaAttack { ap_mac } => {
+            format!("Karma attack detected - AP {} responding to all probes", ap_mac)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiAuthFlood { bssid, rate } => {
+            format!("WiFi auth flood on {} - {:.1} auths/sec", bssid, rate)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiProbeFlood { source_mac, rate } => {
+            format!("Probe flood from {} - {:.1} probes/sec", source_mac, rate)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiPmkidCapture { bssid, client } => {
+            format!("PMKID capture attempt - AP {} to client {}", bssid, client)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiHandshakeCapture { bssid, client } => {
+            format!("WPA handshake capture - AP {} client {}", bssid, client)
+        }
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiKrackAttack { bssid, client, msg_num } => {
+            format!("KRACK attack detected - AP {} client {} (msg {})", bssid, client, msg_num)
         }
     };
 

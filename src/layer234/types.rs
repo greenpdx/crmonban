@@ -245,6 +245,155 @@ pub enum ThreatType {
     RogueAuthenticator {
         src_mac: String,
     },
+
+    // =========================================================================
+    // Advanced Layer 3-4 Attacks (extra34 feature)
+    // =========================================================================
+
+    /// IP Fragment Overlap - Teardrop attack
+    #[cfg(feature = "extra34")]
+    FragmentOverlap {
+        id: u16,
+        offset1: u16,
+        offset2: u16,
+    },
+    /// Oversized reassembled packet - Ping of Death
+    #[cfg(feature = "extra34")]
+    FragmentOversized {
+        id: u16,
+        total_size: u32,
+    },
+    /// IP Fragment flood
+    #[cfg(feature = "extra34")]
+    FragmentFlood {
+        fragments_per_sec: f32,
+        incomplete_count: u32,
+    },
+    /// Tiny fragment - evasion technique
+    #[cfg(feature = "extra34")]
+    FragmentTiny {
+        id: u16,
+        fragment_size: u16,
+    },
+    /// IP source from bogon address space
+    #[cfg(feature = "extra34")]
+    IpSpoofBogon {
+        src_ip: String,
+        bogon_type: String,
+    },
+    /// IP source from martian address
+    #[cfg(feature = "extra34")]
+    IpSpoofMartian {
+        src_ip: String,
+    },
+    /// Land attack - src==dst, src_port==dst_port
+    #[cfg(feature = "extra34")]
+    LandAttack {
+        ip: String,
+        port: u16,
+    },
+    /// ICMP Redirect attack - route manipulation
+    #[cfg(feature = "extra34")]
+    IcmpRedirect {
+        gateway: String,
+        target: String,
+    },
+    /// ICMP Source Quench - deprecated attack vector
+    #[cfg(feature = "extra34")]
+    IcmpSourceQuench {
+        target: String,
+    },
+    /// TCP RST injection - connection termination attack
+    #[cfg(feature = "extra34")]
+    TcpRstInjection {
+        flow: String,
+        seq_delta: i64,
+    },
+    /// TCP Session Hijack - sequence number manipulation
+    #[cfg(feature = "extra34")]
+    TcpSessionHijack {
+        flow: String,
+        seq_jump: u32,
+    },
+    /// TCP SYN-ACK Reflection attack
+    #[cfg(feature = "extra34")]
+    TcpSynAckReflection {
+        target: String,
+        rate: f32,
+    },
+
+    // =========================================================================
+    // 802.11 Wireless Attacks (wireless feature)
+    // =========================================================================
+
+    /// Deauthentication flood attack
+    #[cfg(feature = "wireless")]
+    WifiDeauthFlood {
+        bssid: String,
+        rate: f32,
+        reason_code: u16,
+    },
+    /// Disassociation flood attack
+    #[cfg(feature = "wireless")]
+    WifiDisassocFlood {
+        bssid: String,
+        rate: f32,
+    },
+    /// Evil twin AP detected
+    #[cfg(feature = "wireless")]
+    WifiEvilTwin {
+        ssid: String,
+        legitimate_bssid: String,
+        rogue_bssid: String,
+    },
+    /// Fake AP detected
+    #[cfg(feature = "wireless")]
+    WifiFakeAp {
+        ssid: String,
+        bssid: String,
+    },
+    /// Beacon flood attack
+    #[cfg(feature = "wireless")]
+    WifiBeaconFlood {
+        source_mac: String,
+        ssid_count: u32,
+    },
+    /// Karma attack (AP responding to all probes)
+    #[cfg(feature = "wireless")]
+    WifiKarmaAttack {
+        ap_mac: String,
+    },
+    /// Authentication flood
+    #[cfg(feature = "wireless")]
+    WifiAuthFlood {
+        bssid: String,
+        rate: f32,
+    },
+    /// Probe flood
+    #[cfg(feature = "wireless")]
+    WifiProbeFlood {
+        source_mac: String,
+        rate: f32,
+    },
+    /// PMKID capture attempt
+    #[cfg(feature = "wireless")]
+    WifiPmkidCapture {
+        bssid: String,
+        client: String,
+    },
+    /// WPA handshake capture
+    #[cfg(feature = "wireless")]
+    WifiHandshakeCapture {
+        bssid: String,
+        client: String,
+    },
+    /// KRACK attack
+    #[cfg(feature = "wireless")]
+    WifiKrackAttack {
+        bssid: String,
+        client: String,
+        msg_num: u8,
+    },
 }
 
 impl ThreatType {
@@ -299,6 +448,54 @@ impl ThreatType {
             ThreatType::EapFlood { .. } => "EapFlood",
             #[cfg(feature = "extra234")]
             ThreatType::RogueAuthenticator { .. } => "RogueAuthenticator",
+            // Advanced Layer 3-4 attacks (extra34)
+            #[cfg(feature = "extra34")]
+            ThreatType::FragmentOverlap { .. } => "FragmentOverlap",
+            #[cfg(feature = "extra34")]
+            ThreatType::FragmentOversized { .. } => "FragmentOversized",
+            #[cfg(feature = "extra34")]
+            ThreatType::FragmentFlood { .. } => "FragmentFlood",
+            #[cfg(feature = "extra34")]
+            ThreatType::FragmentTiny { .. } => "FragmentTiny",
+            #[cfg(feature = "extra34")]
+            ThreatType::IpSpoofBogon { .. } => "IpSpoofBogon",
+            #[cfg(feature = "extra34")]
+            ThreatType::IpSpoofMartian { .. } => "IpSpoofMartian",
+            #[cfg(feature = "extra34")]
+            ThreatType::LandAttack { .. } => "LandAttack",
+            #[cfg(feature = "extra34")]
+            ThreatType::IcmpRedirect { .. } => "IcmpRedirect",
+            #[cfg(feature = "extra34")]
+            ThreatType::IcmpSourceQuench { .. } => "IcmpSourceQuench",
+            #[cfg(feature = "extra34")]
+            ThreatType::TcpRstInjection { .. } => "TcpRstInjection",
+            #[cfg(feature = "extra34")]
+            ThreatType::TcpSessionHijack { .. } => "TcpSessionHijack",
+            #[cfg(feature = "extra34")]
+            ThreatType::TcpSynAckReflection { .. } => "TcpSynAckReflection",
+            // 802.11 Wireless attacks (wireless)
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiDeauthFlood { .. } => "WifiDeauthFlood",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiDisassocFlood { .. } => "WifiDisassocFlood",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiEvilTwin { .. } => "WifiEvilTwin",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiFakeAp { .. } => "WifiFakeAp",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiBeaconFlood { .. } => "WifiBeaconFlood",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiKarmaAttack { .. } => "WifiKarmaAttack",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiAuthFlood { .. } => "WifiAuthFlood",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiProbeFlood { .. } => "WifiProbeFlood",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiPmkidCapture { .. } => "WifiPmkidCapture",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiHandshakeCapture { .. } => "WifiHandshakeCapture",
+            #[cfg(feature = "wireless")]
+            ThreatType::WifiKrackAttack { .. } => "WifiKrackAttack",
         }
     }
 }

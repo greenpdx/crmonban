@@ -131,6 +131,10 @@ pcap-file = "2.0"
 # Profiling/Benchmarking (optional for profiling feature)
 hdrhistogram = { version = "*", optional = true }
 
+# Wireless 802.11 support (optional for wireless feature)
+neli = { version = "0.6", optional = true }
+neli-wifi = { version = "0.6", optional = true }
+
 # TLS/SSL for MITM proxy
 tokio-rustls = "*"
 rustls = "*"
@@ -278,6 +282,29 @@ proto-ike = []
 # - GRE/VXLAN tunnel detection (unauthorized encapsulation)
 # - 802.1X bypass (hub bypass, rogue authenticator)
 extra234 = []
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Layer 3-4 Advanced Attack Detection (extra34)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Extends layer234 module with detection for:
+# - IP fragmentation attacks (Teardrop, Ping of Death, fragment floods)
+# - IP spoofing (bogon/martian addresses, configurable private ranges)
+# - ICMP attacks (redirect, source quench)
+# - TCP attacks (RST injection, session hijacking, SYN-ACK reflection)
+# - Land attack (src == dst)
+extra34 = []
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 802.11 Wireless Attack Detection (wireless)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Adds wireless-specific attack detection with monitor mode support:
+# - Deauth/disassoc floods
+# - Evil twin AP detection
+# - Beacon/probe floods
+# - WPA handshake capture detection
+# - KRACK attack detection
+# - Karma attack detection
+wireless = ["dep:neli", "dep:neli-wifi"]
 
 [dev-dependencies]
 tempfile = "*"

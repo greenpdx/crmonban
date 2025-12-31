@@ -54,6 +54,10 @@ pub mod weights;
 #[cfg(feature = "extra234")]
 pub mod extra234;
 
+// Extra Layer 3-4 advanced attack detection (feature-gated)
+#[cfg(feature = "extra34")]
+pub mod extra34;
+
 // Re-export types from crmonban-types (pipeline interface)
 pub use crate::types::{
     // Core pipeline types
@@ -139,6 +143,25 @@ pub use self::extra234::{
     // Feature indices
     indices as extra234_indices,
     EXTENDED_VECTOR_DIM,
+};
+
+// Re-export extra34 advanced attack detection (feature-gated)
+#[cfg(feature = "extra34")]
+pub use self::extra34::{
+    // Fragment tracking
+    FragmentTracker, FragmentState,
+    // Bogon detection
+    BogonChecker, BogonConfig,
+    // ICMP attacks
+    IcmpAttackDetector,
+    // TCP attacks
+    TcpAttackTracker,
+    // Feature indices
+    FRAG_RATE, FRAG_OVERLAP_RATIO, FRAG_INCOMPLETE_RATIO, FRAG_TINY_RATIO,
+    SPOOF_BOGON_RATIO, SPOOF_MARTIAN_RATIO, SPOOF_TTL_ANOMALY, SPOOF_LAND_DETECTED,
+    ICMP_REDIRECT_RATE, ICMP_QUENCH_RATE, ICMP_UNREACHABLE_RATE, ICMP_TTL_EXCEEDED_RATE,
+    TCP_RST_RATIO, TCP_SEQ_ANOMALY, TCP_SYNACK_REFLECTION, TCP_WINDOW_ANOMALY,
+    EXTRA34_FEATURE_COUNT, EXTRA34_FEATURE_START,
 };
 
 #[cfg(test)]
