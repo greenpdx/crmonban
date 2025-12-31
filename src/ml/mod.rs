@@ -31,6 +31,8 @@ pub mod anomaly;
 pub mod models;
 pub mod training;
 pub mod storage;
+pub mod unified;
+pub mod online;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -45,9 +47,28 @@ use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
 pub use features::{FeatureVector, FeatureExtractor, NUM_FEATURES, FEATURE_NAMES};
 pub use baseline::{Baseline, FeatureStats, BaselineSummary};
 pub use anomaly::{AnomalyScore, AnomalyCategory, AnomalyDetector};
-pub use models::{AnomalyModel, ModelConfig, IsolationForest, StatisticalModel};
+pub use models::{
+    AnomalyModel, ModelConfig, IsolationForest, StatisticalModel,
+    // Advanced models
+    AutoencoderDetector, AutoencoderConfig,
+    TemporalDetector, TemporalConfig, SequenceManager, WindowConfig,
+    GradientBoostDetector, GradientBoostConfig,
+    EnsembleDetector, EnsembleConfig, EnsembleResult, ModelWeights,
+    VotingStrategy, VoteAggregator, Calibrator, CalibrationMethod,
+};
 pub use training::{TrainingData, TrainedModel, ModelTrainer, TrainingProgress, TrainingPhase};
 pub use storage::{MLStorage, MLStorageConfig, MLDataMetadata, ML_DATA_DIR};
+pub use unified::{
+    UnifiedFeatureVector, FeatureFuser, FusionConfig, Normalizer, NormalizationMethod,
+    FeatureSources, UNIFIED_DIM, dims as unified_dims,
+};
+pub use online::{
+    OnlineLearner, OnlineConfig, OnlineState, OnlineStats, OnlineSummary,
+    ReplayBuffer, ReplayBufferConfig, ExperienceSample, SampleLabel, SamplePriority,
+    IncrementalUpdater, IncrementalConfig, UpdateStrategy, EMAUpdater,
+    FeedbackEvent, FeedbackSender, FeedbackReceiver, FeedbackStats,
+    CorrectionSource, DiscoverySource,
+};
 
 /// ML Engine configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

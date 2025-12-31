@@ -160,6 +160,37 @@ pub enum DetectionType {
     SmtpMassMailer,
     SmtpHeaderAnomaly,
 
+    // Extra34: IP/Fragment attacks
+    FragmentOverlap,
+    FragmentOversized,
+    FragmentFlood,
+    FragmentTiny,
+    IpSpoofBogon,
+    IpSpoofMartian,
+    LandAttack,
+
+    // Extra34: ICMP attacks
+    IcmpRedirect,
+    IcmpSourceQuench,
+
+    // Extra34: TCP session attacks
+    TcpRstInjection,
+    TcpSessionHijack,
+    TcpSynAckReflection,
+
+    // Wireless attacks
+    WifiDeauthFlood,
+    WifiDisassocFlood,
+    WifiEvilTwin,
+    WifiFakeAp,
+    WifiBeaconFlood,
+    WifiKarmaAttack,
+    WifiAuthFlood,
+    WifiProbeFlood,
+    WifiPmkidCapture,
+    WifiHandshakeCapture,
+    WifiKrackAttack,
+
     // Malware
     Malware,
     MalwareDownload,
@@ -256,6 +287,33 @@ impl std::fmt::Display for DetectionType {
             DetectionType::SmtpSuspiciousSender => write!(f, "smtp_suspicious_sender"),
             DetectionType::SmtpMassMailer => write!(f, "smtp_mass_mailer"),
             DetectionType::SmtpHeaderAnomaly => write!(f, "smtp_header_anomaly"),
+            // Extra34: IP/Fragment attacks
+            DetectionType::FragmentOverlap => write!(f, "fragment_overlap"),
+            DetectionType::FragmentOversized => write!(f, "fragment_oversized"),
+            DetectionType::FragmentFlood => write!(f, "fragment_flood"),
+            DetectionType::FragmentTiny => write!(f, "fragment_tiny"),
+            DetectionType::IpSpoofBogon => write!(f, "ip_spoof_bogon"),
+            DetectionType::IpSpoofMartian => write!(f, "ip_spoof_martian"),
+            DetectionType::LandAttack => write!(f, "land_attack"),
+            // Extra34: ICMP attacks
+            DetectionType::IcmpRedirect => write!(f, "icmp_redirect"),
+            DetectionType::IcmpSourceQuench => write!(f, "icmp_source_quench"),
+            // Extra34: TCP session attacks
+            DetectionType::TcpRstInjection => write!(f, "tcp_rst_injection"),
+            DetectionType::TcpSessionHijack => write!(f, "tcp_session_hijack"),
+            DetectionType::TcpSynAckReflection => write!(f, "tcp_synack_reflection"),
+            // Wireless attacks
+            DetectionType::WifiDeauthFlood => write!(f, "wifi_deauth_flood"),
+            DetectionType::WifiDisassocFlood => write!(f, "wifi_disassoc_flood"),
+            DetectionType::WifiEvilTwin => write!(f, "wifi_evil_twin"),
+            DetectionType::WifiFakeAp => write!(f, "wifi_fake_ap"),
+            DetectionType::WifiBeaconFlood => write!(f, "wifi_beacon_flood"),
+            DetectionType::WifiKarmaAttack => write!(f, "wifi_karma_attack"),
+            DetectionType::WifiAuthFlood => write!(f, "wifi_auth_flood"),
+            DetectionType::WifiProbeFlood => write!(f, "wifi_probe_flood"),
+            DetectionType::WifiPmkidCapture => write!(f, "wifi_pmkid_capture"),
+            DetectionType::WifiHandshakeCapture => write!(f, "wifi_handshake_capture"),
+            DetectionType::WifiKrackAttack => write!(f, "wifi_krack_attack"),
             DetectionType::Malware => write!(f, "malware"),
             DetectionType::MalwareDownload => write!(f, "malware_download"),
             DetectionType::MalwareCallback => write!(f, "malware_callback"),

@@ -52,6 +52,15 @@ async-trait = { version = "*", optional = true }
 # ML/Anomaly detection dependencies (optional)
 rand = { version = "*", optional = true }
 
+# Advanced ML dependencies (optional) - neural networks, gradient boosting
+burn = { version = "0.16", default-features = false, features = ["ndarray", "autodiff", "train"], optional = true }
+burn-ndarray = { version = "0.16", optional = true }
+ordered-float = { version = "4.2", optional = true }
+
+# LLM integration dependencies (optional) - local-first AI analysis
+tiktoken-rs = { version = "0.5", optional = true }
+base64 = { version = "0.22", optional = true }
+
 # Correlation and packet engine dependencies (optional)
 crossbeam-channel = { version = "*", optional = true }
 num_cpus = { version = "*", optional = true }
@@ -198,6 +207,12 @@ protocols = ["dep:md5", "dep:async-trait"]
 threat-intel = ["dep:bincode", "dep:async-trait", "dep:parking_lot"]
 # ML/Anomaly detection (Stage 6)
 ml-detection = ["dep:rand", "dep:bincode", "dep:parking_lot", "flow-tracking"]
+# Advanced ML models (autoencoder, LSTM, ensemble) - requires burn neural network framework
+ml-advanced = ["ml-detection", "dep:burn", "dep:burn-ndarray", "dep:ordered-float"]
+# LLM integration for alert triage and threat analysis (local-first with Ollama/llama.cpp)
+llm = ["dep:tiktoken-rs", "dep:base64", "dep:async-trait"]
+# LLM with cloud provider fallback (OpenAI, Anthropic) - requires llm feature
+llm-cloud = ["llm"]
 # Alert Correlation (Stage 7)
 correlation = ["dep:parking_lot", "flow-tracking"]
 # Packet Engine (Stage 8)

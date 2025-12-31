@@ -63,3 +63,10 @@ pub use correlation::{CorrelationEngine, CorrelationResult, MatchType};
 pub use analyzer::{FeedbackAnalyzer, FeedbackConfig, FeedbackReport, FeedbackSummary, ModuleStats, SafeBounds};
 pub use adjuster::{ParameterAdjuster, AdjusterConfig, AdjustmentStrategy, ConfigChange, AdjustmentDirection};
 pub use daemon::{FeedbackDaemon, DaemonConfig, DaemonConfigBuilder, ChangeRecord};
+
+// Re-export ML online learning types for integration
+pub use crate::ml::online::{
+    FeedbackEvent as MLFeedbackEvent,
+    FeedbackSender as MLFeedbackSender,
+    CorrectionSource, DiscoverySource,
+};

@@ -431,6 +431,33 @@ impl CorrelationEngine {
             DetectionType::SmtpSuspiciousSender => "SmtpSuspiciousSender",
             DetectionType::SmtpMassMailer => "SmtpMassMailer",
             DetectionType::SmtpHeaderAnomaly => "SmtpHeaderAnomaly",
+            // Extra34: IP/Fragment attacks
+            DetectionType::FragmentOverlap => "FragmentOverlap",
+            DetectionType::FragmentOversized => "FragmentOversized",
+            DetectionType::FragmentFlood => "FragmentFlood",
+            DetectionType::FragmentTiny => "FragmentTiny",
+            DetectionType::IpSpoofBogon => "IpSpoofBogon",
+            DetectionType::IpSpoofMartian => "IpSpoofMartian",
+            DetectionType::LandAttack => "LandAttack",
+            // Extra34: ICMP attacks
+            DetectionType::IcmpRedirect => "IcmpRedirect",
+            DetectionType::IcmpSourceQuench => "IcmpSourceQuench",
+            // Extra34: TCP session attacks
+            DetectionType::TcpRstInjection => "TcpRstInjection",
+            DetectionType::TcpSessionHijack => "TcpSessionHijack",
+            DetectionType::TcpSynAckReflection => "TcpSynAckReflection",
+            // Wireless attacks
+            DetectionType::WifiDeauthFlood => "WifiDeauthFlood",
+            DetectionType::WifiDisassocFlood => "WifiDisassocFlood",
+            DetectionType::WifiEvilTwin => "WifiEvilTwin",
+            DetectionType::WifiFakeAp => "WifiFakeAp",
+            DetectionType::WifiBeaconFlood => "WifiBeaconFlood",
+            DetectionType::WifiKarmaAttack => "WifiKarmaAttack",
+            DetectionType::WifiAuthFlood => "WifiAuthFlood",
+            DetectionType::WifiProbeFlood => "WifiProbeFlood",
+            DetectionType::WifiPmkidCapture => "WifiPmkidCapture",
+            DetectionType::WifiHandshakeCapture => "WifiHandshakeCapture",
+            DetectionType::WifiKrackAttack => "WifiKrackAttack",
             DetectionType::Custom(_) => "Custom",
         };
         type_strs.iter().any(|t| type_name.contains(t.as_str()))
@@ -765,6 +792,169 @@ fn default_correlation_rules() -> Vec<CorrelationRule> {
             elevate_severity: true,
             mitre_tactics: vec!["TA0010".to_string()], // Exfiltration
             tags: vec!["exfil".to_string()],
+        },
+        // New Extra34 and Wireless rules
+        CorrelationRule {
+            name: "fragment_evasion".to_string(),
+            description: Some("Fragment-based IDS evasion attempt".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec!["FragmentOverlap".to_string(), "FragmentTiny".to_string()],
+                threshold: 3,
+                group_by: Some("src_ip".to_string()),
+            },
+            window_seconds: 60,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0005".to_string()], // Defense Evasion
+            tags: vec!["evasion".to_string(), "fragment".to_string()],
+        },
+        CorrelationRule {
+            name: "fragment_dos".to_string(),
+            description: Some("Fragment-based DoS attack".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec!["FragmentOversized".to_string(), "FragmentFlood".to_string()],
+                threshold: 5,
+                group_by: Some("dst_ip".to_string()),
+            },
+            window_seconds: 30,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0040".to_string()], // Impact
+            tags: vec!["dos".to_string(), "fragment".to_string()],
+        },
+        CorrelationRule {
+            name: "ip_spoofing_campaign".to_string(),
+            description: Some("IP spoofing campaign detected".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec!["IpSpoofBogon".to_string(), "IpSpoofMartian".to_string()],
+                threshold: 10,
+                group_by: Some("dst_ip".to_string()),
+            },
+            window_seconds: 300,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0005".to_string()], // Defense Evasion
+            tags: vec!["spoofing".to_string()],
+        },
+        CorrelationRule {
+            name: "tcp_session_attack".to_string(),
+            description: Some("TCP session manipulation attack".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec!["TcpRstInjection".to_string(), "TcpSessionHijack".to_string()],
+                threshold: 3,
+                group_by: Some("src_ip".to_string()),
+            },
+            window_seconds: 120,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0008".to_string()], // Lateral Movement
+            tags: vec!["session".to_string(), "hijack".to_string()],
+        },
+        CorrelationRule {
+            name: "reflection_ddos".to_string(),
+            description: Some("Reflection/amplification DDoS attack".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec!["TcpSynAckReflection".to_string(), "DnsAmplification".to_string()],
+                threshold: 50,
+                group_by: Some("dst_ip".to_string()),
+            },
+            window_seconds: 60,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0040".to_string()], // Impact
+            tags: vec!["ddos".to_string(), "reflection".to_string()],
+        },
+        CorrelationRule {
+            name: "wifi_denial_of_service".to_string(),
+            description: Some("WiFi denial of service attack".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec![
+                    "WifiDeauthFlood".to_string(),
+                    "WifiDisassocFlood".to_string(),
+                    "WifiBeaconFlood".to_string(),
+                    "WifiAuthFlood".to_string(),
+                ],
+                threshold: 5,
+                group_by: Some("src_ip".to_string()),
+            },
+            window_seconds: 30,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0040".to_string()], // Impact
+            tags: vec!["wifi".to_string(), "dos".to_string()],
+        },
+        CorrelationRule {
+            name: "evil_twin_campaign".to_string(),
+            description: Some("Evil twin or rogue AP campaign".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec!["WifiEvilTwin".to_string(), "WifiFakeAp".to_string()],
+                threshold: 2,
+                group_by: Some("src_ip".to_string()),
+            },
+            window_seconds: 600,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0006".to_string()], // Credential Access
+            tags: vec!["wifi".to_string(), "rogue_ap".to_string()],
+        },
+        CorrelationRule {
+            name: "wifi_credential_harvest".to_string(),
+            description: Some("WiFi credential harvesting activity".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec![
+                    "WifiPmkidCapture".to_string(),
+                    "WifiHandshakeCapture".to_string(),
+                    "WifiKarmaAttack".to_string(),
+                ],
+                threshold: 3,
+                group_by: Some("src_ip".to_string()),
+            },
+            window_seconds: 300,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0006".to_string()], // Credential Access
+            tags: vec!["wifi".to_string(), "credential".to_string()],
+        },
+        CorrelationRule {
+            name: "krack_attack".to_string(),
+            description: Some("KRACK (Key Reinstallation Attack) detected".to_string()),
+            rule_type: RuleType::Count {
+                event_types: vec!["WifiKrackAttack".to_string()],
+                threshold: 2,
+                group_by: Some("src_ip".to_string()),
+            },
+            window_seconds: 60,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0001".to_string()], // Initial Access
+            tags: vec!["wifi".to_string(), "krack".to_string()],
+        },
+        CorrelationRule {
+            name: "scan_to_wireless_attack".to_string(),
+            description: Some("Probe flood followed by wireless attack".to_string()),
+            rule_type: RuleType::Sequence {
+                stages: vec!["WifiProbeFlood".to_string(), "WifiEvilTwin".to_string()],
+                max_gap_seconds: 600,
+            },
+            window_seconds: 900,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0043".to_string(), "TA0006".to_string()], // Recon, Credential Access
+            tags: vec!["wifi".to_string(), "attack_chain".to_string()],
+        },
+        CorrelationRule {
+            name: "evasion_to_attack".to_string(),
+            description: Some("Fragment evasion followed by exploit attempt".to_string()),
+            rule_type: RuleType::Sequence {
+                stages: vec!["FragmentTiny".to_string(), "Exploit".to_string()],
+                max_gap_seconds: 300,
+            },
+            window_seconds: 600,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0005".to_string(), "TA0001".to_string()], // Defense Evasion, Initial Access
+            tags: vec!["evasion".to_string(), "attack_chain".to_string()],
+        },
+        CorrelationRule {
+            name: "icmp_redirect_hijack".to_string(),
+            description: Some("ICMP redirect followed by session hijack".to_string()),
+            rule_type: RuleType::Sequence {
+                stages: vec!["IcmpRedirect".to_string(), "TcpSessionHijack".to_string()],
+                max_gap_seconds: 120,
+            },
+            window_seconds: 300,
+            elevate_severity: true,
+            mitre_tactics: vec!["TA0008".to_string()], // Lateral Movement
+            tags: vec!["mitm".to_string(), "attack_chain".to_string()],
         },
     ]
 }

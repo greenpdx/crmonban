@@ -50,6 +50,10 @@ pub mod threat_intel;
 #[cfg(feature = "ml-detection")]
 pub mod ml;
 
+// LLM Integration (optional)
+#[cfg(feature = "llm")]
+pub mod llm;
+
 // NIDS Stage 7: Alert Correlation
 #[cfg(feature = "correlation")]
 pub mod correlation;

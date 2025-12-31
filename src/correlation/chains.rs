@@ -195,6 +195,40 @@ impl MitreTactic {
             DetectionType::SmtpSuspiciousSender => Some(MitreTactic::InitialAccess),
             DetectionType::SmtpMassMailer => Some(MitreTactic::Impact),
             DetectionType::SmtpHeaderAnomaly => Some(MitreTactic::DefenseEvasion),
+            // Extra34: IP/Fragment attacks
+            DetectionType::FragmentOverlap | DetectionType::FragmentTiny => {
+                Some(MitreTactic::DefenseEvasion) // IDS evasion
+            }
+            DetectionType::FragmentOversized | DetectionType::FragmentFlood => {
+                Some(MitreTactic::Impact) // DoS attacks
+            }
+            DetectionType::IpSpoofBogon | DetectionType::IpSpoofMartian => {
+                Some(MitreTactic::DefenseEvasion) // Source hiding
+            }
+            DetectionType::LandAttack => Some(MitreTactic::Impact), // DoS
+            // Extra34: ICMP attacks
+            DetectionType::IcmpRedirect => Some(MitreTactic::LateralMovement), // MITM (T1557)
+            DetectionType::IcmpSourceQuench => Some(MitreTactic::Impact), // Deprecated DoS vector
+            // Extra34: TCP session attacks
+            DetectionType::TcpRstInjection => Some(MitreTactic::Impact), // Session termination
+            DetectionType::TcpSessionHijack => Some(MitreTactic::LateralMovement), // Session takeover
+            DetectionType::TcpSynAckReflection => Some(MitreTactic::Impact), // DDoS amplification
+            // Wireless attacks: DoS
+            DetectionType::WifiDeauthFlood | DetectionType::WifiDisassocFlood |
+            DetectionType::WifiBeaconFlood | DetectionType::WifiAuthFlood |
+            DetectionType::WifiProbeFlood => {
+                Some(MitreTactic::Impact) // WiFi DoS
+            }
+            // Wireless attacks: Credential Access
+            DetectionType::WifiEvilTwin | DetectionType::WifiFakeAp |
+            DetectionType::WifiKarmaAttack => {
+                Some(MitreTactic::CredentialAccess) // Rogue AP (T1557.004)
+            }
+            DetectionType::WifiPmkidCapture | DetectionType::WifiHandshakeCapture => {
+                Some(MitreTactic::CredentialAccess) // Credential theft
+            }
+            // Wireless attacks: Initial Access
+            DetectionType::WifiKrackAttack => Some(MitreTactic::InitialAccess), // Protocol exploit
             // Signatures
             DetectionType::Signature => Some(MitreTactic::InitialAccess),
             // Phishing / Spam
@@ -490,6 +524,59 @@ fn default_patterns() -> Vec<ChainPattern> {
             ],
             min_stages: 1,
             description: "Command and control communication detected".to_string(),
+        },
+        // New patterns for Extra34 and Wireless
+        ChainPattern {
+            name: "Wireless Network Compromise".to_string(),
+            required_tactics: vec![
+                MitreTactic::CredentialAccess,
+            ],
+            optional_tactics: vec![
+                MitreTactic::Reconnaissance,
+                MitreTactic::LateralMovement,
+                MitreTactic::Exfiltration,
+            ],
+            min_stages: 1,
+            description: "WiFi credential theft (evil twin, PMKID, handshake capture) potentially leading to network access".to_string(),
+        },
+        ChainPattern {
+            name: "Network Infrastructure Attack".to_string(),
+            required_tactics: vec![
+                MitreTactic::DefenseEvasion,
+                MitreTactic::LateralMovement,
+            ],
+            optional_tactics: vec![
+                MitreTactic::CredentialAccess,
+                MitreTactic::Collection,
+            ],
+            min_stages: 2,
+            description: "Defense evasion (fragment/IP spoofing) followed by lateral movement (ICMP redirect, session hijack)".to_string(),
+        },
+        ChainPattern {
+            name: "Multi-Layer DoS Campaign".to_string(),
+            required_tactics: vec![
+                MitreTactic::Impact,
+            ],
+            optional_tactics: vec![
+                MitreTactic::DefenseEvasion,
+                MitreTactic::Reconnaissance,
+            ],
+            min_stages: 1,
+            description: "Impact events across multiple layers (fragment flood, WiFi DoS, reflection attacks)".to_string(),
+        },
+        ChainPattern {
+            name: "WiFi-to-Wire Pivot".to_string(),
+            required_tactics: vec![
+                MitreTactic::InitialAccess,
+                MitreTactic::LateralMovement,
+            ],
+            optional_tactics: vec![
+                MitreTactic::CredentialAccess,
+                MitreTactic::CommandAndControl,
+                MitreTactic::Exfiltration,
+            ],
+            min_stages: 2,
+            description: "Initial access via wireless (KRACK) followed by wired network lateral movement".to_string(),
         },
     ]
 }

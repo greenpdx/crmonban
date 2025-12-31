@@ -1,0 +1,193 @@
+# ============================================================================
+# Infostealer & RAT Detection Rules - December 2025 Threat Intelligence
+# ============================================================================
+# Targets: ShadowStealth, AuraStealer, HyenaStealer, Z-STEAL, G-700 RAT
+# Author: crmonban
+# Date: 2025-12-31
+# Reference: Darkweb forum monitoring - December 2025
+# ============================================================================
+
+# ============================================================================
+# SECTION 1: DISCORD WEBHOOK EXFILTRATION
+# ============================================================================
+# Discord webhooks are heavily abused by infostealers for data exfiltration
+# ShadowStealth, AuraStealer, Z-STEAL commonly use this method
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Discord Webhook Exfiltration Attempt"; flow:established,to_server; http.method; content:"POST"; http.uri; content:"/api/webhooks/"; http.host; content:"discord.com"; classtype:trojan-activity; sid:2025120001; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, deployment Perimeter, confidence High, signature_severity Major, tag Exfiltration, mitre_tactic_id TA0010, mitre_technique_id T1567.002;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Discord Webhook with Embedded File"; flow:established,to_server; http.method; content:"POST"; http.uri; content:"/api/webhooks/"; http.host; content:"discord.com"; http.content_type; content:"multipart/form-data"; classtype:trojan-activity; sid:2025120002; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, tag Exfiltration;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Discord Webhook JSON Payload with Embeds"; flow:established,to_server; http.method; content:"POST"; http.uri; content:"/api/webhooks/"; http.request_body; content:"embeds"; http.request_body; content:"fields"; classtype:trojan-activity; sid:2025120003; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Discord Webhook with Password/Cookie Data Indicators"; flow:established,to_server; http.method; content:"POST"; http.uri; content:"/api/webhooks/"; http.request_body; pcre:"/password|cookie|token|wallet|crypto|login|credential/i"; classtype:trojan-activity; sid:2025120004; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical, tag Credential_Theft;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Discord Webhook Crypto Wallet Exfil"; flow:established,to_server; http.method; content:"POST"; http.uri; content:"/api/webhooks/"; http.request_body; pcre:"/metamask|phantom|exodus|atomic|binance|ronin|coinbase|trust.?wallet|electrum|ledger/i"; classtype:trojan-activity; sid:2025120005; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical, tag Crypto_Theft;)
+
+# Discord CDN abuse for malware hosting
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"MALWARE Discord CDN Executable Download"; flow:established,to_server; http.method; content:"GET"; http.host; content:"cdn.discordapp.com"; http.uri; pcre:"/\.(exe|scr|bat|cmd|ps1|vbs|js|hta|msi|dll)(\?|$)/i"; classtype:trojan-activity; sid:2025120006; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, tag Payload_Delivery;)
+
+# ============================================================================
+# SECTION 2: TELEGRAM BOT API ABUSE
+# ============================================================================
+# G-700 RAT and other stealers use Telegram for C2 and exfiltration
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Telegram Bot API Exfiltration"; flow:established,to_server; http.method; content:"POST"; http.host; content:"api.telegram.org"; http.uri; content:"/bot"; http.uri; content:"/sendDocument"; classtype:trojan-activity; sid:2025120010; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, mitre_technique_id T1567.002;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Telegram Bot sendMessage with Stolen Data"; flow:established,to_server; http.host; content:"api.telegram.org"; http.uri; content:"/bot"; http.uri; content:"/sendMessage"; http.request_body; pcre:"/password|token|cookie|wallet|card|cvv|credit|ssn/i"; classtype:trojan-activity; sid:2025120011; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"RAT Telegram Bot getUpdates C2 Check-in"; flow:established,to_server; http.host; content:"api.telegram.org"; http.uri; content:"/bot"; http.uri; content:"/getUpdates"; classtype:trojan-activity; sid:2025120012; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium, tag C2;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Telegram Bot Photo Exfil (Screenshot)"; flow:established,to_server; http.host; content:"api.telegram.org"; http.uri; content:"/bot"; http.uri; content:"/sendPhoto"; classtype:trojan-activity; sid:2025120013; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, tag Screenshot_Exfil;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"RAT Telegram Bot File Upload"; flow:established,to_server; http.method; content:"POST"; http.host; content:"api.telegram.org"; http.uri; pcre:"/\/bot[0-9]+:[A-Za-z0-9_-]+\/send(Document|Photo|Video|Audio)/"; classtype:trojan-activity; sid:2025120014; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+# ============================================================================
+# SECTION 3: INFOSTEALER USER-AGENT PATTERNS
+# ============================================================================
+# Many stealers use suspicious or default User-Agents
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Empty User-Agent with POST"; flow:established,to_server; http.method; content:"POST"; http.user_agent; isdataat:!1; classtype:trojan-activity; sid:2025120020; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Python Requests Default UA (Scripted Exfil)"; flow:established,to_server; http.user_agent; content:"python-requests/"; http.method; content:"POST"; classtype:trojan-activity; sid:2025120021; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Low;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Go-http-client User-Agent (HyenaStealer Indicator)"; flow:established,to_server; http.user_agent; content:"Go-http-client/"; http.method; content:"POST"; classtype:trojan-activity; sid:2025120022; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium, tag HyenaStealer;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER curl User-Agent with Suspicious POST"; flow:established,to_server; http.user_agent; content:"curl/"; http.method; content:"POST"; http.request_body; isdataat:500; classtype:trojan-activity; sid:2025120023; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Low;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Suspicious Short User-Agent"; flow:established,to_server; http.user_agent; pcre:"/^.{1,15}$/"; http.method; content:"POST"; classtype:trojan-activity; sid:2025120024; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Low;)
+
+# ============================================================================
+# SECTION 4: BROWSER DATA EXFILTRATION PATTERNS
+# ============================================================================
+# Detecting exfiltration of browser-specific stolen data
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Browser Profile Data Keywords"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/Login\s*Data|Web\s*Data|Cookies|Local\s*State|Network\\\\Cookies/i"; classtype:trojan-activity; sid:2025120030; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical, tag Browser_Theft;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Chrome Profile Paths in Exfil"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/Google\\\\Chrome\\\\User\s*Data|AppData\\\\Local\\\\Google/i"; classtype:trojan-activity; sid:2025120031; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Firefox Profile Data Exfil"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/logins\.json|key[34]\.db|cookies\.sqlite|places\.sqlite/i"; classtype:trojan-activity; sid:2025120032; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Multiple Browser Names in Request"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/(chrome|firefox|edge|brave|opera|vivaldi).*?(chrome|firefox|edge|brave|opera|vivaldi)/i"; classtype:trojan-activity; sid:2025120033; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+# ============================================================================
+# SECTION 5: CRYPTO WALLET THEFT INDICATORS
+# ============================================================================
+# ShadowStealth claims 40+ wallet support
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Crypto Wallet Extension IDs"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/nkbihfbeogaeaoehlefnkodbefgpgknn|ejbalbakoplchlghecdalmeeeajnimhm|ibnejdfjmmkpcnlpebklmnkoeoihofec|fhbohimaelbohpjbbldcngcnapndodjp/i"; classtype:trojan-activity; sid:2025120040; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical, tag Crypto_Theft;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Wallet Seed Phrase Keywords"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/seed.?phrase|mnemonic|recovery.?phrase|secret.?phrase|private.?key/i"; classtype:trojan-activity; sid:2025120041; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Wallet Names in Exfil"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/metamask|phantom|exodus|atomic|electrum|trezor|ledger|coinbase|binance|trust.?wallet|ronin|keplr/i"; http.request_body; pcre:"/password|balance|address|wallet/i"; classtype:trojan-activity; sid:2025120042; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+# ============================================================================
+# SECTION 6: GAMING PLATFORM SESSION THEFT
+# ============================================================================
+# ShadowStealth targets Steam, Epic, Riot, Battle.net
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Steam Session Data Keywords"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/ssfn|loginusers\.vdf|config\.vdf|steam.*?sentry/i"; classtype:trojan-activity; sid:2025120050; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, tag Gaming_Theft;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Epic Games Session Data"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/EpicGamesLauncher|\.egstore|GameUserSettings/i"; classtype:trojan-activity; sid:2025120051; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Riot Games Session Data"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/RiotClientPrivateSettings|RiotGamesPrivateSettings/i"; classtype:trojan-activity; sid:2025120052; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Battle.net Session Data"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/Battle\.net|Blizzard.*?Agent/i"; classtype:trojan-activity; sid:2025120053; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+# ============================================================================
+# SECTION 7: DISCORD TOKEN THEFT
+# ============================================================================
+# ShadowStealth specifically targets Discord tokens
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Discord Token Pattern in Exfil"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/[MN][A-Za-z\d]{23,}\.[\w-]{6}\.[\w-]{27,}/"; classtype:trojan-activity; sid:2025120060; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical, tag Discord_Token;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Discord leveldb Path Reference"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/discord.*?leveldb|Local\s*Storage\\\\leveldb/i"; classtype:trojan-activity; sid:2025120061; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Discord Token Validation Check"; flow:established,to_server; http.host; content:"discord.com"; http.uri; content:"/api/"; http.header; pcre:"/Authorization:\s*[MN][A-Za-z\d]{23,}\.[A-Za-z\d_-]{6}\.[A-Za-z\d_-]{27,}/"; classtype:trojan-activity; sid:2025120062; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+# ============================================================================
+# SECTION 8: SYSTEM RECONNAISSANCE EXFIL
+# ============================================================================
+# Stealers collect and exfil system information
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER System Info Exfiltration Keywords"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/HWID|MachineGuid|ComputerName|UserName.*?OS.*?CPU|systeminfo/i"; classtype:trojan-activity; sid:2025120070; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium, tag Recon_Exfil;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Screenshot Base64 Exfil"; flow:established,to_server; http.method; content:"POST"; http.request_body; content:"iVBORw0KGgo"; http.request_body; isdataat:1000; classtype:trojan-activity; sid:2025120071; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, tag Screenshot;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER WiFi Password Keywords"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/netsh.*?wlan|wifi.*?password|wireless.*?key|SSID.*?Key/i"; classtype:trojan-activity; sid:2025120072; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Clipboard Data Exfil Keywords"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/clipboard|copied.?text|GetClipboard/i"; http.request_body; isdataat:100; classtype:trojan-activity; sid:2025120073; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium;)
+
+# ============================================================================
+# SECTION 9: G-700 ANDROID RAT SPECIFIC
+# ============================================================================
+# Banking RAT indicators for Android
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"RAT Android Banking Overlay Keywords"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/accessibility|overlay|inject|banking|sms|otp|screen.?lock/i"; http.user_agent; pcre:"/Android|Dalvik/i"; classtype:trojan-activity; sid:2025120080; rev:1; metadata:attack_target Mobile, created_at 2025_12_31, signature_severity Critical, tag Banking_RAT;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"RAT Android Device Info Exfil"; flow:established,to_server; http.method; content:"POST"; http.user_agent; pcre:"/Android|Dalvik/"; http.request_body; pcre:"/IMEI|device_id|android_id|phone_number|sim_serial/i"; classtype:trojan-activity; sid:2025120081; rev:1; metadata:attack_target Mobile, created_at 2025_12_31, signature_severity Major;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"RAT Android SMS Exfiltration"; flow:established,to_server; http.method; content:"POST"; http.user_agent; pcre:"/Android|Dalvik/"; http.request_body; pcre:"/sms_body|message_body|inbox|sent_messages/i"; classtype:trojan-activity; sid:2025120082; rev:1; metadata:attack_target Mobile, created_at 2025_12_31, signature_severity Critical;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"RAT Android Contacts Exfiltration"; flow:established,to_server; http.method; content:"POST"; http.user_agent; pcre:"/Android|Dalvik/"; http.request_body; pcre:"/contacts|phone_book|contact_list/i"; http.request_body; isdataat:500; classtype:trojan-activity; sid:2025120083; rev:1; metadata:attack_target Mobile, created_at 2025_12_31, signature_severity Major;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"RAT Android Keylogger Data"; flow:established,to_server; http.method; content:"POST"; http.user_agent; pcre:"/Android|Dalvik/"; http.request_body; pcre:"/keylog|keystroke|typed_text|input_log/i"; classtype:trojan-activity; sid:2025120084; rev:1; metadata:attack_target Mobile, created_at 2025_12_31, signature_severity Critical;)
+
+# ============================================================================
+# SECTION 10: GENERIC STEALER C2 PATTERNS
+# ============================================================================
+# Common C2 behaviors across stealer families
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Gate.php C2 Endpoint"; flow:established,to_server; http.method; content:"POST"; http.uri; pcre:"/\/gate\.php|\/panel\/gate|\/stealer\/gate|\/collect/i"; classtype:trojan-activity; sid:2025120090; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, tag C2;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Panel Check-in Pattern"; flow:established,to_server; http.method; content:"POST"; http.uri; pcre:"/\/api\/(log|submit|upload|send|report|check)/i"; http.request_body; pcre:"/hwid|build_id|bot_id/i"; classtype:trojan-activity; sid:2025120091; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER ZIP/Archive Exfiltration"; flow:established,to_server; http.method; content:"POST"; http.content_type; content:"multipart/form-data"; file_data; content:"PK"; depth:2; file_data; isdataat:10000; classtype:trojan-activity; sid:2025120092; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, tag Archive_Exfil;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER JSON Structured Exfil with Sensitive Fields"; flow:established,to_server; http.method; content:"POST"; http.content_type; content:"application/json"; http.request_body; pcre:"/\"(passwords|cookies|cards|wallets|tokens)\":\s*\[/"; classtype:trojan-activity; sid:2025120093; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+# ============================================================================
+# SECTION 11: KNOWN STEALER PANEL ENDPOINTS
+# ============================================================================
+# Common panel paths used by stealer builders
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Common Panel Path /logs"; flow:established,to_server; http.uri; pcre:"/\/(logs|log|l0gs|logsend|sendlog)/i"; http.method; content:"POST"; classtype:trojan-activity; sid:2025120100; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Receiver Script Pattern"; flow:established,to_server; http.uri; pcre:"/\/(receiver|receive|recv|handler|grab|grabber)\.php/i"; http.method; content:"POST"; classtype:trojan-activity; sid:2025120101; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major;)
+
+# ============================================================================
+# SECTION 12: TLS/SSL ANOMALIES FOR STEALER TRAFFIC
+# ============================================================================
+# Detect suspicious TLS patterns common in malware
+
+alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Self-Signed Cert to Non-Standard Port"; flow:established,to_server; tls.cert_subject; content:"CN=localhost"; tls.sni; pcre:"/^(?!localhost)/"; classtype:trojan-activity; sid:2025120110; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium;)
+
+alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Suspicious JA3 Hash - Go Malware"; flow:established,to_server; ja3.hash; content:"473cd7cb9faa642487833865d516e578"; classtype:trojan-activity; sid:2025120111; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium, tag HyenaStealer;)
+
+# ============================================================================
+# SECTION 13: DNS INDICATORS
+# ============================================================================
+# Suspicious DNS patterns for stealer infrastructure
+
+alert dns $HOME_NET any -> any any (msg:"STEALER Suspicious DGA-like Domain Query"; flow:to_server; dns.query; pcre:"/^[a-z0-9]{15,}\.(?:xyz|top|tk|ml|ga|cf|gq|pw|cc|ws)$/i"; classtype:trojan-activity; sid:2025120120; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium, tag DGA;)
+
+alert dns $HOME_NET any -> any any (msg:"STEALER IP Logger Service Query"; flow:to_server; dns.query; pcre:"/grabify|iplogger|blasze|ps3cfw|urlz\.fr|cutt\.ly.*log/i"; classtype:trojan-activity; sid:2025120121; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium;)
+
+# ============================================================================
+# SECTION 14: FILE GRABBER PATTERNS
+# ============================================================================
+# ShadowStealth includes file grabber functionality
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER File Grabber Path Patterns"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/Desktop\\\\|Documents\\\\|Downloads\\\\.*?\.(txt|doc|pdf|key|wallet|rdp)/i"; classtype:trojan-activity; sid:2025120130; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Major, tag File_Grabber;)
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Sensitive File Extensions in Exfil"; flow:established,to_server; http.method; content:"POST"; http.request_body; pcre:"/\.(kdbx|key|pem|p12|pfx|rdp|ovpn|ssh|gpg)/i"; classtype:trojan-activity; sid:2025120131; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Critical;)
+
+# ============================================================================
+# SECTION 15: RATE-BASED DETECTION
+# ============================================================================
+# Detect burst exfiltration patterns
+
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"STEALER Rapid POST Burst to Same Host"; flow:established,to_server; http.method; content:"POST"; threshold:type both, track by_src, count 10, seconds 30; classtype:trojan-activity; sid:2025120140; rev:1; metadata:attack_target Client_Endpoint, created_at 2025_12_31, signature_severity Medium, tag Burst_Exfil;)
+
+# ============================================================================
+# END OF RULES
+# ============================================================================

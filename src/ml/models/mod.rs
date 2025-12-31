@@ -1,12 +1,31 @@
 //! ML Models for anomaly detection
 //!
 //! Provides various model implementations for detecting anomalies.
+//!
+//! # Available Models
+//! - **Statistical**: Z-score and IQR-based anomaly detection
+//! - **Isolation Forest**: Tree-based anomaly isolation
+//! - **Autoencoder**: Reconstruction error-based detection (requires ml-advanced feature)
+//! - **Temporal/LSTM**: Sequence-based pattern detection
+//! - **Gradient Boost**: Decision tree-based classification
+//! - **Ensemble**: Weighted combination of all models
 
 pub mod isolation_forest;
 pub mod statistical;
+pub mod autoencoder;
+pub mod temporal;
+pub mod gradient_boost;
+pub mod ensemble;
 
 pub use isolation_forest::IsolationForest;
 pub use statistical::StatisticalModel;
+pub use autoencoder::{AutoencoderDetector, AutoencoderConfig};
+pub use temporal::{TemporalDetector, TemporalConfig, SequenceManager, WindowConfig};
+pub use gradient_boost::{GradientBoostDetector, GradientBoostConfig};
+pub use ensemble::{
+    EnsembleDetector, EnsembleConfig, EnsembleResult, ModelWeights,
+    VotingStrategy, VoteAggregator, Calibrator, CalibrationMethod,
+};
 
 use serde::{Deserialize, Serialize};
 
