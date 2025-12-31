@@ -398,8 +398,10 @@ mod tests {
         // Create a matching detection event
         let event = DetectionEvent::new(
             DetectionType::PortScan,
+            Severity::Medium,
             attacker,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "Port scan detected".to_string(),
         );
 
         assert!(record.matches(&event));
@@ -414,8 +416,10 @@ mod tests {
 
         let event = DetectionEvent::new(
             DetectionType::BruteForce,
+            Severity::High,
             attacker,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "Brute force attack detected".to_string(),
         );
 
         let result = gt.match_detection(&event);
@@ -433,8 +437,10 @@ mod tests {
         // Detection from non-attacker IP
         let event = DetectionEvent::new(
             DetectionType::PortScan,
+            Severity::Medium,
             innocent,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "Port scan detected".to_string(),
         );
 
         let result = gt.match_detection(&event);

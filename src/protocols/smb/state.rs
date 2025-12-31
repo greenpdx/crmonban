@@ -176,13 +176,13 @@ impl SmbState {
             }
         }
 
-        // Check for admin share access
+        // Check for admin share access (handles full UNC paths like \\server\ADMIN$)
         for tree in self.trees.values() {
             let share_lower = tree.share_name.to_lowercase();
             if share_lower.ends_with("$") &&
-               (share_lower.starts_with("c$") ||
-                share_lower.starts_with("admin$") ||
-                share_lower.starts_with("ipc$")) {
+               (share_lower.contains("\\c$") || share_lower == "c$" ||
+                share_lower.contains("\\admin$") || share_lower == "admin$" ||
+                share_lower.contains("\\ipc$") || share_lower == "ipc$") {
                 return true;
             }
         }

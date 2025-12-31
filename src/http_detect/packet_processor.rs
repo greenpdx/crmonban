@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn test_packet_processing() {
         let processor =
-            PacketProcessor::new("data/attack_patterns.json").expect("Failed to load patterns");
+            PacketProcessor::new("data/http_detect/attack_patterns.json").expect("Failed to load patterns");
 
         let test_ip: IpAddr = "192.168.1.100".parse().unwrap();
 
@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn test_fast_packet_processing() {
         let processor =
-            PacketProcessor::new("data/attack_patterns.json").expect("Failed to load patterns");
+            PacketProcessor::new("data/http_detect/attack_patterns.json").expect("Failed to load patterns");
 
         let test_ip: IpAddr = "192.168.1.101".parse().unwrap();
 

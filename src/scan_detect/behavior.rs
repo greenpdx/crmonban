@@ -588,24 +588,25 @@ mod tests {
         let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100));
         let mut behavior = SourceBehavior::new(ip);
         let thresholds = super::super::config::ScoreThresholds::default();
+        // Default thresholds: suspicious=5.0, probable_scan=10.0, likely_attack=15.0, confirmed_scan=20.0
 
         behavior.score = 2.0;
         behavior.update_classification(&thresholds);
         assert_eq!(behavior.classification, Classification::Normal);
 
-        behavior.score = 4.0;
+        behavior.score = 6.0; // >= 5.0 (suspicious threshold)
         behavior.update_classification(&thresholds);
         assert_eq!(behavior.classification, Classification::Suspicious);
 
-        behavior.score = 6.0;
+        behavior.score = 12.0; // >= 10.0 (probable_scan threshold)
         behavior.update_classification(&thresholds);
         assert_eq!(behavior.classification, Classification::ProbableScan);
 
-        behavior.score = 10.0;
+        behavior.score = 17.0; // >= 15.0 (likely_attack threshold)
         behavior.update_classification(&thresholds);
         assert_eq!(behavior.classification, Classification::LikelyAttack);
 
-        behavior.score = 15.0;
+        behavior.score = 22.0; // >= 20.0 (confirmed_scan threshold)
         behavior.update_classification(&thresholds);
         assert_eq!(behavior.classification, Classification::ConfirmedScan);
     }

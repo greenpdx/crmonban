@@ -596,6 +596,7 @@ mod tests {
     fn test_should_update() {
         let mut config = OnlineConfig::default();
         config.min_feedback_for_update = 5;
+        config.max_update_interval_secs = 0; // Trigger immediate update when samples ready
 
         let mut learner = OnlineLearner::new(config);
 
@@ -608,7 +609,7 @@ mod tests {
             learner.add_true_positive(&vector, "Test");
         }
 
-        // Now should update
+        // Now should update (enough samples + interval elapsed)
         assert!(learner.should_update());
     }
 

@@ -471,12 +471,17 @@ mod tests {
         let mut behavior = SourceBehavior::new(src_ip);
         let config = ScanDetectConfig::default();
 
-        // First SYN - no rule trigger (need at least 1 existing half-open)
-        behavior.record_syn(make_flow_key(50000, dst_ip, 22));
+        // Rule requires: 5+ unique ports and 3+ suspicious probes (half-open + RST)
+        // Set up scan-like behavior with multiple half-open connections
+        for port in [22, 23, 80, 443, 3389] {
+            behavior.record_syn(make_flow_key(50000 + port as u16, dst_ip, port));
+        }
+
+        // Context for next SYN to a new port
         let ctx = test_context(&behavior, &config)
-            .with_src_port(50001)
+            .with_src_port(50006)
             .with_dst_ip(dst_ip)
-            .with_port(80)
+            .with_port(8080)
             .with_syn();
 
         let rule = HalfOpenSynRule;

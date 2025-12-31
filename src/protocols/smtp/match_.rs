@@ -216,6 +216,8 @@ mod tests {
 
     #[test]
     fn test_protocol_alerts() {
+        use crate::signatures::ast::Protocol;
+
         let matcher = SmtpMatcher::new();
         let mut state = ProtocolState::new();
 
@@ -223,9 +225,9 @@ mod tests {
         smtp.dangerous_attachments.push("malware.exe".to_string());
         state.set_inner(smtp);
 
-        let rules = ProtocolRuleSet::empty();
+        let rules = ProtocolRuleSet::new(Protocol::Smtp, vec![]);
         let alerts = matcher.match_rules(&state, &rules);
 
-        assert!(alerts.iter().any(|a| a.description.contains("Dangerous")));
+        assert!(alerts.iter().any(|a| a.msg.contains("Dangerous")));
     }
 }

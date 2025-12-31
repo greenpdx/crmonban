@@ -224,6 +224,8 @@ mod tests {
 
     #[test]
     fn test_protocol_alerts() {
+        use crate::signatures::ast::Protocol;
+
         let matcher = SshMatcher::new();
         let mut state = ProtocolState::new();
 
@@ -231,9 +233,9 @@ mod tests {
         ssh.ssh1_detected = true;
         state.set_inner(ssh);
 
-        let rules = ProtocolRuleSet::empty();
+        let rules = ProtocolRuleSet::new(Protocol::Ssh, vec![]);
         let alerts = matcher.match_rules(&state, &rules);
 
-        assert!(alerts.iter().any(|a| a.description.contains("SSH-1")));
+        assert!(alerts.iter().any(|a| a.msg.contains("SSH-1")));
     }
 }

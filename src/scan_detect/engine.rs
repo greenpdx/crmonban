@@ -768,7 +768,8 @@ mod tests {
     #[test]
     fn test_scan_detection() {
         let mut config = ScanDetectConfig::default();
-        config.thresholds.probable_scan = 3.0; // Lower threshold for testing
+        config.thresholds.suspicious = 1.0; // Lower threshold for testing
+        config.thresholds.probable_scan = 3.0;
 
         let mut engine = ScanDetectEngine::new(config);
 

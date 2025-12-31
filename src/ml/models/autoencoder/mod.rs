@@ -258,14 +258,16 @@ mod tests {
     fn test_adaptive_threshold() {
         let mut stats = ReconstructionStats::default();
 
-        // Add normal samples with low error
-        for _ in 0..100 {
-            stats.update(0.1);
+        // Add normal samples with low error and some variance
+        for i in 0..100 {
+            // Values range from 0.05 to 0.15, centered around 0.1
+            let error = 0.1 + 0.05 * ((i as f32 / 50.0) - 1.0);
+            stats.update(error);
         }
 
         // Threshold should be around mean + 3*std
         let threshold = stats.adaptive_threshold(3.0);
-        assert!(threshold > 0.1);
-        assert!(threshold < 1.0);
+        assert!(threshold > 0.1, "threshold {} should be > 0.1", threshold);
+        assert!(threshold < 1.0, "threshold {} should be < 1.0", threshold);
     }
 }

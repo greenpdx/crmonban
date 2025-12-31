@@ -543,7 +543,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("user-agent".to_string(), "Mozilla/5.0".to_string());
 
-        let engine = DetectionEngine::from_file("data/attack_patterns.json")
+        let engine = DetectionEngine::from_file("data/http_detect/attack_patterns.json")
             .expect("Failed to load patterns");
 
         // Test various path traversal attempts
@@ -566,7 +566,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("user-agent".to_string(), "curl/7.68.0".to_string());
 
-        let engine = DetectionEngine::from_file("data/attack_patterns.json")
+        let engine = DetectionEngine::from_file("data/http_detect/attack_patterns.json")
             .expect("Failed to load patterns");
 
         let test_urls = vec![
@@ -587,7 +587,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("user-agent".to_string(), "Mozilla/5.0".to_string());
 
-        let engine = DetectionEngine::from_file("data/attack_patterns.json")
+        let engine = DetectionEngine::from_file("data/http_detect/attack_patterns.json")
             .expect("Failed to load patterns");
 
         let test_urls = vec![
@@ -608,7 +608,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("user-agent".to_string(), "nikto/2.1.6".to_string());
 
-        let engine = DetectionEngine::from_file("data/attack_patterns.json")
+        let engine = DetectionEngine::from_file("data/http_detect/attack_patterns.json")
             .expect("Failed to load patterns");
 
         let report = engine.scan_request("GET", "/", &headers, None);
@@ -621,7 +621,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("user-agent".to_string(), "Mozilla/5.0".to_string());
 
-        let engine = DetectionEngine::from_file("data/attack_patterns.json")
+        let engine = DetectionEngine::from_file("data/http_detect/attack_patterns.json")
             .expect("Failed to load patterns");
 
         let report = engine.scan_request("GET", "/about", &headers, None);
@@ -634,7 +634,7 @@ mod tests {
         let mut headers = HashMap::new();
         headers.insert("user-agent".to_string(), "Mozilla/5.0".to_string());
 
-        let engine = DetectionEngine::from_file("data/attack_patterns.json")
+        let engine = DetectionEngine::from_file("data/http_detect/attack_patterns.json")
             .expect("Failed to load patterns");
 
         // Malicious URL
