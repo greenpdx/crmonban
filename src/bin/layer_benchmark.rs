@@ -17,6 +17,21 @@ use crmonban::layer234::{DetectorBuilder as Layer234Builder, Config as Layer234C
 #[cfg(feature = "flow-tracking")]
 use crmonban::flow::{FlowTracker, FlowConfig};
 
+#[cfg(feature = "protocols")]
+use crmonban::protocols::{ProtocolDetector, ProtocolConfig};
+
+#[cfg(feature = "protocols")]
+use crmonban::core::Flow;
+
+#[cfg(feature = "ml-detection")]
+use crmonban::ml::{MLEngine, MLConfig};
+
+#[cfg(feature = "correlation")]
+use crmonban::correlation::{CorrelationEngine, CorrelationConfig};
+
+#[cfg(feature = "correlation")]
+use crmonban::core::{DetectionEvent, DetectionType, Severity};
+
 #[cfg(feature = "signatures")]
 use crmonban::signatures::{SignatureEngine, SignatureConfig, ProtocolContext, FlowState as SigFlowState};
 
@@ -461,6 +476,170 @@ fn benchmark_signatures_hyperscan(packets: &[Packet], warmup: usize) -> Option<L
     run_signature_benchmark_inner(packets, warmup, engine, "sig-hyperscan", true)
 }
 
+/// Benchmark Protocol Analysis layer (DNS, TLS, SSH, HTTP parsing + attack detection)
+#[cfg(feature = "protocols")]
+fn benchmark_protocols(packets: &[Packet], warmup: usize) -> LayerBenchmark {
+    let mut histogram = Histogram::<u64>::new_with_bounds(1, 1_000_000_000, 3).unwrap();
+
+    // Create protocol detector with attack detection
+    let config = ProtocolConfig::default();
+    let detector = ProtocolDetector::with_http_attack_engine(
+        config,
+        "data/http_detect/attack_patterns.json",
+    );
+
+    // Clone packets for mutable flow access
+    let mut flows: Vec<Flow> = packets.iter()
+        .map(|p| Flow::new(p.id as u64, p))
+        .collect();
+
+    // Warmup
+    for (pkt, flow) in packets.iter().zip(flows.iter_mut()).take(warmup) {
+        let _ = detector.analyze(pkt, flow);
+    }
+
+    // Benchmark
+    let start = Instant::now();
+    for (pkt, flow) in packets.iter().zip(flows.iter_mut()).skip(warmup) {
+        let op_start = Instant::now();
+        let _ = detector.analyze(pkt, flow);
+        let elapsed = op_start.elapsed().as_nanos() as u64;
+        let _ = histogram.record(elapsed.max(1).min(1_000_000_000));
+    }
+    let total_time = start.elapsed();
+
+    let ops = (packets.len() - warmup) as u64;
+    let bytes = ops * packets[0].raw_len as u64;
+    let secs = total_time.as_secs_f64();
+
+    LayerBenchmark {
+        name: "protocols".to_string(),
+        operations: ops,
+        total_time_ns: total_time.as_nanos() as u64,
+        latency_p50_ns: histogram.value_at_percentile(50.0),
+        latency_p95_ns: histogram.value_at_percentile(95.0),
+        latency_p99_ns: histogram.value_at_percentile(99.0),
+        latency_max_ns: histogram.max(),
+        latency_mean_ns: histogram.mean(),
+        ops_per_second: ops as f64 / secs,
+        mbps: (bytes as f64 * 8.0) / (secs * 1_000_000.0),
+    }
+}
+
+/// Benchmark ML Detection layer (anomaly detection, feature extraction)
+#[cfg(feature = "ml-detection")]
+fn benchmark_ml_detection(packets: &[Packet], warmup: usize) -> LayerBenchmark {
+    let mut histogram = Histogram::<u64>::new_with_bounds(1, 1_000_000_000, 3).unwrap();
+
+    // Create ML engine
+    let config = MLConfig::default();
+    let mut engine = MLEngine::new(config);
+
+    // Create flows for feature extraction
+    let mut flows: Vec<crmonban::core::Flow> = packets.iter()
+        .map(|p| crmonban::core::Flow::new(p.id as u64, p))
+        .collect();
+
+    // Warmup - feed some flows for baseline learning
+    for flow in flows.iter().take(warmup) {
+        engine.update_baseline(flow);
+    }
+
+    // Benchmark anomaly scoring (process_flow does feature extraction + scoring)
+    let start = Instant::now();
+    for flow in flows.iter_mut().skip(warmup) {
+        let op_start = Instant::now();
+        let _ = engine.process_flow(flow);
+        let elapsed = op_start.elapsed().as_nanos() as u64;
+        let _ = histogram.record(elapsed.max(1).min(1_000_000_000));
+    }
+    let total_time = start.elapsed();
+
+    let ops = (packets.len() - warmup) as u64;
+    let bytes = ops * packets[0].raw_len as u64;
+    let secs = total_time.as_secs_f64();
+
+    LayerBenchmark {
+        name: "ml_detect".to_string(),
+        operations: ops,
+        total_time_ns: total_time.as_nanos() as u64,
+        latency_p50_ns: histogram.value_at_percentile(50.0),
+        latency_p95_ns: histogram.value_at_percentile(95.0),
+        latency_p99_ns: histogram.value_at_percentile(99.0),
+        latency_max_ns: histogram.max(),
+        latency_mean_ns: histogram.mean(),
+        ops_per_second: ops as f64 / secs,
+        mbps: (bytes as f64 * 8.0) / (secs * 1_000_000.0),
+    }
+}
+
+/// Benchmark Correlation Engine (alert correlation, incident grouping)
+#[cfg(feature = "correlation")]
+fn benchmark_correlation(count: usize, warmup: usize) -> LayerBenchmark {
+    let mut histogram = Histogram::<u64>::new_with_bounds(1, 1_000_000_000, 3).unwrap();
+
+    // Create correlation engine
+    let config = CorrelationConfig::default();
+    let mut engine = CorrelationEngine::new(config);
+
+    // Generate synthetic detection events
+    let events: Vec<DetectionEvent> = (0..count + warmup)
+        .map(|i| {
+            let src_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                192, 168, (i / 256) as u8, (i % 256) as u8
+            ));
+            let dst_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1));
+
+            let detection_type = match i % 5 {
+                0 => DetectionType::PortScan,
+                1 => DetectionType::BruteForce,
+                2 => DetectionType::DoS,
+                3 => DetectionType::SqlInjection,
+                _ => DetectionType::Custom("test".into()),
+            };
+
+            DetectionEvent::new(
+                detection_type,
+                Severity::Medium,
+                src_ip,
+                dst_ip,
+                format!("Test event {}", i),
+            )
+        })
+        .collect();
+
+    // Warmup
+    for event in events.iter().take(warmup) {
+        let _ = engine.process_event(event.clone());
+    }
+
+    // Benchmark
+    let start = Instant::now();
+    for event in events.iter().skip(warmup) {
+        let op_start = Instant::now();
+        let _ = engine.process_event(event.clone());
+        let elapsed = op_start.elapsed().as_nanos() as u64;
+        let _ = histogram.record(elapsed.max(1).min(1_000_000_000));
+    }
+    let total_time = start.elapsed();
+
+    let ops = count as u64;
+    let secs = total_time.as_secs_f64();
+
+    LayerBenchmark {
+        name: "correlation".to_string(),
+        operations: ops,
+        total_time_ns: total_time.as_nanos() as u64,
+        latency_p50_ns: histogram.value_at_percentile(50.0),
+        latency_p95_ns: histogram.value_at_percentile(95.0),
+        latency_p99_ns: histogram.value_at_percentile(99.0),
+        latency_max_ns: histogram.max(),
+        latency_mean_ns: histogram.mean(),
+        ops_per_second: ops as f64 / secs,
+        mbps: 0.0, // N/A for correlation (not packet-based throughput)
+    }
+}
+
 fn print_results(results: &[LayerBenchmark]) {
     println!("\n╔════════════════════════════════════════════════════════════════════════════════════════════╗");
     println!("║                           DETECTION LAYER BENCHMARK RESULTS                                ║");
@@ -566,33 +745,53 @@ fn main() {
     // Benchmark each layer
     println!("\nBenchmarking layers...\n");
 
+    let mut step = 1;
+    let total_steps = 10;
+
     // 1. IP Filter (Stage 0)
-    print!("  [1/7] ip_filter...");
+    print!("  [{}/{}] ip_filter...", step, total_steps);
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
     results.push(benchmark_ipfilter(&packets, warmup));
     println!(" done");
+    step += 1;
 
     // 2. Flow Tracker (Stage 1)
     #[cfg(feature = "flow-tracking")]
     {
-        print!("  [2/7] flow_tracker...");
+        print!("  [{}/{}] flow_tracker...", step, total_steps);
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
         results.push(benchmark_flow_tracker(&packets, warmup));
         println!(" done");
     }
     #[cfg(not(feature = "flow-tracking"))]
     {
-        println!("  [2/7] flow_tracker... skipped (flow-tracking feature disabled)");
+        println!("  [{}/{}] flow_tracker... skipped (feature disabled)", step, total_steps);
     }
+    step += 1;
 
     // 3. Layer234 (Stage 2)
-    print!("  [3/7] layer234 (scan/DoS/brute)...");
+    print!("  [{}/{}] layer234 (scan/DoS/brute)...", step, total_steps);
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
     results.push(benchmark_layer234(&packets, warmup));
     println!(" done");
+    step += 1;
 
-    // 4. HTTP Detection (Stage 4 - Protocol Analysis)
-    print!("  [4/7] http_detect...");
+    // 4. Protocol Analysis (Stage 4)
+    #[cfg(feature = "protocols")]
+    {
+        print!("  [{}/{}] protocols (DNS/TLS/SSH/HTTP)...", step, total_steps);
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        results.push(benchmark_protocols(&packets, warmup));
+        println!(" done");
+    }
+    #[cfg(not(feature = "protocols"))]
+    {
+        println!("  [{}/{}] protocols... skipped (feature disabled)", step, total_steps);
+    }
+    step += 1;
+
+    // 5. HTTP Detection (part of Protocol Analysis)
+    print!("  [{}/{}] http_detect...", step, total_steps);
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
     if let Some(result) = benchmark_http_detect(&http_requests, warmup) {
         results.push(result);
@@ -600,11 +799,12 @@ fn main() {
     } else {
         println!(" skipped");
     }
+    step += 1;
 
-    // 5. Signatures (Stage 3) - All rules
+    // 6. Signatures (Stage 3) - All rules
     #[cfg(feature = "signatures")]
     {
-        print!("  [5/7] signatures (all)...");
+        print!("  [{}/{}] signatures (all)...", step, total_steps);
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
         if let Some(sig_result) = benchmark_signatures(&packets, warmup) {
             results.push(sig_result);
@@ -615,13 +815,60 @@ fn main() {
     }
     #[cfg(not(feature = "signatures"))]
     {
-        println!("  [5/7] signatures... skipped (feature disabled)");
+        println!("  [{}/{}] signatures... skipped (feature disabled)", step, total_steps);
     }
+    step += 1;
 
-    // 6. Signatures Filtered (high-priority only)
+    // 7. Signatures with Hyperscan (if available)
+    #[cfg(all(feature = "signatures", feature = "hyperscan"))]
+    {
+        print!("  [{}/{}] signatures (hyperscan)...", step, total_steps);
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        if let Some(sig_result) = benchmark_signatures_hyperscan(&packets, warmup) {
+            results.push(sig_result);
+            println!(" done");
+        } else {
+            println!(" skipped (hyperscan not available)");
+        }
+    }
+    #[cfg(not(all(feature = "signatures", feature = "hyperscan")))]
+    {
+        println!("  [{}/{}] signatures (hyperscan)... skipped (feature disabled)", step, total_steps);
+    }
+    step += 1;
+
+    // 8. ML Detection (Stage 6)
+    #[cfg(feature = "ml-detection")]
+    {
+        print!("  [{}/{}] ml_detect (anomaly scoring)...", step, total_steps);
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        results.push(benchmark_ml_detection(&packets, warmup));
+        println!(" done");
+    }
+    #[cfg(not(feature = "ml-detection"))]
+    {
+        println!("  [{}/{}] ml_detect... skipped (feature disabled)", step, total_steps);
+    }
+    step += 1;
+
+    // 9. Correlation Engine (Stage 7)
+    #[cfg(feature = "correlation")]
+    {
+        print!("  [{}/{}] correlation (incident grouping)...", step, total_steps);
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        results.push(benchmark_correlation(iterations, warmup));
+        println!(" done");
+    }
+    #[cfg(not(feature = "correlation"))]
+    {
+        println!("  [{}/{}] correlation... skipped (feature disabled)", step, total_steps);
+    }
+    step += 1;
+
+    // 10. Signatures Filtered (high-priority only) - bonus benchmark
     #[cfg(feature = "signatures")]
     {
-        print!("  [6/7] signatures (filtered)...");
+        print!("  [{}/{}] sig_filtered (high-priority)...", step, total_steps);
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
         if let Some(mut sig_result) = benchmark_signatures_filtered(&packets, warmup) {
             sig_result.name = "sig_filtered".to_string();
@@ -633,24 +880,7 @@ fn main() {
     }
     #[cfg(not(feature = "signatures"))]
     {
-        println!("  [6/7] signatures (filtered)... skipped");
-    }
-
-    // 7. Signatures with Hyperscan (if available)
-    #[cfg(all(feature = "signatures", feature = "hyperscan"))]
-    {
-        print!("  [7/7] signatures (hyperscan)...");
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
-        if let Some(sig_result) = benchmark_signatures_hyperscan(&packets, warmup) {
-            results.push(sig_result);
-            println!(" done");
-        } else {
-            println!(" skipped (hyperscan not available)");
-        }
-    }
-    #[cfg(not(all(feature = "signatures", feature = "hyperscan")))]
-    {
-        println!("  [7/7] signatures (hyperscan)... skipped (feature disabled)");
+        println!("  [{}/{}] sig_filtered... skipped", step, total_steps);
     }
 
     // Print results
