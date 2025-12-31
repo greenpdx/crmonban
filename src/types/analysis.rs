@@ -4,10 +4,58 @@
 //! flow state, detection events, and flow control flags. Each pipeline stage
 //! receives a `PacketAnalysis`, potentially modifies it, and returns it.
 
+use serde::{Deserialize, Serialize};
+
 use super::event::DetectionEvent;
 use super::flow::Flow;
 use super::packet::Packet;
 use super::protocols::ProtocolEvent;
+
+/// Verdict for packet after pipeline processing
+///
+/// Determines what happens to the packet after all stages have processed it.
+/// Used by NFQUEUE to accept/drop/reject packets in real-time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PacketVerdict {
+    /// Allow packet through (default)
+    #[default]
+    Accept,
+    /// Drop packet silently
+    Drop,
+    /// Reject packet with RST (TCP) or ICMP unreachable (UDP)
+    Reject,
+    /// Re-queue to another NFQUEUE queue number
+    Queue(u16),
+}
+
+impl PacketVerdict {
+    /// Check if this verdict will block the packet
+    #[inline]
+    pub fn is_blocking(&self) -> bool {
+        matches!(self, PacketVerdict::Drop | PacketVerdict::Reject)
+    }
+
+    /// Convert to string for logging
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PacketVerdict::Accept => "accept",
+            PacketVerdict::Drop => "drop",
+            PacketVerdict::Reject => "reject",
+            PacketVerdict::Queue(_) => "queue",
+        }
+    }
+}
+
+impl std::fmt::Display for PacketVerdict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PacketVerdict::Accept => write!(f, "Accept"),
+            PacketVerdict::Drop => write!(f, "Drop"),
+            PacketVerdict::Reject => write!(f, "Reject"),
+            PacketVerdict::Queue(q) => write!(f, "Queue({})", q),
+        }
+    }
+}
 
 /// Analysis context passed between pipeline stages
 ///
@@ -30,6 +78,14 @@ pub struct PacketAnalysis {
 
     /// Flow control flags
     pub control: FlowControl,
+
+    /// Actual verdict after applying severity policy
+    /// This is what NFQUEUE will use to accept/drop the packet
+    pub verdict: PacketVerdict,
+
+    /// Suggested verdict from detection stages (before policy)
+    /// Shows what stages wanted to do, for logging/visibility
+    pub suggested_verdict: PacketVerdict,
 }
 
 impl PacketAnalysis {
@@ -41,6 +97,8 @@ impl PacketAnalysis {
             events: Vec::new(),
             protocol_events: Vec::new(),
             control: FlowControl::default(),
+            verdict: PacketVerdict::Accept,
+            suggested_verdict: PacketVerdict::Accept,
         }
     }
 
@@ -161,6 +219,59 @@ impl PacketAnalysis {
     #[inline]
     pub fn flow_mut(&mut self) -> Option<&mut Flow> {
         self.flow.as_mut()
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Verdict Methods
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Set the actual verdict (after policy evaluation)
+    #[inline]
+    pub fn set_verdict(&mut self, verdict: PacketVerdict) {
+        self.verdict = verdict;
+    }
+
+    /// Get the actual verdict
+    #[inline]
+    pub fn verdict(&self) -> PacketVerdict {
+        self.verdict
+    }
+
+    /// Set the suggested verdict (what stages want)
+    #[inline]
+    pub fn set_suggested_verdict(&mut self, verdict: PacketVerdict) {
+        self.suggested_verdict = verdict;
+    }
+
+    /// Get the suggested verdict
+    #[inline]
+    pub fn suggested_verdict(&self) -> PacketVerdict {
+        self.suggested_verdict
+    }
+
+    /// Check if the packet should be dropped
+    #[inline]
+    pub fn should_drop(&self) -> bool {
+        self.verdict.is_blocking()
+    }
+
+    /// Check if stages wanted to block but policy allowed
+    /// Useful for logging "would have been blocked" packets
+    #[inline]
+    pub fn would_block(&self) -> bool {
+        self.suggested_verdict.is_blocking() && !self.verdict.is_blocking()
+    }
+
+    /// Suggest dropping the packet (stages call this, policy decides later)
+    #[inline]
+    pub fn suggest_drop(&mut self) {
+        self.suggested_verdict = PacketVerdict::Drop;
+    }
+
+    /// Suggest rejecting the packet (stages call this, policy decides later)
+    #[inline]
+    pub fn suggest_reject(&mut self) {
+        self.suggested_verdict = PacketVerdict::Reject;
     }
 }
 

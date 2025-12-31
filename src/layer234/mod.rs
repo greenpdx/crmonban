@@ -61,7 +61,7 @@ pub mod extra34;
 // Re-export types from crmonban-types (pipeline interface)
 pub use crate::types::{
     // Core pipeline types
-    PacketAnalysis, FlowControl, StageProcessor,
+    PacketAnalysis, PacketVerdict, FlowControl, StageProcessor,
     // Detection events
     DetectionEvent, DetectionType, DetectionAction, Severity,
     // Packet types

@@ -22,7 +22,7 @@ pub use crate::types::{
     // Event
     DetectionEvent, DetectionType, DetectionAction, Severity, ThreatIntelInfo,
     // Analysis
-    PacketAnalysis, FlowControl,
+    PacketAnalysis, PacketVerdict, FlowControl,
     // Protocols
     AppProtocol,
     // Pipeline (AlertAnalyzer only - StageProcessor imported directly from crate::types)

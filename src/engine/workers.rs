@@ -318,6 +318,101 @@ impl WorkerThread {
         events
     }
 
+    /// Process a packet and return the full PacketAnalysis
+    ///
+    /// Unlike `process()` which returns only events, this returns the complete
+    /// PacketAnalysis including the verdict. Use this when you need to check
+    /// the verdict for blocking decisions (e.g., NFQUEUE integration).
+    pub async fn process_full(&mut self, packet: Packet, config: &PipelineConfig) -> PacketAnalysis {
+        let start = Instant::now();
+
+        // Create PacketAnalysis - the data container passed between stages
+        let mut analysis = PacketAnalysis::new(packet);
+
+        // Reset stage context for this packet
+        self.stage_context = StageContext::new();
+
+        // Process through each stage in configured order
+        for stage in &config.stage_order {
+            // Skip disabled stages
+            if !config.is_stage_enabled(*stage) {
+                continue;
+            }
+
+            // Check if previous stage requested early exit
+            if !analysis.should_continue() {
+                trace!("Pipeline stopped early at {:?}", stage);
+                break;
+            }
+
+            let stage_start = Instant::now();
+            let events_before = analysis.event_count();
+
+            // Process through the appropriate stage
+            analysis = self.process_stage(*stage, analysis, config).await;
+
+            // Calculate if this stage marked the packet (added events)
+            let stage_marked = analysis.event_count() > events_before;
+
+            // Update stage metrics
+            let stage_latency_ns = stage_start.elapsed().as_nanos() as u64;
+            if let Some(metrics) = self.stage_metrics.get(*stage) {
+                metrics.record_pass();
+                metrics.record_time(stage_latency_ns);
+                if stage_marked {
+                    metrics.record_marked();
+                }
+            }
+
+            // Record to profiler histogram (when profiling feature is enabled)
+            #[cfg(feature = "profiling")]
+            if let Some(profile) = self.profiler.stage(*stage) {
+                profile.record(stage_latency_ns);
+                if stage_marked {
+                    profile.record_marked();
+                }
+            }
+
+            // If detection events were added, consult alert analyzer
+            if stage_marked {
+                let decision = self.alert_analyzer.analyze(&mut analysis).await;
+                match decision {
+                    AnalyzerDecision::RemoveFlow => {
+                        // Remove from flow tracking
+                        if let Some(ref flow) = analysis.flow {
+                            self.flow_tracker.remove_flow(&flow.key);
+                        }
+                        // Stop processing further stages
+                        analysis.stop();
+                        trace!("Alert analyzer: RemoveFlow - stopping pipeline");
+                        break;
+                    }
+                    AnalyzerDecision::Continue => {
+                        // Continue to next stage
+                    }
+                }
+            }
+        }
+
+        // Update global counters
+        self.packets_processed.fetch_add(1, Ordering::Relaxed);
+        self.events_generated.fetch_add(analysis.event_count() as u64, Ordering::Relaxed);
+
+        let elapsed = start.elapsed().as_nanos() as u64;
+        self.busy_time_ns.fetch_add(elapsed, Ordering::Relaxed);
+        self.total_time_ns.store(
+            self.start_time.elapsed().as_nanos() as u64,
+            Ordering::Relaxed,
+        );
+
+        // Record total pipeline latency to profiler
+        #[cfg(feature = "profiling")]
+        self.profiler.record_total(elapsed);
+
+        // Return the full analysis (not just events)
+        analysis
+    }
+
     /// Process a single pipeline stage
     ///
     /// Dispatches to the appropriate stage processor.
@@ -735,6 +830,20 @@ impl WorkerPool {
         self.events_generated.fetch_add(events.len() as u64, Ordering::Relaxed);
 
         events
+    }
+
+    /// Process a packet and return full analysis result
+    ///
+    /// Returns the PacketAnalysis with verdict and all events, useful when
+    /// you need to check the verdict for blocking decisions.
+    pub async fn process_full(&mut self, packet: Packet, config: &PipelineConfig) -> PacketAnalysis {
+        let worker_idx = 0;
+        let analysis = self.workers[worker_idx].process_full(packet, config).await;
+
+        self.packets_processed.fetch_add(1, Ordering::Relaxed);
+        self.events_generated.fetch_add(analysis.event_count() as u64, Ordering::Relaxed);
+
+        analysis
     }
 
     /// Get number of workers in the pool
@@ -1212,5 +1321,114 @@ mod tests {
 
         // Verify multiple packets were processed through the pipeline
         assert_eq!(pool.packets_processed(), 2);
+    }
+
+    // ========================================================================
+    // Verdict Pipeline Tests
+    // ========================================================================
+
+    /// Test that process_full returns PacketAnalysis with verdict
+    #[tokio::test]
+    async fn test_process_full_returns_analysis() {
+        let mut pool = WorkerPool::default();
+        let config = PipelineConfig::default();
+
+        let packet = make_packet();
+        let analysis = pool.process_full(packet, &config).await;
+
+        // Normal packet should have Accept verdict
+        assert_eq!(analysis.verdict(), crate::core::PacketVerdict::Accept);
+        assert_eq!(analysis.suggested_verdict(), crate::core::PacketVerdict::Accept);
+        assert!(!analysis.should_drop());
+    }
+
+    /// Test that blocked IP triggers verdict change
+    #[tokio::test]
+    async fn test_blocked_ip_verdict() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_ipfilter = true;
+
+        // Block an IP address
+        let blocked_ip: IpAddr = "198.51.100.50".parse().unwrap();
+        pool.worker_mut().ipfilter_worker_mut().ip_filter_mut()
+            .block(blocked_ip, "Test blocked IP".to_string());
+
+        // Send packet from blocked IP
+        let syn_flags = syn_flags();
+        let packet = make_tcp_packet("198.51.100.50", "192.168.1.1", 45678, 80, syn_flags);
+        let analysis = pool.process_full(packet, &config).await;
+
+        // Should have events from IP filter
+        assert!(analysis.event_count() > 0, "Should have detection events");
+
+        // Verdict should reflect blocking (High severity = BlockAfterThreshold)
+        // First packet won't block immediately due to threshold policy
+        println!("Verdict: {:?}, Suggested: {:?}", analysis.verdict(), analysis.suggested_verdict());
+
+        // suggested_verdict should indicate Drop was suggested
+        assert_eq!(analysis.suggested_verdict(), crate::core::PacketVerdict::Drop);
+    }
+
+    /// Test that would_block() correctly identifies suppressed blocking
+    #[tokio::test]
+    async fn test_would_block_indicator() {
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_ipfilter = true;
+
+        // Block an IP (High severity = BlockAfterThreshold, needs 5 events)
+        let blocked_ip: IpAddr = "198.51.100.60".parse().unwrap();
+        pool.worker_mut().ipfilter_worker_mut().ip_filter_mut()
+            .block(blocked_ip, "Test threshold IP".to_string());
+
+        let syn_flags = syn_flags();
+
+        // First 4 packets should have would_block() = true (suggested Drop, actual Accept)
+        for i in 0..4 {
+            let packet = make_tcp_packet("198.51.100.60", "192.168.1.1", 45678 + i, 80, syn_flags.clone());
+            let analysis = pool.process_full(packet, &config).await;
+
+            // High severity + first few packets = threshold not reached
+            // suggested_verdict = Drop, actual verdict = Accept
+            assert!(analysis.would_block(), "Packet {} should indicate would_block", i);
+            assert_eq!(analysis.verdict(), crate::core::PacketVerdict::Accept);
+        }
+
+        // 5th packet should actually block (threshold reached)
+        let packet = make_tcp_packet("198.51.100.60", "192.168.1.1", 45682, 80, syn_flags);
+        let analysis = pool.process_full(packet, &config).await;
+
+        // Now should actually block
+        assert!(analysis.should_drop(), "5th packet should be blocked");
+        assert_eq!(analysis.verdict(), crate::core::PacketVerdict::Drop);
+        assert!(!analysis.would_block(), "should_drop means not would_block");
+    }
+
+    /// Test verdict propagation from stage through AlertAnalyzer
+    #[tokio::test]
+    async fn test_verdict_propagation() {
+        use crate::core::PacketVerdict;
+
+        let mut pool = WorkerPool::default();
+        let mut config = PipelineConfig::default();
+        config.enable_ipfilter = true;
+
+        // Watch an IP (Low severity = AlertOnly, never blocks)
+        let watched_ip: IpAddr = "198.51.100.70".parse().unwrap();
+        pool.worker_mut().ipfilter_worker_mut().ip_filter_mut()
+            .watch(watched_ip, "Test watched IP".to_string());
+
+        let syn_flags = syn_flags();
+        let packet = make_tcp_packet("198.51.100.70", "192.168.1.1", 45678, 80, syn_flags);
+        let analysis = pool.process_full(packet, &config).await;
+
+        // Watched IP generates ThreatIntelMatch event with Low severity
+        // Low severity policy = AlertOnly, so verdict should be Accept
+        assert_eq!(analysis.verdict(), PacketVerdict::Accept);
+
+        // Events should be generated for visibility
+        assert!(analysis.event_count() > 0 || analysis.events.len() > 0,
+            "Should have events for watched IP");
     }
 }

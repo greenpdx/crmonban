@@ -63,6 +63,10 @@ pub mod wasm;
 #[cfg(feature = "packet-engine")]
 pub mod engine;
 
+// Audit logging for offline analysis
+#[cfg(feature = "packet-engine")]
+pub mod audit;
+
 // Parallel processing
 #[cfg(feature = "parallel")]
 pub mod parallel;

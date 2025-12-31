@@ -321,11 +321,20 @@ impl PacketEngine {
         Ok(())
     }
 
-    /// Process a single packet (for testing or manual injection)
+    /// Process a single packet synchronously (for testing or manual injection)
+    ///
+    /// Note: For production use, prefer the async worker pool processing.
+    /// This method is for testing and simple single-packet processing scenarios.
     pub fn process_packet(&self, _packet: Packet) -> Vec<DetectionEvent> {
         // This would normally go through the pipeline
         // For now just return empty
+        // TODO: Implement synchronous single-packet processing
         Vec::new()
+    }
+
+    /// Get the pipeline configuration
+    pub fn pipeline_config(&self) -> &PipelineConfig {
+        &self.config.pipeline
     }
 
     /// Check if engine is running

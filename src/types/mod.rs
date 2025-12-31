@@ -39,7 +39,7 @@ pub use layers::{
 };
 pub use flow::{Flow, FlowKey, FlowState, FlowStats, StreamingStats};
 pub use event::{DetectionEvent, DetectionType, DetectionAction, Severity, ThreatIntelInfo};
-pub use analysis::{PacketAnalysis, FlowControl};
+pub use analysis::{PacketAnalysis, PacketVerdict, FlowControl};
 pub use protocols::{
     AppProtocol, ProtocolEvent,
     HttpTransaction, HttpRequest, HttpResponse,

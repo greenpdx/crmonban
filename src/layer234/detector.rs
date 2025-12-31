@@ -10,7 +10,7 @@ use super::types::{
 };
 use super::weights::DetectionWeights;
 use crate::types::{
-    DetectionEvent, DetectionType, Severity,
+    DetectionAction, DetectionEvent, DetectionType, Severity,
     Packet, PacketAnalysis, StageProcessor,
 };
 use crate::types::event::{
@@ -112,6 +112,7 @@ impl Detector {
                 let severity = threat_to_severity(&threat_type);
                 let message = format_threat_message(&threat_type, sig_match.label.as_deref());
 
+                let action = threat_to_action(&threat_type);
                 let event = DetectionEvent::new(
                     event_type,
                     severity,
@@ -121,6 +122,7 @@ impl Detector {
                 )
                 .with_detector("layer2detect")
                 .with_subtype(subtype)
+                .with_action(action)
                 .with_confidence(1.0 - sig_match.distance)
                 .with_feature_array(window.vector);
 
@@ -142,6 +144,7 @@ impl Detector {
                 let (event_type, subtype) = threat_to_detection(&threat_type);
                 let severity = threat_to_severity(&threat_type);
                 let message = format_threat_message(&threat_type, None);
+                let action = threat_to_action(&threat_type);
 
                 let event = DetectionEvent::new(
                     event_type,
@@ -152,6 +155,7 @@ impl Detector {
                 )
                 .with_detector("layer2detect")
                 .with_subtype(subtype)
+                .with_action(action)
                 .with_confidence(0.7)
                 .with_feature_array(window.vector);
 
@@ -174,6 +178,7 @@ impl Detector {
                 )
                 .with_detector("layer2detect")
                 .with_subtype(DetectionSubType::Anomaly(AnomalySubType::BehaviorAnomaly))
+                .with_action(DetectionAction::Alert) // Anomalies are informational
                 .with_confidence(distance.min(1.0))
                 .with_feature_array(window.vector)
                 .with_detail("deviation_score", serde_json::json!(distance));
@@ -1650,6 +1655,122 @@ fn threat_to_severity(threat: &ThreatType) -> Severity {
         ThreatType::WifiHandshakeCapture { .. } => Severity::High,
         #[cfg(feature = "wireless")]
         ThreatType::WifiKrackAttack { .. } => Severity::Critical,
+    }
+}
+
+/// Map ThreatType to appropriate DetectionAction
+///
+/// - Alert: Informational (scans, anomalies, probes)
+/// - Drop: Active attacks (floods, DoS)
+/// - Ban: Persistent attacks (brute force, spoofing)
+fn threat_to_action(threat: &ThreatType) -> DetectionAction {
+    match threat {
+        // Scans - informational, don't block
+        ThreatType::PortScan { .. } => DetectionAction::Alert,
+        ThreatType::PingSweep { .. } => DetectionAction::Alert,
+        ThreatType::Anomaly { .. } => DetectionAction::Alert,
+
+        // Brute force - should ban the attacker
+        ThreatType::BruteForce { .. } => DetectionAction::Ban,
+
+        // DoS attacks - should drop immediately
+        ThreatType::SynFlood { .. } => DetectionAction::Drop,
+        ThreatType::UdpFlood { .. } => DetectionAction::Drop,
+        ThreatType::IcmpFlood { .. } => DetectionAction::Drop,
+        ThreatType::ConnectionExhaustion { .. } => DetectionAction::Drop,
+        ThreatType::Amplification { .. } => DetectionAction::Drop,
+
+        // Layer 2 attacks - should drop (MITM attempts)
+        ThreatType::ArpSpoofing { .. } => DetectionAction::Drop,
+        ThreatType::ArpFlood { .. } => DetectionAction::Drop,
+        ThreatType::VlanHopping { .. } => DetectionAction::Drop,
+        ThreatType::DhcpStarvation { .. } => DetectionAction::Drop,
+        ThreatType::RogueDhcp { .. } => DetectionAction::Drop,
+
+        // Layer 3 attacks
+        ThreatType::IcmpTunnel { .. } => DetectionAction::Alert, // Could be legitimate VPN
+        ThreatType::Ipv6RaSpoofing { .. } => DetectionAction::Drop,
+        ThreatType::Ipv6RaFlood { .. } => DetectionAction::Drop,
+
+        // Infrastructure attacks (extra234 feature)
+        #[cfg(feature = "extra234")]
+        ThreatType::BgpHijack { .. } => DetectionAction::Alert, // Alert only - BGP needs careful handling
+        #[cfg(feature = "extra234")]
+        ThreatType::BgpPrefixFlap { .. } => DetectionAction::Alert,
+        #[cfg(feature = "extra234")]
+        ThreatType::StpRootAttack { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra234")]
+        ThreatType::StpTcFlood { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra234")]
+        ThreatType::CdpSpoof { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra234")]
+        ThreatType::LldpSpoof { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra234")]
+        ThreatType::OspfNeighborInject { .. } => DetectionAction::Alert,
+        #[cfg(feature = "extra234")]
+        ThreatType::OspfDrManipulation { .. } => DetectionAction::Alert,
+        #[cfg(feature = "extra234")]
+        ThreatType::RipPoisoning { .. } => DetectionAction::Alert,
+        #[cfg(feature = "extra234")]
+        ThreatType::GreTunnel { .. } => DetectionAction::Alert,
+        #[cfg(feature = "extra234")]
+        ThreatType::VxlanUnauthorized { .. } => DetectionAction::Alert,
+        #[cfg(feature = "extra234")]
+        ThreatType::Dot1xHubBypass { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra234")]
+        ThreatType::EapFlood { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra234")]
+        ThreatType::RogueAuthenticator { .. } => DetectionAction::Drop,
+
+        // Advanced Layer 3-4 attacks (extra34 feature)
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentOverlap { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentOversized { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentFlood { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::FragmentTiny { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::IpSpoofBogon { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::IpSpoofMartian { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::LandAttack { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::IcmpRedirect { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::IcmpSourceQuench { .. } => DetectionAction::Alert,
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpRstInjection { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpSessionHijack { .. } => DetectionAction::Drop,
+        #[cfg(feature = "extra34")]
+        ThreatType::TcpSynAckReflection { .. } => DetectionAction::Drop,
+
+        // 802.11 Wireless attacks (wireless feature)
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiDeauthFlood { .. } => DetectionAction::Alert, // Can't drop WiFi at IP layer
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiDisassocFlood { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiEvilTwin { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiFakeAp { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiBeaconFlood { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiKarmaAttack { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiAuthFlood { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiProbeFlood { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiPmkidCapture { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiHandshakeCapture { .. } => DetectionAction::Alert,
+        #[cfg(feature = "wireless")]
+        ThreatType::WifiKrackAttack { .. } => DetectionAction::Alert,
     }
 }
 

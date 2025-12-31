@@ -16,7 +16,8 @@
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use crmonban::layer234::{Config, DetectorBuilder, DetectionEvent, DetectionType, DetectionSubType, PacketAnalysis, parse_ip_packet, NetVecError};
+    use crmonban::layer234::{Config, DetectorBuilder, DetectionEvent, DetectionType, DetectionSubType, PacketAnalysis, PacketVerdict, parse_ip_packet, NetVecError};
+    use crmonban::core::AlertAnalyzer;
     use nfq::{Queue, Verdict};
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::fs::{File, OpenOptions};
@@ -1080,8 +1081,13 @@ mod linux {
         // Create detector
         let mut detector = DetectorBuilder::from_config(&config).build_with_config(&config)?;
 
+        // Create AlertAnalyzer for severity-based blocking decisions
+        // Default policy: Info/Low/Medium = Alert only, High = Block after 5 events, Critical = Block immediately
+        let mut alert_analyzer = AlertAnalyzer::default();
+
         println!("Signatures: {}", detector.signature_count());
         println!("Queue: {}", queue_num);
+        println!("Blocking policy: Info/Low/Medium=alert, High=block after 5, Critical=block immediately");
 
         // Initialize logger
         let logger = Arc::new(Mutex::new(Logger::new(&config)?));
@@ -1211,21 +1217,40 @@ mod linux {
 
                     // Process packet through detector
                     // Note: NFQUEUE gives us IP packets (no ethernet header)
-                    match parse_ip_packet(payload, timestamp_ns) {
+                    let verdict = match parse_ip_packet(payload, timestamp_ns) {
                         Ok(packet) => {
                             let mut analysis = PacketAnalysis::new(packet);
                             detector.process(&mut analysis).await;
+
+                            // If detector added events, use AlertAnalyzer to decide verdict
+                            // based on severity policy (Info/Low/Med = alert only, High = threshold, Critical = block)
+                            if analysis.event_count() > 0 {
+                                let _decision = alert_analyzer.analyze(&mut analysis).await;
+                            }
+
+                            // Use verdict from analysis (set by AlertAnalyzer based on severity policy)
+                            analysis.verdict()
                         }
                         Err(NetVecError::NoIpLayer) => {
-                            // Skip non-IP packets
+                            // Skip non-IP packets - accept them
+                            PacketVerdict::Accept
                         }
                         Err(_) => {
                             stats.errors += 1;
+                            // Parse errors - accept to avoid blocking legitimate traffic
+                            PacketVerdict::Accept
                         }
-                    }
+                    };
 
-                    // Accept the packet (let it continue through the network stack)
-                    msg.set_verdict(Verdict::Accept);
+                    // Map PacketVerdict to nfq::Verdict
+                    let nfq_verdict = match verdict {
+                        PacketVerdict::Accept => Verdict::Accept,
+                        PacketVerdict::Drop => Verdict::Drop,
+                        PacketVerdict::Reject => Verdict::Drop, // nfq doesn't have Reject, use Drop
+                        PacketVerdict::Queue(q) => Verdict::Queue(q),
+                    };
+
+                    msg.set_verdict(nfq_verdict);
                     queue.verdict(msg)?;
 
                     // Periodic stats
