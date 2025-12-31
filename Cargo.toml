@@ -216,8 +216,8 @@ packet-engine = ["dep:crossbeam-channel", "dep:num_cpus", "dep:parking_lot", "co
 parallel = ["dep:rayon", "dep:num_cpus"]
 # Pipeline profiling with histograms (p50/p95/p99 latencies, throughput)
 profiling = ["dep:hdrhistogram", "dep:parking_lot"]
-# Full NIDS functionality (all stages)
-nids = ["signatures", "flow-tracking", "protocols", "threat-intel", "ml-detection", "correlation", "packet-engine", "parallel", "profiling"]
+# Full NIDS functionality (all stages) - includes hyperscan for 10-50x faster signature matching
+nids = ["signatures", "hyperscan", "flow-tracking", "protocols", "threat-intel", "ml-detection", "correlation", "packet-engine", "parallel", "profiling"]
 
 # Network Scanning - Free/Open Source (Nmap, Ettercap, Metasploit, Burp)
 scan = []

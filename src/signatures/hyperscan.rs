@@ -382,7 +382,7 @@ mod tests {
             flow_id: None,
             direction: PktDirection::Unknown,
             interface: "eth0".to_string(),
-            raw_len: payload.len(),
+            raw_len: payload.len() as u32,
         }
     }
 

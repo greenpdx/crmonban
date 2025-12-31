@@ -460,6 +460,11 @@ impl WorkerThread {
                     };
 
                     let proto_ctx = ProtocolContext::None;
+
+                    // Use Hyperscan-accelerated matching if available (10-50x faster)
+                    #[cfg(feature = "hyperscan")]
+                    let matches = engine.match_packet_hyperscan(&analysis.packet, &proto_ctx, &flow_state);
+                    #[cfg(not(feature = "hyperscan"))]
                     let matches = engine.match_packet(&analysis.packet, &proto_ctx, &flow_state);
 
                     for m in matches {
