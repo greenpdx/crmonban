@@ -760,3 +760,16 @@ half_open_syn = 5.0
 targeted_port_bonus = 2.0
 sequential_scan = 8.0
 rapid_rate = 6.0
+
+# ============================================================================
+# Display / Dashboard Configuration
+# ============================================================================
+[display]
+# Enable IPC server for dashboard communication
+enabled = true
+
+# HTTP port for display server (if auto-started)
+port = 3001
+
+# Unix socket path for IPC
+socket_path = "/run/crmonban/events.sock"

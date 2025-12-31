@@ -1292,7 +1292,78 @@ async fn start_packet_engine(
     let mut flow_buffer = engine::FlowBuffer::new(engine::FlowBufferConfig::default());
 
     // Create channel for sending batches to workers
-    let (worker_tx, _worker_rx) = crossbeam_channel::bounded::<engine::FlowBatch>(1000);
+    let (worker_tx, worker_rx) = crossbeam_channel::bounded::<engine::FlowBatch>(1000);
+
+    // Create pipeline config from packet engine config
+    let pipeline_config = engine::PipelineConfig {
+        enable_flows: true,
+        enable_layer2detect: true,
+        enable_signatures: config.signatures_enabled,
+        enable_ml: config.ml_detection,
+        enable_correlation: false,
+        ..Default::default()
+    };
+
+    // Spawn worker thread to process batches
+    let rules_dir = config.rules_dir.clone();
+    let _worker_handle = std::thread::spawn(move || {
+        // Create a tokio runtime for async processing
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create worker runtime");
+
+        // Create worker with detection engines
+        let worker_config = engine::WorkerConfig {
+            rules_dir: rules_dir.map(std::path::PathBuf::from),
+            ..Default::default()
+        };
+        let mut worker = engine::WorkerThread::new(worker_config);
+
+        let mut batch_count: u64 = 0;
+        let mut packet_count: u64 = 0;
+        let mut event_count: u64 = 0;
+        let mut last_log = std::time::Instant::now();
+
+        // Process batches from channel
+        while let Ok(batch) = worker_rx.recv() {
+            batch_count += 1;
+            let packets_in_batch = batch.packets.len();
+            packet_count += packets_in_batch as u64;
+
+            // Process each packet through detection pipeline
+            for packet in batch.packets {
+                let events = rt.block_on(worker.process(packet, &pipeline_config));
+                event_count += events.len() as u64;
+
+                // Log detection events
+                for event in &events {
+                    info!(
+                        "Detection: {:?} from {} - {}",
+                        event.event_type,
+                        event.src_ip,
+                        event.message
+                    );
+                }
+            }
+
+            // Log stats every 5 seconds
+            if last_log.elapsed() >= std::time::Duration::from_secs(5) {
+                let elapsed = last_log.elapsed().as_secs_f64();
+                info!(
+                    "Worker stats: batches={}, packets={}, events={}, rate={:.1} pkt/s",
+                    batch_count,
+                    packet_count,
+                    event_count,
+                    packet_count as f64 / elapsed
+                );
+                // Reset for rate calculation
+                packet_count = 0;
+                last_log = std::time::Instant::now();
+            }
+        }
+        info!("Worker thread exiting");
+    });
 
     let mut packet_count: u64 = 0;
     let mut batch_count: u64 = 0;
@@ -1314,10 +1385,10 @@ async fn start_packet_engine(
                     }
                 }
 
-                // Log stats periodically
-                if packet_count % 10000 == 0 {
-                    info!(
-                        "Packets: {} | Batches: {} | Active flows: {}",
+                // Log stats periodically (every 1000 packets for better visibility)
+                if packet_count % 1000 == 0 {
+                    debug!(
+                        "Capture: {} packets | {} batches | {} active flows",
                         packet_count, batch_count, flow_buffer.flow_count()
                     );
                 }

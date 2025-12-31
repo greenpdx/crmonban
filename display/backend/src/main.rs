@@ -39,12 +39,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/metrics/history", get(handlers::metrics::history))
         // Events
         .route("/api/events", get(handlers::events::list_events))
-        .route("/api/events/:id", get(handlers::events::get_event))
+        .route("/api/events/{id}", get(handlers::events::get_event))
         .route("/api/events/stream", get(handlers::events::event_stream))
         // Flows
         .route("/api/flows", get(handlers::flows::list_flows))
-        .route("/api/flows/:id", get(handlers::flows::get_flow))
-        .route("/api/flows/:id/stats", get(handlers::flows::get_flow_stats))
+        .route("/api/flows/{id}", get(handlers::flows::get_flow))
+        .route("/api/flows/{id}/stats", get(handlers::flows::get_flow_stats))
         // Anomaly/ML
         .route("/api/anomaly/scores", get(handlers::anomaly::get_scores))
         .route("/api/anomaly/features", get(handlers::anomaly::get_features))
@@ -52,15 +52,15 @@ async fn main() -> anyhow::Result<()> {
         // Geo/Intel
         .route("/api/geo/map", get(handlers::geo::get_map_data))
         .route("/api/geo/countries", get(handlers::geo::top_countries))
-        .route("/api/intel/:ip", get(handlers::geo::get_intel))
+        .route("/api/intel/{ip}", get(handlers::geo::get_intel))
         // Bans
         .route("/api/bans", get(handlers::bans::list_bans))
         .route("/api/bans/active", get(handlers::bans::active_bans))
         .route("/api/bans/stats", get(handlers::bans::ban_stats))
         // Incidents
         .route("/api/incidents", get(handlers::incidents::list_incidents))
-        .route("/api/incidents/:id", get(handlers::incidents::get_incident))
-        .route("/api/incidents/:id/timeline", get(handlers::incidents::get_timeline))
+        .route("/api/incidents/{id}", get(handlers::incidents::get_incident))
+        .route("/api/incidents/{id}/timeline", get(handlers::incidents::get_timeline))
         // Protocols
         .route("/api/protocols/distribution", get(handlers::protocols::distribution))
         .route("/api/protocols/dns", get(handlers::protocols::dns_stats))
