@@ -15,7 +15,7 @@ pub use normalization::{Normalizer, NormalizationMethod};
 pub use fusion::{FeatureFuser, FusionConfig};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 /// Total dimensions in the unified feature vector
 pub const UNIFIED_DIM: usize = 159;

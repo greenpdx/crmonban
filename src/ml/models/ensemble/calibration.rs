@@ -131,7 +131,7 @@ impl Calibrator {
             .zip(labels.iter())
             .map(|(&s, &l)| (s, l))
             .collect();
-        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
         // Pool Adjacent Violators Algorithm (PAVA)
         let mut calibrated = pairs.clone();

@@ -11,7 +11,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::database::Database;
-use crate::types::{DetectionType, Severity};
 
 /// Priority level for recommendations
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

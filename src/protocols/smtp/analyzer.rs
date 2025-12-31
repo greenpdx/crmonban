@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 /// SMTP analyzer for email security monitoring
+#[allow(dead_code)]
 pub struct SmtpAnalyzer {
     config: SmtpConfig,
     /// Client-side parser (keyed by flow ID)
@@ -111,6 +112,7 @@ impl MailVolumeTracker {
 
 /// Track potential open relay testing
 #[derive(Debug)]
+#[allow(dead_code)]
 struct RelayTestTracker {
     /// External domains used in MAIL FROM
     from_domains: Vec<String>,
@@ -120,15 +122,6 @@ struct RelayTestTracker {
     first_seen: Instant,
 }
 
-impl RelayTestTracker {
-    fn new() -> Self {
-        Self {
-            from_domains: Vec::new(),
-            to_domains: Vec::new(),
-            first_seen: Instant::now(),
-        }
-    }
-}
 
 impl SmtpAnalyzer {
     /// Create new SMTP analyzer with configuration
@@ -464,33 +457,6 @@ impl SmtpAnalyzer {
         None
     }
 
-    /// Get or create client parser for flow
-    fn get_client_parser(&self, flow_id: u64) -> SmtpParser {
-        let parsers = self.client_parsers.read().unwrap();
-        if let Some(parser) = parsers.get(&flow_id) {
-            // Can't clone parser easily, just create new one
-        }
-        drop(parsers);
-        SmtpParser::new(true)
-    }
-
-    /// Store client parser
-    fn store_client_parser(&self, flow_id: u64, parser: SmtpParser) {
-        let mut parsers = self.client_parsers.write().unwrap();
-        parsers.insert(flow_id, parser);
-    }
-
-    /// Get or create server parser for flow
-    fn get_server_parser(&self, flow_id: u64) -> SmtpParser {
-        SmtpParser::new(false)
-    }
-
-    /// Store server parser
-    fn store_server_parser(&self, flow_id: u64, parser: SmtpParser) {
-        let mut parsers = self.server_parsers.write().unwrap();
-        parsers.insert(flow_id, parser);
-    }
-
     /// Cleanup old flow state
     pub fn cleanup_flow(&self, flow_id: u64) {
         if let Ok(mut parsers) = self.client_parsers.write() {
@@ -509,23 +475,6 @@ enum CharType {
     Lower,
     Upper,
     Other,
-}
-
-/// Check if IP is private/internal
-fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ipv4) => {
-            ipv4.is_private() || ipv4.is_loopback() || ipv4.is_link_local()
-        }
-        IpAddr::V6(ipv6) => {
-            ipv6.is_loopback()
-            // Note: is_unique_local() is unstable, checking manually
-            || {
-                let segments = ipv6.segments();
-                (segments[0] & 0xfe00) == 0xfc00 // fc00::/7
-            }
-        }
-    }
 }
 
 impl ProtocolAnalyzer for SmtpAnalyzer {

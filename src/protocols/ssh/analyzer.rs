@@ -118,6 +118,7 @@ impl AuthTracker {
 }
 
 /// SSH protocol analyzer
+#[allow(dead_code)]
 pub struct SshAnalyzer {
     /// Configuration
     config: SshAnalyzerConfig,
@@ -291,7 +292,7 @@ impl SshAnalyzer {
         client_version: &str,
         server_version: Option<&str>,
         protocol_version: u8,
-        src_ip: IpAddr,
+        _src_ip: IpAddr,
         flow_id: u64,
     ) -> Vec<SshDetection> {
         let mut detections = Vec::new();
@@ -456,7 +457,7 @@ impl SshAnalyzer {
     }
 
     /// Analyze HASSH fingerprint
-    fn analyze_hassh(&mut self, hash: &str, src_ip: IpAddr, is_server: bool) -> Vec<SshDetection> {
+    fn analyze_hassh(&mut self, hash: &str, _src_ip: IpAddr, is_server: bool) -> Vec<SshDetection> {
         let mut detections = Vec::new();
 
         let result = self.hassh_db.lookup(hash);
@@ -614,7 +615,7 @@ impl ProtocolAnalyzer for SshAnalyzer {
         self.config.ports.contains(&port) || SshParser::is_ssh(payload)
     }
 
-    fn parse(&self, packet: &Packet, flow: &mut Flow) -> Option<ProtocolEvent> {
+    fn parse(&self, packet: &Packet, _flow: &mut Flow) -> Option<ProtocolEvent> {
         let payload = packet.payload();
         if payload.is_empty() {
             return None;

@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use clap::{Parser, ValueEnum};
 use etherparse::SlicedPacket;
-use pcap::{Capture, Linktype};
+use pcap::Capture;
 
 #[derive(Parser, Debug)]
 #[command(name = "attack_dump")]
@@ -344,7 +344,7 @@ fn main() -> anyhow::Result<()> {
 
     // Open input PCAP
     let mut cap = Capture::from_file(&args.input)?;
-    let linktype = cap.get_datalink();
+    let _linktype = cap.get_datalink();
 
     // Prepare output writers
     let mut pcap_writer: Option<pcap::Savefile> = None;

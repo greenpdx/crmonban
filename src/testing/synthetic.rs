@@ -2,7 +2,6 @@
 //!
 //! Generates various types of attack traffic patterns for benchmarking detection.
 
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::{Duration, Instant};
 
@@ -11,9 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     Packet, IpProtocol, TcpFlags, Severity,
-    Layer3, Layer4, Ipv4Info, TcpInfo, UdpInfo,
 };
-use super::ground_truth::{GroundTruth, AttackRecord};
+use super::ground_truth::GroundTruth;
 
 /// Types of attacks that can be generated
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

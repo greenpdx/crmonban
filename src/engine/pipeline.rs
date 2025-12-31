@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::core::{PacketAnalysis, DetectionEvent, Packet};
+use crate::core::{DetectionEvent, Packet};
 use crate::database::{BatchedWriterHandle, IntervalStats};
 
 use super::workers::{WorkerPool, WorkerConfig};

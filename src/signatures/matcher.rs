@@ -12,6 +12,7 @@ use regex::bytes::Regex;
 use parking_lot::RwLock;
 
 #[cfg(feature = "parallel")]
+#[allow(unused_imports)]
 use rayon::prelude::*;
 
 use super::ast::*;

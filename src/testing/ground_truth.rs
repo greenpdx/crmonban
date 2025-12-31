@@ -12,7 +12,7 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::str::FromStr;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{DetectionEvent, DetectionType, Severity};

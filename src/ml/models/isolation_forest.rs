@@ -90,7 +90,7 @@ impl AnomalyModel for IsolationForest {
             return;
         }
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let n_features = data[0].features.len();
 
         self.trees.clear();
@@ -100,7 +100,7 @@ impl AnomalyModel for IsolationForest {
             // Sample with replacement
             let sample: Vec<Vec<f32>> = (0..self.sample_size.min(data.len()))
                 .map(|_| {
-                    let idx = rng.gen_range(0..data.len());
+                    let idx = rng.random_range(0..data.len());
                     data[idx].features.clone()
                 })
                 .collect();
@@ -169,7 +169,7 @@ impl IsolationTree {
         }
 
         // Randomly select feature
-        let feature_idx = rng.gen_range(0..n_features);
+        let feature_idx = rng.random_range(0..n_features);
 
         // Find min/max for selected feature
         let mut min_val = f32::MAX;
@@ -193,7 +193,7 @@ impl IsolationTree {
         }
 
         // Random split point
-        let split_value = rng.gen_range(min_val..max_val);
+        let split_value = rng.random_range(min_val..max_val);
 
         // Partition samples
         let (left_samples, right_samples): (Vec<Vec<f32>>, Vec<Vec<f32>>) = samples

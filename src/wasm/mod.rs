@@ -53,7 +53,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::debug;
 
 use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet, Direction};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};

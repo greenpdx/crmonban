@@ -48,7 +48,7 @@ pub use state::SmbState;
 pub use parser::SmbParser;
 pub use match_::SmbMatcher;
 
-use crate::protocols::{ProtocolRegistration, ProtocolParser};
+use crate::protocols::ProtocolRegistration;
 use crate::signatures::ast::Protocol;
 
 /// SMB Suricata keywords
@@ -82,6 +82,7 @@ pub fn registration() -> ProtocolRegistration {
 mod tests {
     use super::*;
     use crate::core::Direction;
+    use crate::protocols::traits::ProtocolParser;
 
     #[test]
     fn test_registration() {

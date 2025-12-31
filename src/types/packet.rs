@@ -647,7 +647,7 @@ impl Packet {
 
 impl Default for Packet {
     fn default() -> Self {
-        use std::net::Ipv4Addr;
+        
         Self {
             timestamp: Utc::now(),
             id: 0,

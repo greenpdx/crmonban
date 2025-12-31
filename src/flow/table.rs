@@ -64,49 +64,54 @@ impl FlowTable {
     /// Returns the flow and a bool indicating if it was newly created
     #[inline]
     pub fn get_or_create(&mut self, pkt: &Packet) -> (&mut Flow, bool) {
+        use std::collections::hash_map::Entry;
+
         let key = FlowKey::from_packet(pkt);
         self.stats.lookups += 1;
         let now = Instant::now();
 
-        // Check if exists first
-        if self.flows.contains_key(&key) {
-            self.stats.hits += 1;
-            let entry = self.flows.get_mut(&key).unwrap();
-            let timeout = self.config.timeout_for(&entry.flow);
-            entry.timeout = now + timeout;
-            return (&mut entry.flow, false);
-        }
-
-        // Not found - create new
-        self.stats.misses += 1;
-
-        // Check if table is full
-        if self.flows.len() >= self.max_size {
+        // Check if table is full before entry - evict if needed
+        let needs_eviction = !self.flows.contains_key(&key) && self.flows.len() >= self.max_size;
+        if needs_eviction {
             self.evict_oldest();
         }
 
-        // Create new flow
-        let flow_id = self.next_id;
-        self.next_id += 1;
-        let mut flow = Flow::new(flow_id, pkt);
+        match self.flows.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                // Flow exists - update timeout
+                self.stats.hits += 1;
+                let flow_entry = entry.get_mut();
+                let timeout = self.config.timeout_for(&flow_entry.flow);
+                flow_entry.timeout = now + timeout;
+                (&mut entry.into_mut().flow, false)
+            }
+            Entry::Vacant(entry) => {
+                // Not found - create new
+                self.stats.misses += 1;
 
-        // Enable stream reassembly if configured
-        if self.config.enable_reassembly {
-            flow.enable_reassembly(self.config.reassembly_buffer_bytes());
+                // Create new flow
+                let flow_id = self.next_id;
+                self.next_id += 1;
+                let mut flow = Flow::new(flow_id, pkt);
+
+                // Enable stream reassembly if configured
+                if self.config.enable_reassembly {
+                    flow.enable_reassembly(self.config.reassembly_buffer_bytes());
+                }
+
+                let timeout = self.config.timeout_for(&flow);
+
+                // Add to ID index
+                self.id_index.insert(flow_id, key);
+
+                self.stats.inserts += 1;
+                let flow_entry = entry.insert(FlowEntry {
+                    flow,
+                    timeout: now + timeout,
+                });
+                (&mut flow_entry.flow, true)
+            }
         }
-
-        let timeout = self.config.timeout_for(&flow);
-
-        // Add to ID index
-        self.id_index.insert(flow_id, key.clone());
-
-        self.stats.inserts += 1;
-        self.flows.insert(key.clone(), FlowEntry {
-            flow,
-            timeout: now + timeout,
-        });
-
-        (&mut self.flows.get_mut(&key).unwrap().flow, true)
     }
 
     /// Get a flow by key

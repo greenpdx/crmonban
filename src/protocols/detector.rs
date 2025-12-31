@@ -4,7 +4,6 @@
 //! Integrates attack detection engines for HTTP, DNS, TLS, and SSH.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 
 use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Flow, Packet};
 use crate::engine::pipeline::{PipelineConfig, PipelineStage, StageProcessor};
@@ -13,7 +12,7 @@ use super::{
     ProtocolAnalyzer, ProtocolConfig, ProtocolEvent,
     HttpAnalyzer, DnsAnalyzer, TlsAnalyzer, HttpTransaction, DnsMessage, TlsEvent,
 };
-use super::ssh::{SshAnalyzer, SshAnalyzerConfig, SshParser};
+use super::ssh::{SshAnalyzer, SshAnalyzerConfig};
 use crate::types::protocols::SshEvent;
 
 // HTTP attack detection engine

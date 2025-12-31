@@ -134,7 +134,7 @@ impl VoteAggregator {
             }
             VotingStrategy::Median => {
                 let mut scores: Vec<f32> = votes.iter().map(|v| v.score).collect();
-                scores.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 if scores.len() % 2 == 0 {
                     (scores[scores.len() / 2 - 1] + scores[scores.len() / 2]) / 2.0
                 } else {

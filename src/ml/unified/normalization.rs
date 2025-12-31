@@ -310,25 +310,6 @@ impl Normalizer {
     }
 }
 
-/// Clip values to a range (for outlier handling)
-pub fn clip(value: f32, min: f32, max: f32) -> f32 {
-    value.max(min).min(max)
-}
-
-/// Apply tanh scaling (compresses outliers)
-pub fn tanh_scale(value: f32, scale: f32) -> f32 {
-    (value / scale).tanh()
-}
-
-/// Apply log1p scaling (for highly skewed data)
-pub fn log1p_scale(value: f32) -> f32 {
-    if value >= 0.0 {
-        (value + 1.0).ln()
-    } else {
-        -(-value + 1.0).ln()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,17 +403,4 @@ mod tests {
         assert_eq!(normalizer.method_for_index(143), NormalizationMethod::L2);
     }
 
-    #[test]
-    fn test_clip() {
-        assert_eq!(clip(5.0, 0.0, 10.0), 5.0);
-        assert_eq!(clip(-5.0, 0.0, 10.0), 0.0);
-        assert_eq!(clip(15.0, 0.0, 10.0), 10.0);
-    }
-
-    #[test]
-    fn test_tanh_scale() {
-        assert!((tanh_scale(0.0, 1.0) - 0.0).abs() < 0.001);
-        assert!(tanh_scale(100.0, 1.0) > 0.99);
-        assert!(tanh_scale(-100.0, 1.0) < -0.99);
-    }
 }

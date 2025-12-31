@@ -21,6 +21,7 @@ use super::messages::*;
 use super::{DEFAULT_SOCKET_PATH, PROTOCOL_VERSION};
 
 /// Connected client info
+#[allow(dead_code)]
 struct Client {
     id: String,
     connected_at: Instant,

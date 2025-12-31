@@ -3,7 +3,7 @@
 //! Matches Suricata rules against parsed SMB protocol data.
 
 use crate::core::Severity;
-use crate::protocols::{ProtocolState, ProtocolAlert, ProtocolRuleSet, MatchInfo};
+use crate::protocols::{ProtocolState, ProtocolAlert, ProtocolRuleSet};
 use crate::protocols::alerts::priority_to_severity;
 use crate::signatures::ast::{Rule, RuleOption, ContentMatch};
 use crate::types::DetectionType;
@@ -46,7 +46,7 @@ impl SmbMatcher {
     /// Check for protocol-level security issues
     fn check_protocol_alerts(
         &self,
-        state: &ProtocolState,
+        _state: &ProtocolState,
         smb_state: Option<&SmbState>,
     ) -> Vec<ProtocolAlert> {
         let mut alerts = Vec::new();

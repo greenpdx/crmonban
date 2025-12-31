@@ -2,7 +2,6 @@
 //!
 //! Provides stage-aware context and result types for WASM/Rust plugins.
 
-use std::net::IpAddr;
 use serde::{Deserialize, Serialize};
 
 use crate::core::DetectionType;

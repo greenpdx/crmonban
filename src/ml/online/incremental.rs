@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ml::unified::UNIFIED_DIM;
 use crate::ml::baseline::Baseline;
-use crate::ml::models::IsolationForest;
 
 /// Update strategy type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::fs;
-use tracing::{info, warn, debug};
+use tracing::info;
 
 pub use crate::types::protocols::HasshFingerprint;
 

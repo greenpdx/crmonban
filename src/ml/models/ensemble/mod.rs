@@ -35,7 +35,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ml::unified::{UnifiedFeatureVector, UNIFIED_DIM};
 use crate::ml::features::FeatureVector;
-use crate::ml::baseline::Baseline;
 
 use super::AnomalyModel;
 use super::statistical::StatisticalModel;
@@ -320,7 +319,7 @@ impl EnsembleDetector {
         // Add temporal score if sequence available
         if let (Some(temporal), Some(seq)) = (&mut self.temporal, sequence) {
             if seq.len() >= 2 {
-                let score = temporal.manager().config().min_sequence_length;
+                let _score = temporal.manager().config().min_sequence_length;
                 // Use the internal lstm to score
                 let temporal_score = 0.0; // Would need sequence scoring here
 
@@ -362,7 +361,7 @@ impl EnsembleDetector {
             .collect();
 
         let top_contributor = votes.iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "unknown".to_string());
 

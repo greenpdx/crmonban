@@ -13,7 +13,7 @@ use etherparse::SlicedPacket;
 use pcap::Capture;
 
 use crmonban::core::{IpProtocol, Packet, TcpFlags};
-use crmonban::scan_detect::{ScanDetectEngine, ScanDetectConfig, SourceBehavior};
+use crmonban::scan_detect::{ScanDetectEngine, ScanDetectConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "scan_detect_test")]
@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
 
     let start_time = Instant::now();
     let mut last_report = Instant::now();
-    let mut last_tick = Instant::now();
+    let _last_tick = Instant::now();
     let mut packet_id: u64 = 0;
 
     println!("Processing packets...\n");

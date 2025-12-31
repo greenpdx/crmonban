@@ -4,9 +4,8 @@
 
 use crate::types::protocols::{
     SmtpEvent, SmtpAuthMechanism, SmtpTransaction, SmtpHeaders,
-    SmtpAttachment, EmailAddress,
+    SmtpAttachment,
 };
-use tracing::{debug, trace};
 use std::collections::HashMap;
 
 /// SMTP command types
@@ -84,6 +83,7 @@ pub enum SmtpParserState {
 
 /// SMTP parser for extracting protocol events
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SmtpParser {
     /// Current parser state
     state: SmtpParserState,
@@ -501,7 +501,7 @@ impl SmtpParser {
                 // Extract filename and content type
                 let mut filename = None;
                 let mut content_type = None;
-                let mut size = 0;
+                let size = 0;
 
                 for line in part_headers.lines() {
                     let lower = line.to_lowercase();

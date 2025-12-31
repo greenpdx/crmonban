@@ -229,7 +229,7 @@ impl ReplayBuffer {
             self.stats.high_priority_count += 1;
         }
 
-        let (buffer, other_buffer) = match sample.label {
+        let (buffer, _other_buffer) = match sample.label {
             SampleLabel::Normal => (&mut self.normal_samples, &mut self.attack_samples),
             SampleLabel::Attack => (&mut self.attack_samples, &mut self.normal_samples),
         };

@@ -300,91 +300,9 @@ pub static WIRELESS_FEATURE_NAMES: &[&str] = &[
     "wifi_credential_risk",
 ];
 
-/// Get feature name by unified index
-pub fn get_feature_name(index: usize) -> Option<&'static str> {
-    for range in FEATURE_RANGES {
-        if index >= range.start && index < range.end {
-            let local_index = index - range.start;
-            return range.names.get(local_index).copied();
-        }
-    }
-    None
-}
-
-/// Get feature source by unified index
-pub fn get_feature_source(index: usize) -> Option<FeatureSource> {
-    for range in FEATURE_RANGES {
-        if index >= range.start && index < range.end {
-            return Some(range.source);
-        }
-    }
-    None
-}
-
-/// Get all feature names as a single array
-pub fn all_feature_names() -> Vec<&'static str> {
-    let mut names = Vec::with_capacity(super::UNIFIED_DIM);
-    for range in FEATURE_RANGES {
-        names.extend_from_slice(range.names);
-    }
-    names
-}
-
-/// Feature importance weights (default values)
-pub static DEFAULT_FEATURE_WEIGHTS: &[f32; super::UNIFIED_DIM] = &{
-    let mut weights = [1.0f32; super::UNIFIED_DIM];
-    // Slightly higher weights for attack-specific features
-    // Extra34 features (more attack-focused)
-    let mut i = dims::EXTRA34_START;
-    while i < dims::EXTRA34_END {
-        weights[i] = 1.2;
-        i += 1;
-    }
-    // Wireless features (specialized)
-    i = dims::WIRELESS_START;
-    while i < dims::WIRELESS_END {
-        weights[i] = 1.2;
-        i += 1;
-    }
-    weights
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_feature_name_lookup() {
-        // ML feature
-        assert_eq!(get_feature_name(0), Some("ml_duration_ms"));
-        // L234 feature
-        assert_eq!(get_feature_name(39), Some("l234_port_entropy"));
-        // Extra34 feature
-        assert_eq!(get_feature_name(127), Some("extra34_fragment_rate"));
-        // Wireless feature
-        assert_eq!(get_feature_name(143), Some("wifi_deauth_rate"));
-        // Out of bounds
-        assert_eq!(get_feature_name(159), None);
-    }
-
-    #[test]
-    fn test_feature_source_lookup() {
-        assert_eq!(get_feature_source(0), Some(FeatureSource::MlFlow));
-        assert_eq!(get_feature_source(38), Some(FeatureSource::MlFlow));
-        assert_eq!(get_feature_source(39), Some(FeatureSource::Layer234));
-        assert_eq!(get_feature_source(126), Some(FeatureSource::Layer234));
-        assert_eq!(get_feature_source(127), Some(FeatureSource::Extra34));
-        assert_eq!(get_feature_source(142), Some(FeatureSource::Extra34));
-        assert_eq!(get_feature_source(143), Some(FeatureSource::Wireless));
-        assert_eq!(get_feature_source(158), Some(FeatureSource::Wireless));
-        assert_eq!(get_feature_source(159), None);
-    }
-
-    #[test]
-    fn test_all_feature_names() {
-        let names = all_feature_names();
-        assert_eq!(names.len(), super::super::UNIFIED_DIM);
-    }
 
     #[test]
     fn test_feature_ranges_contiguous() {

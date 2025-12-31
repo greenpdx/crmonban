@@ -34,7 +34,6 @@ use crate::protocols::{
 };
 use crate::protocols::registry::ProtocolRegistration;
 use crate::protocols::traits::ParserStage;
-use crate::types::protocols::spam_patterns::{SPAM_SUBJECT_PATTERNS, PHISHING_SUBJECT_PATTERNS};
 
 /// Get SMTP protocol registration
 pub fn registration() -> ProtocolRegistration {
@@ -74,6 +73,7 @@ impl Default for SmtpParserConfig {
 }
 
 /// SMTP Protocol Parser implementing unified interface
+#[allow(dead_code)]
 pub struct SmtpProtocolParser {
     config: SmtpParserConfig,
     client_parser: SmtpParser,
@@ -262,59 +262,6 @@ impl SmtpProtocolParser {
         None
     }
 
-    fn analyze_headers(&self, pstate: &mut ProtocolState, headers: &crate::types::protocols::SmtpHeaders) {
-        if let Some(state) = pstate.get_inner_mut::<SmtpState>() {
-            // Check for spam subject patterns
-            if self.config.detect_spam {
-                if let Some(ref subject) = headers.subject {
-                    let lower = subject.to_lowercase();
-                    for pattern in SPAM_SUBJECT_PATTERNS {
-                        if lower.contains(pattern) {
-                            state.add_spam_indicator(pattern);
-                        }
-                    }
-                }
-            }
-
-            // Check for phishing subject patterns
-            if self.config.detect_phishing {
-                if let Some(ref subject) = headers.subject {
-                    let lower = subject.to_lowercase();
-                    for pattern in PHISHING_SUBJECT_PATTERNS {
-                        if lower.contains(pattern) {
-                            state.add_phishing_indicator(pattern);
-                        }
-                    }
-                }
-            }
-
-            // Check for spoofing
-            if self.config.detect_spoofing {
-                let spf_fail = headers.spf_result.as_ref()
-                    .map(|r| r.to_lowercase().contains("fail"))
-                    .unwrap_or(false);
-                let dkim_missing = !headers.has_dkim;
-                let dmarc_fail = headers.dmarc_result.as_ref()
-                    .map(|r| r.to_lowercase().contains("fail"))
-                    .unwrap_or(false);
-
-                if dmarc_fail || (spf_fail && dkim_missing) {
-                    state.spoofing_detected = true;
-                }
-            }
-
-            // Set header buffers
-            if let Some(ref from) = headers.from {
-                pstate.set_buffer("smtp.from", from.as_bytes().to_vec());
-            }
-            if !headers.to.is_empty() {
-                pstate.set_buffer("smtp.to", headers.to.join(", ").into_bytes());
-            }
-            if let Some(ref subject) = headers.subject {
-                pstate.set_buffer("smtp.subject", subject.as_bytes().to_vec());
-            }
-        }
-    }
 }
 
 impl Default for SmtpProtocolParser {

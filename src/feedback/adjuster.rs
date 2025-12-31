@@ -10,7 +10,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use super::analyzer::{FeedbackSummary, ModuleStats, Priority, SafeBounds};
+use super::analyzer::{ModuleStats, SafeBounds};
 
 /// Configuration for the parameter adjuster
 #[derive(Debug, Clone)]

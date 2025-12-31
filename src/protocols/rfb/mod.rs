@@ -5,7 +5,7 @@ pub use types::*; pub use state::RfbState; pub use match_::RfbMatcher;
 use async_trait::async_trait;
 use crate::core::{PacketAnalysis, Direction};
 use crate::signatures::ast::Protocol;
-use crate::protocols::{ProtocolParser, ProtocolState, ParseResult, ProtocolAlert, Transaction, ProtocolRuleSet};
+use crate::protocols::{ProtocolParser, ProtocolState, ParseResult, ProtocolAlert, ProtocolRuleSet};
 use crate::protocols::registry::ProtocolRegistration;
 
 pub fn registration() -> ProtocolRegistration {

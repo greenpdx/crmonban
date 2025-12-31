@@ -8,7 +8,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    dims, FeatureSources, Normalizer, NormalizationMethod, UnifiedFeatureVector, UNIFIED_DIM,
+    dims, FeatureSources, Normalizer, NormalizationMethod, UnifiedFeatureVector,
 };
 
 /// Configuration for feature fusion
@@ -311,60 +311,6 @@ impl FeatureFuser {
     }
 }
 
-/// Builder for creating unified vectors incrementally
-#[derive(Debug, Default)]
-pub struct UnifiedVectorBuilder {
-    vec: UnifiedFeatureVector,
-}
-
-impl UnifiedVectorBuilder {
-    /// Create a new builder
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set flow ID
-    pub fn flow_id(mut self, id: u64) -> Self {
-        self.vec.flow_id = id;
-        self
-    }
-
-    /// Set source IP
-    pub fn src_ip(mut self, ip: IpAddr) -> Self {
-        self.vec.src_ip = Some(ip);
-        self
-    }
-
-    /// Add ML features
-    pub fn ml_features(mut self, features: &[f32]) -> Self {
-        self.vec.set_ml_features(features);
-        self
-    }
-
-    /// Add Layer234 features
-    pub fn l234_features(mut self, features: &[f32; 88]) -> Self {
-        self.vec.set_l234_features(features);
-        self
-    }
-
-    /// Add Extra34 features
-    pub fn extra34_features(mut self, features: &[f32; 16]) -> Self {
-        self.vec.set_extra34_features(features);
-        self
-    }
-
-    /// Add Wireless features
-    pub fn wireless_features(mut self, features: &[f32; 16]) -> Self {
-        self.vec.set_wireless_features(features);
-        self
-    }
-
-    /// Build the final vector
-    pub fn build(self) -> UnifiedFeatureVector {
-        self.vec
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,25 +392,6 @@ mod tests {
         let l234 = [2.0f32; 88];
         let vec = fuser.fuse(Some(&ml), Some(&l234), None, None, 2, None);
         assert!(vec.is_some());
-    }
-
-    #[test]
-    fn test_builder() {
-        let ml = [1.0f32; 39];
-        let l234 = [2.0f32; 88];
-
-        let vec = UnifiedVectorBuilder::new()
-            .flow_id(100)
-            .src_ip("192.168.1.100".parse().unwrap())
-            .ml_features(&ml)
-            .l234_features(&l234)
-            .build();
-
-        assert_eq!(vec.flow_id, 100);
-        assert!(vec.has_ml());
-        assert!(vec.has_l234());
-        assert!(!vec.has_extra34());
-        assert!(!vec.has_wireless());
     }
 
     #[test]

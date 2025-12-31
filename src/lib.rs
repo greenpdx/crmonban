@@ -1251,11 +1251,11 @@ async fn handle_action(
 #[cfg(feature = "packet-engine")]
 async fn start_packet_engine(
     config: config::PacketEngineConfig,
-    event_tx: mpsc::Sender<MonitorEvent>,
+    _event_tx: mpsc::Sender<MonitorEvent>,
     _crmonban: Arc<RwLock<Crmonban>>,
 ) -> Result<()> {
     use engine::capture::{CaptureConfig, CaptureMethod, create_capture};
-    use crate::core::IpProtocol;
+    
 
     info!("Starting packet engine on interface: {:?}", config.interface);
 
@@ -1374,7 +1374,6 @@ async fn start_packet_engine(
         packet_count += 1;
         match capture.next_packet(packet_count) {
             Ok(Some(packet)) => {
-                ;
 
                 // Push packet to flow buffer, get any ready batches
                 let batches = flow_buffer.push( packet);

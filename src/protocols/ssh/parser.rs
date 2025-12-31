@@ -3,10 +3,10 @@
 //! Parses SSH protocol messages to extract version, key exchange, and auth events.
 
 use crate::types::protocols::{
-    SshEvent, SshAuthMethod, SshNegotiatedAlgorithms, SshVersionInfo,
+    SshEvent, SshAuthMethod, SshVersionInfo,
     HasshFingerprint,
 };
-use tracing::{debug, trace};
+use tracing::trace;
 
 /// SSH message types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +82,7 @@ impl TryFrom<u8> for SshMsgType {
 
 /// SSH parser for extracting protocol events
 #[derive(Debug, Default)]
+#[allow(dead_code)]
 pub struct SshParser {
     /// Buffer for partial version string
     version_buffer: Vec<u8>,

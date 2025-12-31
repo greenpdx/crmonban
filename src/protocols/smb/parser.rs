@@ -2,15 +2,13 @@
 //!
 //! Parses SMB1, SMB2, and SMB3 protocol messages.
 
-use std::any::Any;
 
 use async_trait::async_trait;
 
 use crate::core::{PacketAnalysis, Direction};
 use crate::signatures::ast::Protocol;
 use crate::protocols::{
-    ProtocolParser, ProtocolState, ParseResult, ProtocolAlert, Transaction,
-    ParseError, ProtocolRuleSet,
+    ProtocolParser, ProtocolState, ParseResult, ProtocolAlert, Transaction, ProtocolRuleSet,
 };
 use super::types::*;
 use super::state::SmbState;
@@ -169,45 +167,8 @@ impl SmbParser {
         Some(dialects)
     }
 
-    /// Parse SMB2 Negotiate response
-    fn parse_negotiate_response(&self, data: &[u8], state: &mut SmbState) -> Option<SmbDialect> {
-        if data.len() < 64 {
-            return None;
-        }
-
-        let dialect_revision = u16::from_le_bytes([data[4], data[5]]);
-        let security_mode = u16::from_le_bytes([data[2], data[3]]);
-        let capabilities = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-
-        let version = match dialect_revision {
-            0x0202 => SmbVersion::Smb2_0,
-            0x0210 => SmbVersion::Smb2_1,
-            0x0300 => SmbVersion::Smb3_0,
-            0x0302 => SmbVersion::Smb3_0_2,
-            0x0311 => SmbVersion::Smb3_1_1,
-            _ => SmbVersion::Unknown,
-        };
-
-        state.set_version(version);
-
-        // Check signing
-        state.signing = (security_mode & 0x0002) != 0;
-
-        // Check encryption capability
-        if version.supports_encryption() && (capabilities & 0x00000040) != 0 {
-            state.encrypted = true;
-        }
-
-        Some(SmbDialect {
-            version,
-            dialect_revision,
-            capabilities,
-            security_mode,
-        })
-    }
-
     /// Parse Tree Connect request
-    fn parse_tree_connect(&self, data: &[u8], header: &Smb2Header) -> Option<String> {
+    fn parse_tree_connect(&self, data: &[u8], _header: &Smb2Header) -> Option<String> {
         if data.len() < 8 {
             return None;
         }
@@ -326,9 +287,9 @@ impl SmbParser {
     fn process_smb1(
         &self,
         header: Smb1Header,
-        data: &[u8],
+        _data: &[u8],
         pstate: &mut ProtocolState,
-        is_request: bool,
+        _is_request: bool,
     ) -> ParseResult {
         // Get or create SMB-specific state
         let state = if let Some(s) = pstate.get_inner_mut::<SmbState>() {

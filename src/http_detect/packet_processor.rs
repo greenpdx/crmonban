@@ -455,6 +455,7 @@ pub fn process_nfqueue_packet_fast(
 }
 
 /// Logging and alerting
+#[allow(dead_code)]
 pub struct AlertLogger {
     log_file: String,
 }

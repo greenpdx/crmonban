@@ -10,7 +10,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::log_parsers::{LogEvent, LogEventType};
+use super::log_parsers::LogEvent;
 
 /// Detection event from crmonban database
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -440,7 +440,7 @@ impl AttackTypeStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feedback::log_parsers::Service;
+    use crate::feedback::log_parsers::{Service, LogEventType};
 
     fn make_log_event(ip: &str, is_attack: bool) -> LogEvent {
         LogEvent {

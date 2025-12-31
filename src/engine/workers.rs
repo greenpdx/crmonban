@@ -646,26 +646,6 @@ impl WorkerThread {
         }
     }
 
-    /// Create a detection event from a packet
-    fn create_event(
-        &self,
-        packet: &Packet,
-        event_type: DetectionType,
-        severity: Severity,
-        message: &str,
-    ) -> DetectionEvent {
-        DetectionEvent::new(
-            event_type,
-            severity,
-            packet.src_ip(),
-            packet.dst_ip(),
-            message.to_string(),
-        )
-        .with_detector("packet_engine")
-        .with_ports(packet.src_port(), packet.dst_port())
-        .with_protocol(&format!("{:?}", packet.protocol()))
-    }
-
     /// Get worker utilization (0.0-1.0)
     pub fn utilization(&self) -> f64 {
         let busy = self.busy_time_ns.load(Ordering::Relaxed) as f64;
@@ -755,7 +735,7 @@ impl WorkerThread {
     /// ipfilter blocklist for fast lookup during packet processing.
     #[cfg(feature = "threat-intel")]
     pub fn load_threat_intel(&mut self, intel_engine: &crate::threat_intel::IntelEngine) {
-        use crate::threat_intel::{IocType, ThreatCategory};
+        use crate::threat_intel::ThreatCategory;
 
         // Get all IP IOCs from the intel engine cache
         let ip_iocs = intel_engine.get_ip_iocs();
@@ -810,6 +790,7 @@ impl Default for WorkerThread {
 ///
 /// Currently uses a single worker, but designed for future expansion to multiple
 /// workers with flow-based packet distribution.
+#[allow(dead_code)]
 pub struct WorkerPool {
     /// Worker threads
     workers: Vec<WorkerThread>,

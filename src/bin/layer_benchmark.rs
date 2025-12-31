@@ -12,7 +12,7 @@ use hdrhistogram::Histogram;
 use crmonban::types::{Packet, IpProtocol, TcpFlags, PacketAnalysis};
 use crmonban::ipfilter::{Worker as IpFilterWorker, IpFilter};
 use crmonban::http_detect::DetectionEngine as HttpEngine;
-use crmonban::layer234::{Detector as Layer234Detector, DetectorBuilder as Layer234Builder, Config as Layer234Config};
+use crmonban::layer234::{DetectorBuilder as Layer234Builder, Config as Layer234Config};
 
 #[cfg(feature = "flow-tracking")]
 use crmonban::flow::{FlowTracker, FlowConfig};

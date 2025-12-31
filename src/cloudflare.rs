@@ -6,7 +6,7 @@
 //! - Extracts real client IPs from X-Forwarded-For or CF-Connecting-IP headers
 //! - Provides the official Cloudflare IP ranges
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use std::str::FromStr;
 
 /// Cloudflare IPv4 ranges (as of Dec 2025)

@@ -8,7 +8,6 @@ use crate::protocols::alerts::priority_to_severity;
 use crate::signatures::ast::{Rule, RuleOption, ContentMatch};
 use crate::types::DetectionType;
 use super::state::DnsState;
-use super::types::*;
 
 /// DNS rule matcher
 pub struct DnsMatcher;
@@ -46,7 +45,7 @@ impl DnsMatcher {
     /// Check for protocol-level security issues
     fn check_protocol_alerts(
         &self,
-        state: &ProtocolState,
+        _state: &ProtocolState,
         dns_state: Option<&DnsState>,
     ) -> Vec<ProtocolAlert> {
         let mut alerts = Vec::new();

@@ -2,7 +2,6 @@
 //!
 //! Defines all structures for SMB1, SMB2, and SMB3 protocol parsing.
 
-use std::collections::HashMap;
 
 /// SMB protocol version
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

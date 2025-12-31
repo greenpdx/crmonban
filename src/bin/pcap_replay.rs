@@ -1,4 +1,4 @@
-use pcap::{Capture, Offline, Active, Device};
+use pcap::{Capture, Device};
 use std::env;
 use std::time::{Duration, Instant};
 use std::io::{self, Write};

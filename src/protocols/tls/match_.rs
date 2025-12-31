@@ -6,7 +6,6 @@ use crate::protocols::alerts::priority_to_severity;
 use crate::signatures::ast::{Rule, RuleOption, ContentMatch};
 use crate::types::DetectionType;
 use super::state::TlsState;
-use super::types::*;
 
 pub struct TlsMatcher;
 

@@ -4,7 +4,7 @@
 //! Ground truth: Attacker is 192.168.10.51, target is 192.168.10.50
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -235,7 +235,7 @@ fn main() -> anyhow::Result<()> {
     let attacker_detection_rate = detected_attackers as f64 / total_attackers as f64 * 100.0;
 
     // For attack packet-level detection, we use brute force + scan + signature
-    let attack_packets_detected = results.brute_force_detections + results.scan_detections + results.signature_attack_detections;
+    let _attack_packets_detected = results.brute_force_detections + results.scan_detections + results.signature_attack_detections;
 
     // Print results
     println!("╔════════════════════════════════════════════════════════════════════════════════╗");

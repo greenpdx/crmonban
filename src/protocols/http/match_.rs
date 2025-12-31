@@ -8,7 +8,6 @@ use crate::protocols::alerts::priority_to_severity;
 use crate::signatures::ast::{Rule, RuleOption, ContentMatch};
 use crate::types::DetectionType;
 use super::state::HttpState;
-use super::types::*;
 
 /// HTTP rule matcher
 pub struct HttpMatcher;
@@ -46,7 +45,7 @@ impl HttpMatcher {
     /// Check for protocol-level security issues
     fn check_protocol_alerts(
         &self,
-        state: &ProtocolState,
+        _state: &ProtocolState,
         http_state: Option<&HttpState>,
     ) -> Vec<ProtocolAlert> {
         let mut alerts = Vec::new();

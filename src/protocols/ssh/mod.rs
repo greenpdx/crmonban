@@ -150,7 +150,7 @@ impl SshProtocolParser {
     }
 
     fn process_kex_init(&self, payload: &[u8], pstate: &mut ProtocolState, is_client: bool) -> Option<ParseResult> {
-        let parser = if is_client { &self.client_parser } else { &self.server_parser };
+        let _parser = if is_client { &self.client_parser } else { &self.server_parser };
         let mut parser_copy = SshParser::new(is_client);
         let event = parser_copy.parse_packet(payload)?;
 

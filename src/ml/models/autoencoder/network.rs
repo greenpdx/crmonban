@@ -124,6 +124,7 @@ impl<B: Backend> Autoencoder<B> {
 
 /// Stub implementation when ml-advanced feature is not enabled
 #[cfg(not(feature = "ml-advanced"))]
+#[allow(dead_code)]
 pub struct Autoencoder {
     config: AutoencoderConfig,
 }

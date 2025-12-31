@@ -19,8 +19,6 @@
 //!   crmonban-feedback apply --config /etc/crmonban/crmonban.toml
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

@@ -49,17 +49,15 @@ pub use feedback::{
     FeedbackAdapter, CorrectionSource, DiscoverySource, ModelFeedbackStats,
 };
 
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::ml::unified::{UnifiedFeatureVector, UNIFIED_DIM};
 use crate::ml::baseline::Baseline;
 use crate::ml::models::{
-    EnsembleDetector, IsolationForest, GradientBoostDetector,
-    AutoencoderDetector, TemporalDetector,
+    EnsembleDetector, IsolationForest,
 };
 
 /// Online learning configuration
@@ -379,7 +377,7 @@ impl OnlineLearner {
     }
 
     /// Update isolation forest with new trees
-    pub fn update_isolation_forest(&mut self, forest: &mut IsolationForest) {
+    pub fn update_isolation_forest(&mut self, _forest: &mut IsolationForest) {
         if !self.updater.tree_rotation_ready() {
             return;
         }
@@ -442,7 +440,7 @@ impl OnlineLearner {
     }
 
     /// Adjust ensemble weights based on model performance
-    fn adjust_ensemble_weights(&self, ensemble: &mut EnsembleDetector) {
+    fn adjust_ensemble_weights(&self, _ensemble: &mut EnsembleDetector) {
         let perf = &self.model_performance;
 
         // Calculate weight adjustments based on accuracy

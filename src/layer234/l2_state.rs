@@ -14,6 +14,7 @@ use super::protocols::{ArpPacket, ArpOp, DhcpPacket, DhcpMessageType, Icmpv6Ra};
 
 /// MAC-IP binding with history
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct MacBinding {
     mac: [u8; 6],
     first_seen: Instant,
@@ -207,6 +208,7 @@ pub struct ArpStats {
 
 /// DHCP client state
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DhcpClientState {
     first_seen: Instant,
     last_seen: Instant,
@@ -384,6 +386,7 @@ impl Default for DhcpStateTracker {
 
 /// Router information
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct RouterInfo {
     mac: Option<[u8; 6]>,
     first_seen: Instant,

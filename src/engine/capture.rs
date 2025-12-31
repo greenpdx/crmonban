@@ -138,7 +138,7 @@ impl NfqueueCapture {
 }
 
 impl PacketCapture for NfqueueCapture {
-    fn next_packet(&mut self, packet_id: u64) -> anyhow::Result<Option<Packet>> {
+    fn next_packet(&mut self, _packet_id: u64) -> anyhow::Result<Option<Packet>> {
         // Return dummy packets for testing (NFQUEUE requires root)
         std::thread::sleep(Duration::from_millis(100));
         self.stats.received += 1;
@@ -264,7 +264,7 @@ impl PcapCapture {
 }
 
 impl PacketCapture for PcapCapture {
-    fn next_packet(&mut self, packet_id: u64) -> anyhow::Result<Option<Packet>> {
+    fn next_packet(&mut self, _packet_id: u64) -> anyhow::Result<Option<Packet>> {
         match self.capture.next_packet() {
             Ok(pkt) => {
                 self.stats.received += 1;

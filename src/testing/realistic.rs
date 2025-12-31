@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use chrono::{DateTime, TimeZone, Utc};
 
 use crate::types::{
-    Packet, TcpFlags, IpProtocol, TcpInfo, UdpInfo,
+    Packet, TcpFlags, IpProtocol,
 };
 
 use super::ground_truth::GroundTruth;

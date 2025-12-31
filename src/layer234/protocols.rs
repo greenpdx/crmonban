@@ -2,7 +2,7 @@
 //!
 //! Parsers for ARP, DHCP, ICMPv6 Router Advertisements, and BGP.
 
-use std::net::{Ipv4Addr, Ipv6Addr, IpAddr};
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 // ============================================================================
 // ARP Protocol

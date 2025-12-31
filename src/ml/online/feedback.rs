@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::ml::unified::{UnifiedFeatureVector, UNIFIED_DIM};
+use crate::ml::unified::UNIFIED_DIM;
 use super::replay_buffer::{ExperienceSample, ReplayBuffer, SampleLabel, SamplePriority};
 
 /// Feedback event types from the detection system
@@ -476,10 +476,10 @@ impl FeedbackAdapter {
     /// Convert correlation result to feedback events
     pub fn from_correlation_stats(
         &self,
-        stats: &crate::feedback::correlation::CorrelationStats,
-        features_cache: &HashMap<u64, [f32; UNIFIED_DIM]>,
+        _stats: &crate::feedback::correlation::CorrelationStats,
+        _features_cache: &HashMap<u64, [f32; UNIFIED_DIM]>,
     ) -> Vec<FeedbackEvent> {
-        let mut events = Vec::new();
+        let events = Vec::new();
 
         // This would be called when correlation completes with per-flow results
         // For now, we just track aggregate stats

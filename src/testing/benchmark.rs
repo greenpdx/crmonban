@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use pcap::Capture;
 use serde::{Deserialize, Serialize};
@@ -361,7 +361,7 @@ impl DetectionBenchmark {
     }
 
     /// Check if detection is a true positive
-    fn check_true_positive(&mut self, packet: &Packet, event: &DetectionEvent) -> bool {
+    fn check_true_positive(&mut self, _packet: &Packet, event: &DetectionEvent) -> bool {
         if let Some(ref mut gt) = self.ground_truth {
             matches!(gt.match_detection(event), MatchResult::TruePositive { .. })
         } else {
@@ -387,8 +387,8 @@ impl DetectionBenchmark {
         let mut stage_metrics: Vec<StageMetrics> = Vec::new();
         let mut total_time_ns = 0u64;
 
-        for (name, collector) in self.collectors.drain() {
-            let mut metrics = collector.finalize();
+        for (_name, collector) in self.collectors.drain() {
+            let metrics = collector.finalize();
             total_time_ns += metrics.total_time_ns;
             stage_metrics.push(metrics);
         }

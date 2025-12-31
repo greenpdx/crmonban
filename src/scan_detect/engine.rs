@@ -298,7 +298,7 @@ impl ScanDetectEngine {
         let ctx = if is_psh { ctx.with_psh() } else { ctx };
         let ctx = if is_urg { ctx.with_urg() } else { ctx };
         let ctx = ctx.with_payload(payload_size);
-        let ctx = if let t = ttl { ctx.with_ttl(t) } else { ctx };
+        let ctx = ctx.with_ttl(ttl);
 
         // Evaluate all rules
         let results = self.rules.evaluate_all(&ctx);
@@ -309,7 +309,10 @@ impl ScanDetectEngine {
                                            "STEALTH1", "STEALTH2", "STEALTH3",
                                            "STEALTH4", "STEALTH5", "STEALTH6", "STEALTH7"];
         {
-            let behavior = self.behaviors.get_mut(&src_ip).unwrap();
+            // Behavior was just inserted via entry() above, so this should always exist
+            let Some(behavior) = self.behaviors.get_mut(&src_ip) else {
+                return None; // Defensive: should never happen
+            };
             for result in &results {
                 // Skip rules that should only fire once
                 if ONCE_ONLY_RULES.contains(&result.rule_id.as_str()) {
@@ -470,7 +473,7 @@ impl ScanDetectEngine {
                 *rule_scores.entry(entry.rule_id.clone()).or_insert(0.0) += entry.delta;
             }
             let mut top_rules: Vec<_> = rule_scores.into_iter().collect();
-            top_rules.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            top_rules.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             top_rules.truncate(5);
 
             let alert_type = match classification {
@@ -603,7 +606,7 @@ impl ScanDetectEngine {
             .iter()
             .map(|(ip, b)| (*ip, b.score, b.classification))
             .collect();
-        scanners.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scanners.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scanners.truncate(limit);
         scanners
     }
