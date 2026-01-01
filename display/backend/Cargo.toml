@@ -30,3 +30,6 @@ futures-util = "0.3"
 
 # Real-time updates
 tokio-stream = { version = "0.1", features = ["sync"] }
+
+# Hostname detection
+hostname = "0.4"

@@ -10,6 +10,7 @@ mod api;
 mod handlers;
 mod ipc_handler;
 mod models;
+mod remote_aggregator;
 mod state;
 
 use state::AppState;
@@ -76,6 +77,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/system/status", get(handlers::system::get_status))
         .route("/api/system/config", get(handlers::system::get_config))
         .route("/api/system/activity", get(handlers::system::activity_log))
+        // Remote hosts
+        .route("/api/remote/hosts", get(handlers::remote::list_remote_hosts))
+        .route("/api/remote/hosts/{name}/reconnect", axum::routing::post(handlers::remote::reconnect_host))
+        .route("/api/remote/overview", get(handlers::remote::aggregated_overview))
+        .route("/api/remote/bans", get(handlers::remote::aggregated_bans))
+        .route("/api/remote/metrics", get(handlers::remote::aggregated_metrics))
         // WebSocket for real-time
         .route("/ws", get(handlers::websocket::ws_handler))
         .layer(cors)

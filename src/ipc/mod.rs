@@ -9,10 +9,10 @@ pub mod display;
 pub mod messages;
 pub mod server;
 
-pub use client::{connect_with_retry, IpcClient};
+pub use client::{connect_with_retry, IpcClient, TlsClientConfig, TlsIpcClient};
 pub use display::DisplayProcess;
 pub use messages::*;
-pub use server::{IpcRequest, IpcServer};
+pub use server::{IpcRequest, IpcServer, TlsConfig};
 
 /// Default socket path
 pub const DEFAULT_SOCKET_PATH: &str = "/run/crmonban/events.sock";

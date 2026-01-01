@@ -240,12 +240,15 @@ impl Default for GeneralConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DeploymentMode {
-    /// Protect this host only (INPUT chain)
+    /// Protect this host only (INPUT chain) - full protection features
     #[default]
     Host,
     /// Network gateway/firewall between internal and external networks (FORWARD chain)
     /// Use `protect_self` in DeploymentConfig to also protect the gateway host
     Gateway,
+    /// Lightweight host monitoring (INPUT + OUTPUT chains)
+    /// Focused on application-level detection and unauthorized outbound traffic
+    HostLite,
 }
 
 impl std::fmt::Display for DeploymentMode {
@@ -253,14 +256,26 @@ impl std::fmt::Display for DeploymentMode {
         match self {
             DeploymentMode::Host => write!(f, "host"),
             DeploymentMode::Gateway => write!(f, "gateway"),
+            DeploymentMode::HostLite => write!(f, "hostlite"),
         }
     }
+}
+
+/// Action for unauthorized outbound traffic (HostLite mode)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputAction {
+    /// Log unauthorized outbound connections only
+    #[default]
+    Log,
+    /// Block unauthorized outbound connections (not in allowlist)
+    Block,
 }
 
 /// Deployment configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentConfig {
-    /// Deployment mode: "host" or "gateway"
+    /// Deployment mode: "host", "gateway", or "hostlite"
     #[serde(default)]
     pub mode: DeploymentMode,
 
@@ -291,6 +306,26 @@ pub struct DeploymentConfig {
     /// NAT mode: none, snat, masquerade
     #[serde(default)]
     pub nat_mode: NatMode,
+
+    /// Action for unauthorized outbound traffic (HostLite mode): "log" or "block"
+    #[serde(default)]
+    pub output_action: OutputAction,
+
+    /// Allowed outbound destinations (IPs/CIDRs) when output_action is "block"
+    #[serde(default)]
+    pub outbound_allowlist: Vec<String>,
+
+    /// Enable auto-detection of deployment mode based on traffic patterns
+    #[serde(default)]
+    pub auto_detect_mode: bool,
+
+    /// Threshold of FORWARD packets to trigger Gateway mode auto-detection
+    #[serde(default = "default_forward_threshold")]
+    pub forward_detect_threshold: u64,
+
+    /// Window in seconds for auto-detection sampling
+    #[serde(default = "default_detect_window")]
+    pub detect_window_secs: u64,
 }
 
 impl Default for DeploymentConfig {
@@ -304,8 +339,21 @@ impl Default for DeploymentConfig {
             inspect_outbound: false,
             conn_rate_limit: 0,
             nat_mode: NatMode::None,
+            output_action: OutputAction::Log,
+            outbound_allowlist: Vec::new(),
+            auto_detect_mode: false,
+            forward_detect_threshold: default_forward_threshold(),
+            detect_window_secs: default_detect_window(),
         }
     }
+}
+
+fn default_forward_threshold() -> u64 {
+    100 // FORWARD packets to trigger gateway mode
+}
+
+fn default_detect_window() -> u64 {
+    60 // seconds for auto-detection sampling
 }
 
 impl DeploymentConfig {
@@ -313,6 +361,7 @@ impl DeploymentConfig {
     pub fn has_input_protection(&self) -> bool {
         match self.mode {
             DeploymentMode::Host => true,
+            DeploymentMode::HostLite => true,
             DeploymentMode::Gateway => self.protect_self,
         }
     }
@@ -320,6 +369,60 @@ impl DeploymentConfig {
     /// Whether this config inspects forwarded traffic (FORWARD chain)
     pub fn has_forward_protection(&self) -> bool {
         matches!(self.mode, DeploymentMode::Gateway)
+    }
+
+    /// Whether this config monitors outbound traffic (OUTPUT chain)
+    pub fn has_output_protection(&self) -> bool {
+        matches!(self.mode, DeploymentMode::HostLite) || self.inspect_outbound
+    }
+}
+
+/// Feature defaults for each deployment mode
+#[derive(Debug, Clone, Copy)]
+pub struct ModeFeatures {
+    /// Enable port scan detection
+    pub port_scan_detection: bool,
+    /// Enable deep packet inspection
+    pub dpi: bool,
+    /// Enable full packet engine
+    pub packet_engine: bool,
+    /// Enable log file monitoring
+    pub log_monitoring: bool,
+    /// Enable outbound traffic monitoring
+    pub output_monitoring: bool,
+    /// Enable ML-based detection
+    pub ml_detection: bool,
+}
+
+impl DeploymentMode {
+    /// Get default feature configuration for this deployment mode
+    pub fn default_features(&self) -> ModeFeatures {
+        match self {
+            DeploymentMode::Host => ModeFeatures {
+                port_scan_detection: true,
+                dpi: true,
+                packet_engine: true,
+                log_monitoring: true,
+                output_monitoring: false,
+                ml_detection: true,
+            },
+            DeploymentMode::Gateway => ModeFeatures {
+                port_scan_detection: true,
+                dpi: true,
+                packet_engine: true,
+                log_monitoring: false, // Gateway typically doesn't monitor local service logs
+                output_monitoring: false,
+                ml_detection: true,
+            },
+            DeploymentMode::HostLite => ModeFeatures {
+                port_scan_detection: false, // Lite mode focuses on app-level
+                dpi: false,                 // Lightweight - no DPI
+                packet_engine: false,       // Lightweight - no packet engine
+                log_monitoring: true,       // Primary detection method
+                output_monitoring: true,    // Key feature for unauthorized traffic
+                ml_detection: false,        // Lightweight - no ML
+            },
+        }
     }
 }
 
@@ -520,10 +623,68 @@ pub struct DisplayConfig {
     /// Auto-restart display server on crash
     #[serde(default = "default_true")]
     pub auto_restart: bool,
+
+    /// Enable TCP listener for remote connections
+    #[serde(default)]
+    pub tcp_enabled: bool,
+
+    /// TCP bind address for remote IPC (e.g., "0.0.0.0:3002")
+    #[serde(default = "default_tcp_bind")]
+    pub tcp_bind: String,
+
+    /// TLS certificate path (server cert for remote connections)
+    #[serde(default)]
+    pub tls_cert: Option<String>,
+
+    /// TLS private key path
+    #[serde(default)]
+    pub tls_key: Option<String>,
+
+    /// CA certificate path for client verification (mTLS)
+    #[serde(default)]
+    pub tls_ca: Option<String>,
+
+    /// Require client certificate for remote connections (mTLS)
+    #[serde(default = "default_true")]
+    pub require_client_cert: bool,
+
+    /// Remote crmonban hosts to aggregate data from
+    #[serde(default)]
+    pub remote_hosts: Vec<RemoteHostConfig>,
+}
+
+/// Configuration for a remote crmonban host
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteHostConfig {
+    /// Display name for this host
+    pub name: String,
+
+    /// Address of the remote crmonban (host:port)
+    pub address: String,
+
+    /// Client certificate for mTLS connection to this host
+    #[serde(default)]
+    pub client_cert: Option<String>,
+
+    /// Client private key for mTLS connection
+    #[serde(default)]
+    pub client_key: Option<String>,
+
+    /// CA certificate to verify remote server
+    #[serde(default)]
+    pub ca_cert: Option<String>,
+
+    /// Whether this host is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 fn default_display_port() -> u16 {
     3001
+}
+
+fn default_tcp_bind() -> String {
+    "127.0.0.1:3002".to_string()
 }
 
 impl Default for DisplayConfig {
@@ -534,6 +695,13 @@ impl Default for DisplayConfig {
             binary_path: None,
             socket_path: None,
             auto_restart: true,
+            tcp_enabled: false,
+            tcp_bind: default_tcp_bind(),
+            tls_cert: None,
+            tls_key: None,
+            tls_ca: None,
+            require_client_cert: true,
+            remote_hosts: Vec::new(),
         }
     }
 }

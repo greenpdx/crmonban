@@ -319,6 +319,170 @@ impl Firewall {
             self.add_nat_rules(&mut batch);
         }
 
+        // Create OUTPUT chain for HostLite mode (unauthorized traffic detection)
+        if self.deployment.has_output_protection() {
+            let output_chain_name = format!("{}_output", self.config.chain_name);
+
+            info!("Creating OUTPUT chain for outbound traffic monitoring");
+
+            // Create allowed outbound destinations set (IPv4)
+            let mut flags_outbound_v4 = HashSet::new();
+            flags_outbound_v4.insert(SetFlag::Interval);
+
+            batch.add(NfListObject::Set(Box::new(Set {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                name: Cow::Borrowed("allowed_outbound_v4"),
+                handle: None,
+                set_type: SetTypeValue::Single(SetType::Ipv4Addr),
+                policy: None,
+                flags: Some(flags_outbound_v4),
+                elem: None,
+                timeout: None,
+                gc_interval: None,
+                size: None,
+                comment: Some(Cow::Borrowed("crmonban allowed outbound IPv4 destinations")),
+            })));
+
+            // Create allowed outbound destinations set (IPv6)
+            let mut flags_outbound_v6 = HashSet::new();
+            flags_outbound_v6.insert(SetFlag::Interval);
+
+            batch.add(NfListObject::Set(Box::new(Set {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                name: Cow::Borrowed("allowed_outbound_v6"),
+                handle: None,
+                set_type: SetTypeValue::Single(SetType::Ipv6Addr),
+                policy: None,
+                flags: Some(flags_outbound_v6),
+                elem: None,
+                timeout: None,
+                gc_interval: None,
+                size: None,
+                comment: Some(Cow::Borrowed("crmonban allowed outbound IPv6 destinations")),
+            })));
+
+            // Create OUTPUT chain
+            batch.add(NfListObject::Chain(Chain {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                name: Cow::Owned(output_chain_name.clone()),
+                newname: None,
+                handle: None,
+                _type: Some(NfChainType::Filter),
+                hook: Some(NfHook::Output),
+                prio: Some(self.config.priority),
+                dev: None,
+                policy: Some(NfChainPolicy::Accept),
+            }));
+
+            // Add logging rule for new outbound connections (ct state new)
+            batch.add(NfListObject::Rule(Rule {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                chain: Cow::Owned(output_chain_name.clone()),
+                handle: None,
+                index: None,
+                comment: Some(Cow::Borrowed("Log new outbound connections")),
+                expr: Cow::Owned(vec![
+                    // Match ct state new
+                    Statement::Match(Match {
+                        left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                            key: Cow::Borrowed("state"),
+                            family: None,
+                            dir: None,
+                        })),
+                        right: Expression::String(Cow::Borrowed("new")),
+                        op: Operator::EQ,
+                    }),
+                    // Log the connection
+                    Statement::Log(Some(Log {
+                        prefix: Some(Cow::Borrowed("[crmonban-output] ")),
+                        group: None,
+                        snaplen: None,
+                        queue_threshold: None,
+                        level: Some(LogLevel::Info),
+                        flags: None,
+                    })),
+                ]),
+            }));
+
+            // If output_action is Block, add rules to drop non-allowlisted destinations
+            if self.deployment.output_action == crate::config::OutputAction::Block {
+                // Drop IPv4 not in allowlist
+                batch.add(NfListObject::Rule(Rule {
+                    family: NfFamily::INet,
+                    table: Cow::Owned(self.config.table_name.clone()),
+                    chain: Cow::Owned(output_chain_name.clone()),
+                    handle: None,
+                    index: None,
+                    comment: Some(Cow::Borrowed("Block unauthorized outbound IPv4")),
+                    expr: Cow::Owned(vec![
+                        // Match ct state new
+                        Statement::Match(Match {
+                            left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                                key: Cow::Borrowed("state"),
+                                family: None,
+                                dir: None,
+                            })),
+                            right: Expression::String(Cow::Borrowed("new")),
+                            op: Operator::EQ,
+                        }),
+                        // Match destination NOT in allowed set
+                        Statement::Match(Match {
+                            left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                                PayloadField {
+                                    protocol: Cow::Borrowed("ip"),
+                                    field: Cow::Borrowed("daddr"),
+                                },
+                            ))),
+                            right: Expression::String(Cow::Borrowed("@allowed_outbound_v4")),
+                            op: Operator::NEQ,
+                        }),
+                        Statement::Drop(None),
+                    ]),
+                }));
+
+                // Drop IPv6 not in allowlist
+                batch.add(NfListObject::Rule(Rule {
+                    family: NfFamily::INet,
+                    table: Cow::Owned(self.config.table_name.clone()),
+                    chain: Cow::Owned(output_chain_name.clone()),
+                    handle: None,
+                    index: None,
+                    comment: Some(Cow::Borrowed("Block unauthorized outbound IPv6")),
+                    expr: Cow::Owned(vec![
+                        // Match ct state new
+                        Statement::Match(Match {
+                            left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                                key: Cow::Borrowed("state"),
+                                family: None,
+                                dir: None,
+                            })),
+                            right: Expression::String(Cow::Borrowed("new")),
+                            op: Operator::EQ,
+                        }),
+                        // Match destination NOT in allowed set
+                        Statement::Match(Match {
+                            left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                                PayloadField {
+                                    protocol: Cow::Borrowed("ip6"),
+                                    field: Cow::Borrowed("daddr"),
+                                },
+                            ))),
+                            right: Expression::String(Cow::Borrowed("@allowed_outbound_v6")),
+                            op: Operator::NEQ,
+                        }),
+                        Statement::Drop(None),
+                    ]),
+                }));
+            }
+
+            // Populate allowlist from config
+            self.init_outbound_allowlist(&mut batch);
+        }
+
         // Add port scan detection rules if enabled
         if let Some(ref ps_config) = self.port_scan_config {
             if ps_config.enabled {
@@ -597,6 +761,126 @@ impl Firewall {
             }
         }
 
+        Ok(())
+    }
+
+    /// Initialize outbound allowlist from config (for HostLite mode)
+    fn init_outbound_allowlist(&self, batch: &mut Batch) {
+        if self.deployment.outbound_allowlist.is_empty() {
+            return;
+        }
+
+        info!(
+            "Initializing outbound allowlist with {} entries",
+            self.deployment.outbound_allowlist.len()
+        );
+
+        for addr_str in &self.deployment.outbound_allowlist {
+            // Try to parse as IP address or CIDR
+            if let Ok(ip) = addr_str.parse::<IpAddr>() {
+                match ip {
+                    IpAddr::V4(v4) => {
+                        batch.add_cmd(NfCmd::Add(NfListObject::Element(Element {
+                            family: NfFamily::INet,
+                            table: Cow::Owned(self.config.table_name.clone()),
+                            name: Cow::Borrowed("allowed_outbound_v4"),
+                            elem: Cow::Owned(vec![Expression::String(Cow::Owned(v4.to_string()))]),
+                        })));
+                    }
+                    IpAddr::V6(v6) => {
+                        batch.add_cmd(NfCmd::Add(NfListObject::Element(Element {
+                            family: NfFamily::INet,
+                            table: Cow::Owned(self.config.table_name.clone()),
+                            name: Cow::Borrowed("allowed_outbound_v6"),
+                            elem: Cow::Owned(vec![Expression::String(Cow::Owned(v6.to_string()))]),
+                        })));
+                    }
+                }
+            } else if addr_str.contains('/') {
+                // CIDR notation - add as range
+                batch.add_cmd(NfCmd::Add(NfListObject::Element(Element {
+                    family: NfFamily::INet,
+                    table: Cow::Owned(self.config.table_name.clone()),
+                    name: if addr_str.contains(':') {
+                        Cow::Borrowed("allowed_outbound_v6")
+                    } else {
+                        Cow::Borrowed("allowed_outbound_v4")
+                    },
+                    elem: Cow::Owned(vec![Expression::String(Cow::Owned(addr_str.clone()))]),
+                })));
+            } else {
+                warn!("Invalid address in outbound allowlist: {}", addr_str);
+            }
+        }
+    }
+
+    /// Add an IP to the outbound allowlist (for HostLite mode)
+    pub fn add_outbound_allow(&self, ip: &IpAddr) -> Result<()> {
+        let mut batch = Batch::new();
+
+        match ip {
+            IpAddr::V4(v4) => {
+                batch.add_cmd(NfCmd::Add(NfListObject::Element(Element {
+                    family: NfFamily::INet,
+                    table: Cow::Owned(self.config.table_name.clone()),
+                    name: Cow::Borrowed("allowed_outbound_v4"),
+                    elem: Cow::Owned(vec![Expression::String(Cow::Owned(v4.to_string()))]),
+                })));
+            }
+            IpAddr::V6(v6) => {
+                batch.add_cmd(NfCmd::Add(NfListObject::Element(Element {
+                    family: NfFamily::INet,
+                    table: Cow::Owned(self.config.table_name.clone()),
+                    name: Cow::Borrowed("allowed_outbound_v6"),
+                    elem: Cow::Owned(vec![Expression::String(Cow::Owned(v6.to_string()))]),
+                })));
+            }
+        }
+
+        let ruleset = batch.to_nftables();
+        apply_ruleset(&ruleset).context("Failed to add to outbound allowlist")?;
+
+        info!("Added {} to outbound allowlist", ip);
+        Ok(())
+    }
+
+    /// Remove an IP from the outbound allowlist (for HostLite mode)
+    pub fn remove_outbound_allow(&self, ip: &IpAddr) -> Result<()> {
+        let mut batch = Batch::new();
+
+        match ip {
+            IpAddr::V4(v4) => {
+                batch.add_cmd(NfCmd::Delete(NfListObject::Element(Element {
+                    family: NfFamily::INet,
+                    table: Cow::Owned(self.config.table_name.clone()),
+                    name: Cow::Borrowed("allowed_outbound_v4"),
+                    elem: Cow::Owned(vec![Expression::String(Cow::Owned(v4.to_string()))]),
+                })));
+            }
+            IpAddr::V6(v6) => {
+                batch.add_cmd(NfCmd::Delete(NfListObject::Element(Element {
+                    family: NfFamily::INet,
+                    table: Cow::Owned(self.config.table_name.clone()),
+                    name: Cow::Borrowed("allowed_outbound_v6"),
+                    elem: Cow::Owned(vec![Expression::String(Cow::Owned(v6.to_string()))]),
+                })));
+            }
+        }
+
+        let ruleset = batch.to_nftables();
+        apply_ruleset(&ruleset).context("Failed to remove from outbound allowlist")?;
+
+        info!("Removed {} from outbound allowlist", ip);
+        Ok(())
+    }
+
+    /// Block outbound traffic to a specific destination (for HostLite mode)
+    pub fn block_outbound(&self, ip: &IpAddr) -> Result<()> {
+        // For blocking outbound, we remove from allowlist if in block mode
+        // In log mode, this is a no-op as we don't block
+        if self.deployment.output_action == crate::config::OutputAction::Block {
+            self.remove_outbound_allow(ip)?;
+        }
         Ok(())
     }
 
