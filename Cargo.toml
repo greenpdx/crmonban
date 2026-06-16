@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "network-programming"]
 crvecdb = "0.1"
 
 # nftables JSON API
-nftables = { version = "0.6.4", registry = "kellnr" }
+nftables = "0.6.3"
 
 # CLI
 clap = { version = "*", features = ["derive", "env"] }
@@ -50,7 +50,7 @@ bincode = { version = "2", optional = true, features = ["serde"] }
 async-trait = { version = "*", optional = true }
 
 # ML/Anomaly detection dependencies (optional)
-rand = { version = "*", optional = true }
+rand = { version = "0.9", optional = true }
 
 # Advanced ML dependencies (optional) - neural networks, gradient boosting
 burn = { version = "0.16", default-features = false, features = ["ndarray", "autodiff", "train"], optional = true }
@@ -121,7 +121,7 @@ tabled = "*"
 colored = "*"
 
 # NFQUEUE for deep packet inspection
-nfq = "*"
+nfq = "0.2"
 ctrlc = "3.4"
 
 # Email alerts

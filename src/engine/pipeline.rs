@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Receiver;
+use crossbeam_channel::{Receiver, Sender};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -125,6 +125,10 @@ pub struct Pipeline {
     event_tx: mpsc::Sender<DetectionEvent>,
     /// Optional batched writer for database persistence
     db_writer: Option<BatchedWriterHandle>,
+    /// Optional sink routing inline verdicts (packet_id, accept) back to the
+    /// capture layer. Used by NFQUEUE inline mode so every captured packet
+    /// receives exactly one ACCEPT/DROP verdict.
+    verdict_tx: Option<Sender<(u64, bool)>>,
 }
 
 impl Pipeline {
@@ -139,12 +143,21 @@ impl Pipeline {
             packet_rx,
             event_tx,
             db_writer: None,
+            verdict_tx: None,
         }
     }
 
     /// Set the database writer for event persistence
     pub fn with_db_writer(mut self, writer: BatchedWriterHandle) -> Self {
         self.db_writer = Some(writer);
+        self
+    }
+
+    /// Set the verdict sink that routes inline ACCEPT/DROP decisions back to the
+    /// capture layer (NFQUEUE inline mode). When unset (passive capture) the
+    /// pipeline computes verdicts but issues none.
+    pub fn with_verdict_sink(mut self, verdict_tx: Sender<(u64, bool)>) -> Self {
+        self.verdict_tx = Some(verdict_tx);
         self
     }
 
@@ -173,8 +186,28 @@ impl Pipeline {
                     packets_this_interval += 1;
                     bytes_this_interval += packet.raw_len as u64;
 
-                    // Process packet through worker pool
-                    let events = worker_pool.process(packet, &self.config).await;
+                    // Process packet through worker pool. Use the full analysis
+                    // so we can read the verdict and route it back to the capture.
+                    let packet_id = packet.id;
+                    let analysis = worker_pool.process_full(packet, &self.config).await;
+
+                    // Issue the inline verdict for this packet (NFQUEUE). The
+                    // verdict defaults to Accept and is set to Drop/Reject by the
+                    // alert analyzer when a stage flags the packet. Accept unless
+                    // blocking, so every captured packet gets exactly one verdict.
+                    if let Some(ref verdict_tx) = self.verdict_tx {
+                        // accept = true for Accept/Queue, false for Drop/Reject.
+                        // The bool channel downgrades Reject to a plain DROP (no
+                        // RST/ICMP) and treats Queue(n) as Accept; no stage emits
+                        // those today — revisit (pass the full PacketVerdict) if
+                        // Reject/requeue are ever wired up.
+                        let accept = !analysis.verdict.is_blocking();
+                        // Unbounded sink: send never blocks, so the async pipeline
+                        // cannot deadlock against the bounded packet channel.
+                        let _ = verdict_tx.send((packet_id, accept));
+                    }
+
+                    let events = analysis.events;
 
                     // Record latency
                     let latency_us = packet_start.elapsed().as_micros() as u64;

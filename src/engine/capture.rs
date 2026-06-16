@@ -5,14 +5,17 @@
 //! - AF_PACKET (raw socket via libpcap)
 //! - PCAP file replay
 
+use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::time::Duration;
 
+use nfq::{Message, Queue, Verdict};
 use pcap::{Capture, Active, Offline};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
-use crate::core::{Packet, IpProtocol, parse_ethernet_packet};
+use crate::core::{Packet, IpProtocol, parse_ethernet_packet, parse_ip_packet};
 
 /// Capture method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +86,14 @@ pub trait PacketCapture: Send {
 
     /// Close the capture
     fn close(&mut self);
+
+    /// Number of packets captured but not yet verdicted (parked awaiting a
+    /// verdict). Non-zero only for inline captures (NFQUEUE); passive captures
+    /// issue no verdicts and always return 0. Used at shutdown to drain
+    /// in-flight verdicts before closing.
+    fn pending_verdicts(&self) -> usize {
+        0
+    }
 }
 
 /// Capture statistics
@@ -115,39 +126,105 @@ pub fn create_capture(config: &CaptureConfig) -> anyhow::Result<Box<dyn PacketCa
 }
 
 /// NFQUEUE-based capture (inline mode)
+///
+/// Receives packets that nftables has queued to userspace and lets the engine
+/// issue an ACCEPT/DROP verdict per packet. Note: traffic from already-blocked
+/// IPs is dropped in-kernel by nftables (at a lower chain priority) and never
+/// reaches this queue, so this capture only ever sees undecided traffic — there
+/// is no blocklist logic here.
 pub struct NfqueueCapture {
-    #[allow(dead_code)]
     queue_num: u16,
+    queue: Queue,
     stats: CaptureStats,
+    /// Messages awaiting a verdict, keyed by the kernel NFQUEUE packet id.
+    ///
+    /// `nfq::Queue::verdict` consumes the `Message`, so each received message is
+    /// parked here between `next_packet` and `set_verdict` and is removed exactly
+    /// once when its verdict is issued.
+    pending: HashMap<u64, Message>,
 }
 
 impl NfqueueCapture {
     pub fn new(config: &CaptureConfig) -> anyhow::Result<Self> {
-        // NFQUEUE requires root privileges - actual binding would happen in run()
+        // Opening and binding the queue requires CAP_NET_ADMIN (root).
+        let mut queue = Queue::open()
+            .map_err(|e| anyhow::anyhow!("failed to open NFQUEUE: {}", e))?;
+
+        queue
+            .bind(config.nfqueue_num)
+            .map_err(|e| anyhow::anyhow!("failed to bind NFQUEUE {}: {}", config.nfqueue_num, e))?;
+
+        // Non-blocking so the engine's capture loop can poll for the stop signal
+        // instead of blocking indefinitely inside `recv`.
+        queue.set_nonblocking(true);
+
+        info!("NFQUEUE capture bound to queue {}", config.nfqueue_num);
+
         Ok(Self {
             queue_num: config.nfqueue_num,
+            queue,
             stats: CaptureStats::default(),
+            pending: HashMap::new(),
         })
-    }
-
-    #[allow(dead_code)]
-    fn parse_packet(&self, data: &[u8], id: u32) -> Option<Packet> {
-        // Use the parser module for consistent packet parsing
-        crate::core::parser::parse_ip_packet(data, id as u64, String::new())
     }
 }
 
 impl PacketCapture for NfqueueCapture {
     fn next_packet(&mut self, _packet_id: u64) -> anyhow::Result<Option<Packet>> {
-        // Return dummy packets for testing (NFQUEUE requires root)
-        std::thread::sleep(Duration::from_millis(100));
+        // The engine assigns ids; for NFQUEUE we must use the kernel-provided
+        // packet id so the matching verdict can be routed back to the kernel.
+        let msg = match self.queue.recv() {
+            Ok(msg) => msg,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                // No packet currently queued.
+                return Ok(None);
+            }
+            Err(e) => {
+                warn!("NFQUEUE recv error on queue {}: {}", self.queue_num, e);
+                return Err(e.into());
+            }
+        };
+
         self.stats.received += 1;
-        Ok(None)
+
+        let packet_id = msg.get_packet_id() as u64;
+
+        // NFQUEUE delivers IP-layer payloads (no Ethernet header), so parse from IP.
+        let parsed = parse_ip_packet(msg.get_payload(), packet_id, String::new());
+
+        match parsed {
+            Some(packet) => {
+                // Park the message until the engine issues a verdict for this id.
+                self.pending.insert(packet_id, msg);
+                Ok(Some(packet))
+            }
+            None => {
+                // Unparseable packet: accept it rather than leak the message (and
+                // thereby stall the kernel queue). Every received message must get
+                // exactly one verdict.
+                debug!(
+                    "NFQUEUE packet {} unparseable; accepting by default",
+                    packet_id
+                );
+                self.issue_verdict(msg, true);
+                Ok(None)
+            }
+        }
     }
 
-    fn set_verdict(&mut self, _packet_id: u64, _accept: bool) -> anyhow::Result<()> {
-        // Verdict handling would use msg.set_verdict() and queue.verdict(msg)
-        Ok(())
+    fn set_verdict(&mut self, packet_id: u64, accept: bool) -> anyhow::Result<()> {
+        match self.pending.remove(&packet_id) {
+            Some(msg) => {
+                self.issue_verdict(msg, accept);
+                Ok(())
+            }
+            None => {
+                // Either an unknown id or a packet already verdicted. Treat as a
+                // soft error so the engine never panics over a stray id.
+                warn!("set_verdict for unknown NFQUEUE packet id {}", packet_id);
+                Ok(())
+            }
+        }
     }
 
     fn stats(&mut self) -> CaptureStats {
@@ -155,7 +232,31 @@ impl PacketCapture for NfqueueCapture {
     }
 
     fn close(&mut self) {
-        // Cleanup handled by Drop
+        // Issue a default ACCEPT for any packets still in flight so the kernel
+        // queue does not stall, then unbind.
+        for (id, mut msg) in self.pending.drain() {
+            msg.set_verdict(Verdict::Accept);
+            if let Err(e) = self.queue.verdict(msg) {
+                warn!("failed to flush verdict for NFQUEUE packet {}: {}", id, e);
+            }
+        }
+        if let Err(e) = self.queue.unbind(self.queue_num) {
+            warn!("failed to unbind NFQUEUE {}: {}", self.queue_num, e);
+        }
+    }
+
+    fn pending_verdicts(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+impl NfqueueCapture {
+    /// Send a single ACCEPT/DROP verdict to the kernel, consuming the message.
+    fn issue_verdict(&mut self, mut msg: Message, accept: bool) {
+        msg.set_verdict(if accept { Verdict::Accept } else { Verdict::Drop });
+        if let Err(e) = self.queue.verdict(msg) {
+            warn!("failed to send NFQUEUE verdict: {}", e);
+        }
     }
 }
 

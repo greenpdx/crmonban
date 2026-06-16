@@ -144,6 +144,9 @@ pub struct PacketEngine {
     shutdown_tx: Option<tokio::sync::broadcast::Sender<()>>,
     /// Optional database writer for event persistence
     db_writer: Option<BatchedWriterHandle>,
+    /// Capture thread handle, joined on stop() so in-flight verdicts drain
+    /// before the queue is closed.
+    capture_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl PacketEngine {
@@ -156,6 +159,7 @@ impl PacketEngine {
             event_tx: None,
             shutdown_tx: None,
             db_writer: None,
+            capture_handle: None,
         }
     }
 
@@ -211,6 +215,16 @@ impl PacketEngine {
             self.config.pipeline.buffer_size,
         );
 
+        // Create verdict channel: pipeline -> capture thread, (packet_id, accept).
+        // Unbounded on purpose: the async pipeline must never block issuing a
+        // verdict, or it would deadlock against the bounded packet channel above
+        // (capture blocked sending a packet, pipeline blocked sending a verdict).
+        // The capture thread drains this before each blocking packet send, so in
+        // steady state the backlog stays small (~NFQUEUE depth); it can grow
+        // transiently during a packet-send stall, bounded by packets the pipeline
+        // processed meanwhile.
+        let (verdict_tx, verdict_rx) = crossbeam_channel::unbounded::<(u64, bool)>();
+
         // Create event channel if not provided
         let event_tx = self.event_tx.clone().unwrap_or_else(|| {
             let (tx, _rx) = mpsc::channel(1000);
@@ -226,6 +240,8 @@ impl PacketEngine {
         if let Some(ref writer) = self.db_writer {
             pipeline = pipeline.with_db_writer(writer.clone());
         }
+        // Route inline ACCEPT/DROP verdicts back to the capture (NFQUEUE).
+        pipeline = pipeline.with_verdict_sink(verdict_tx);
 
         // Create action executor
         let _action_executor = ActionExecutor::new(self.config.action.clone());
@@ -240,7 +256,7 @@ impl PacketEngine {
         let capture_state = state.clone();
         let capture_stats = stats.clone();
 
-        std::thread::spawn(move || {
+        self.capture_handle = Some(std::thread::spawn(move || {
             match capture::create_capture(&capture_config) {
                 Ok(mut capture) => {
                     info!("Capture started: {:?}", capture_config.method);
@@ -249,6 +265,15 @@ impl PacketEngine {
                         // Check if should stop
                         if *capture_state.read() == EngineState::Stopping {
                             break;
+                        }
+
+                        // Apply verdicts the pipeline produced for previously
+                        // captured packets. For NFQUEUE this issues the kernel
+                        // ACCEPT/DROP; for passive captures set_verdict is a no-op.
+                        while let Ok((id, accept)) = verdict_rx.try_recv() {
+                            if let Err(e) = capture.set_verdict(id, accept) {
+                                warn!("Failed to set verdict for packet {}: {}", id, e);
+                            }
                         }
 
                         match capture.next_packet(0) {
@@ -271,6 +296,41 @@ impl PacketEngine {
                         }
                     }
 
+                    // Shutdown: we stopped capturing new packets, but the pipeline
+                    // is still computing verdicts for packets already handed off.
+                    // Keep applying them until none remain parked, so close()'s
+                    // default ACCEPT cannot override a real DROP for in-flight
+                    // packets (otherwise every restart would leak blocked traffic).
+                    // Bounded by a deadline so a wedged pipeline can't hang shutdown.
+                    let drain_deadline =
+                        std::time::Instant::now() + Duration::from_secs(5);
+                    loop {
+                        while let Ok((id, accept)) = verdict_rx.try_recv() {
+                            if let Err(e) = capture.set_verdict(id, accept) {
+                                warn!("Failed to set verdict for packet {}: {}", id, e);
+                            }
+                        }
+                        if capture.pending_verdicts() == 0 {
+                            break;
+                        }
+                        if std::time::Instant::now() >= drain_deadline {
+                            warn!(
+                                "Shutdown drain timed out with {} packet(s) still \
+                                 awaiting a verdict; accepting them",
+                                capture.pending_verdicts()
+                            );
+                            break;
+                        }
+                        // The inner loop drained every ready verdict; wait briefly
+                        // for the pipeline to produce the next one rather than
+                        // busy-polling try_recv.
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+
+                    // Flush a default ACCEPT for any genuinely-unverdicted leftovers
+                    // (deadline case only) and unbind the queue.
+                    capture.close();
+
                     info!("Capture stopped");
                 }
                 Err(e) => {
@@ -278,7 +338,7 @@ impl PacketEngine {
                     *capture_state.write() = EngineState::Error;
                 }
             }
-        });
+        }));
 
         // Start worker pool
         let worker_config = self.config.worker.clone();
@@ -311,8 +371,18 @@ impl PacketEngine {
             let _ = tx.send(());
         }
 
-        // Wait a bit for graceful shutdown
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for the capture thread to drain in-flight verdicts and close the
+        // queue cleanly before reporting stopped, so blocking decisions for
+        // in-flight packets are not lost. Join off the async runtime
+        // (spawn_blocking) so the pipeline task keeps being polled and feeding
+        // verdicts during the drain. Termination is guaranteed by the capture
+        // thread's 5s drain deadline, NOT by pipeline liveness — keep that
+        // deadline as the load-bearing backstop so stop() can never hang.
+        if let Some(handle) = self.capture_handle.take() {
+            let _ = tokio::task::spawn_blocking(move || handle.join()).await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
 
         // Update state
         *self.state.write() = EngineState::Stopped;
