@@ -116,13 +116,26 @@ impl Firewall {
     pub fn init(&self) -> Result<()> {
         info!("Initializing nftables configuration");
 
-        // Check if our table already exists
-        if self.table_exists()? {
-            debug!("Table {} already exists", self.config.table_name);
-            return Ok(());
-        }
-
         let mut batch = Batch::new();
+
+        // Reconcile: if our table already exists, delete it first (atomically, in
+        // this same batch) and rebuild from scratch, so config changes — the
+        // NFQUEUE number, the DPI/allow rules, the deployment mode — actually take
+        // effect on restart instead of being skipped. Bans are restored from the
+        // DB by sync_bans() right after init(), and the whitelist/CF allow set by
+        // sync_dpi_allow(); the delete+rebuild is one atomic apply, so there is no
+        // window with a half-built table.
+        if self.table_exists()? {
+            debug!(
+                "Table {} exists; rebuilding to apply current config",
+                self.config.table_name
+            );
+            batch.add_cmd(NfCmd::Delete(NfListObject::Table(Table {
+                family: NfFamily::INet,
+                name: Cow::Owned(self.config.table_name.clone()),
+                handle: None,
+            })));
+        }
 
         // Create table
         batch.add(NfListObject::Table(Table {
