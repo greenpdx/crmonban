@@ -1355,6 +1355,11 @@ async fn start_packet_engine(
         pipeline: PipelineConfig {
             enable_flows: true,
             enable_layer234: true,
+            // Protocol analysis runs the HTTP/DNS/TLS analyzers and the web-attack
+            // heuristic (SQLi/XSS/traversal/Log4Shell, DNS tunneling). It was
+            // off-by-default, so none of that ran inline — enable it so the
+            // protocol layer actually detects.
+            enable_protocols: true,
             enable_signatures: config.signatures_enabled,
             enable_ml: config.ml_detection,
             enable_correlation: false,
