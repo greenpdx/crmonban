@@ -1324,56 +1324,77 @@ impl Firewall {
             ]),
         }));
 
-        // Queue TCP traffic to userspace for DPI.
+        // Queue the FIRST N packets of each TCP connection to userspace for DPI.
         //
-        // NOTE (volume): this currently queues EVERY new+established TCP packet,
-        // not just the first N of a connection. On a busy host that is a lot of
-        // userspace round-trips; narrowing to `ct packets <= packets_per_conn`
-        // and honoring inspected_ports/excluded_ports is a follow-up. The flow
-        // cache bypasses already-judged flows in userspace, but they are still
-        // queued first.
+        // First-N (`ct packets <= packets_per_conn`) is the primary volume
+        // control: attacks are detectable in the opening packets (handshake, TLS
+        // ClientHello, HTTP request line, exploit payload), so we inspect the
+        // start of each flow and then let the rest pass IN-KERNEL. Once a flow
+        // exceeds N packets the rule no longer matches, so established traffic is
+        // accepted by the kernel WITHOUT re-queuing — no per-packet userspace
+        // cost. (packets_per_conn == 0 disables the limit and queues all
+        // new+established.)
+        let mut dpi_expr = vec![
+            // meta l4proto tcp
+            Statement::Match(Match {
+                left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                    PayloadField {
+                        protocol: Cow::Borrowed("meta"),
+                        field: Cow::Borrowed("l4proto"),
+                    },
+                ))),
+                right: Expression::String(Cow::Borrowed("tcp")),
+                op: Operator::EQ,
+            }),
+            // ct state { new, established } as an anonymous SET. The comma-string
+            // form ("new,established") is invalid nft JSON and would make the
+            // whole rule fail to apply — it must be {"set":["new","established"]}.
+            Statement::Match(Match {
+                left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                    key: Cow::Borrowed("state"),
+                    family: None,
+                    dir: None,
+                })),
+                right: Expression::Named(NamedExpression::Set(vec![
+                    nftables::expr::SetItem::Element(Expression::String(Cow::Borrowed("new"))),
+                    nftables::expr::SetItem::Element(Expression::String(Cow::Borrowed(
+                        "established",
+                    ))),
+                ])),
+                op: Operator::EQ,
+            }),
+        ];
+        if config.packets_per_conn > 0 {
+            // ct packets (ORIGINAL direction = inbound for a server connection)
+            // <= N: only the first N inbound packets of the connection. Counting
+            // the original direction is more predictable than the bidirectional
+            // total (it excludes the server's reply packets).
+            dpi_expr.push(Statement::Match(Match {
+                left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                    key: Cow::Borrowed("packets"),
+                    family: None,
+                    dir: Some(nftables::expr::CTDir::Original),
+                })),
+                right: Expression::Number(config.packets_per_conn as u32),
+                op: Operator::LEQ,
+            }));
+        }
+        // Queue to userspace with the `bypass` flag = FAIL-OPEN: the kernel
+        // ACCEPTS (rather than drops) when there is no listener OR the queue is
+        // full. Availability first — under overload, traffic passes UNINSPECTED
+        // (monitor queue depth to detect saturation).
+        dpi_expr.push(Statement::Queue(Queue {
+            num: Expression::Number(config.queue_num as u32),
+            flags: Some(HashSet::from([QueueFlag::Bypass])),
+        }));
         batch.add(NfListObject::Rule(Rule {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
             chain: Cow::Borrowed("dpi_inspect"),
             handle: None,
             index: None,
-            comment: Some(Cow::Borrowed("Queue new TCP connections for DPI")),
-            expr: Cow::Owned(vec![
-                // Match TCP protocol
-                Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("meta"),
-                            field: Cow::Borrowed("l4proto"),
-                        },
-                    ))),
-                    right: Expression::String(Cow::Borrowed("tcp")),
-                    op: Operator::EQ,
-                }),
-                // Match new + established TCP (see NOTE above re: volume)
-                Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("ct"),
-                            field: Cow::Borrowed("state"),
-                        },
-                    ))),
-                    right: Expression::String(Cow::Borrowed("new,established")),
-                    op: Operator::EQ,
-                }),
-                // Queue to userspace with the `bypass` flag = FAIL-OPEN. The
-                // kernel ACCEPTS the packet (rather than dropping) both when there
-                // is no userspace listener (crmonban crashed/restarting) AND when
-                // the queue is FULL. Availability first: losing or saturating the
-                // inspector must not black-hole traffic — the tradeoff is that
-                // under engine overload, traffic passes UNINSPECTED (monitor queue
-                // depth to detect saturation).
-                Statement::Queue(Queue {
-                    num: Expression::Number(config.queue_num as u32),
-                    flags: Some(HashSet::from([QueueFlag::Bypass])),
-                }),
-            ]),
+            comment: Some(Cow::Borrowed("Queue first-N TCP packets for DPI")),
+            expr: Cow::Owned(dpi_expr),
         }));
 
         info!("DPI rules added for NFQUEUE {}", config.queue_num);
