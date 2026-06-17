@@ -104,6 +104,12 @@ pub struct SignatureConfig {
     /// On by default for standalone use.
     pub match_addresses: bool,
 
+    /// `signature_severity` metadata values to exclude at load time. Defaults to
+    /// `["Informational"]` — informational rules (flowbit setters, version/UA
+    /// detection, "ET INFO") are not attacks and are the dominant source of
+    /// benign-traffic noise. Set to `[]` to load them.
+    pub excluded_severities: Vec<String>,
+
     /// Number of matcher worker threads
     pub worker_threads: usize,
 
@@ -150,6 +156,7 @@ impl Default for SignatureConfig {
             flow_tracking: true,
             threshold_tracking: true,
             match_addresses: true,
+            excluded_severities: vec!["Informational".to_string()],
             worker_threads: 4,
             auto_reload: true,
             classification_file: None,

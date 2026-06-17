@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::{error, info, warn};
 
-use super::ast::Rule;
+use super::ast::{Rule, RuleOption};
 use super::parser::{apply_content_modifiers, parse_rule, ParseError};
 use super::{RuleStats, SignatureConfig};
 
@@ -173,6 +173,27 @@ impl RuleLoader {
         if let Some(ref classtype) = rule.classtype {
             if self.config.excluded_classtypes.iter().any(|c| c.eq_ignore_ascii_case(classtype)) {
                 return false;
+            }
+        }
+
+        // Exclude by signature_severity metadata (noise reduction): informational
+        // rules are not attacks and are the main source of benign-traffic alerts.
+        if !self.config.excluded_severities.is_empty() {
+            if let Some(severity) = rule.options.iter().find_map(|o| match o {
+                RuleOption::Metadata(items) => items
+                    .iter()
+                    .find(|m| m.key.eq_ignore_ascii_case("signature_severity"))
+                    .map(|m| m.value.as_str()),
+                _ => None,
+            }) {
+                if self
+                    .config
+                    .excluded_severities
+                    .iter()
+                    .any(|s| s.eq_ignore_ascii_case(severity))
+                {
+                    return false;
+                }
             }
         }
 
