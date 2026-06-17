@@ -169,8 +169,19 @@ impl Crmonban {
         } else {
             None
         };
-        let dpi = if config.dpi.enabled {
-            Some(config.dpi.clone())
+        // Enable the DPI nft queue rules when DPI is configured OR the packet
+        // engine runs in NFQUEUE mode — otherwise the engine binds a queue the
+        // kernel never feeds. Align the rule's queue number with the one the
+        // engine binds, so queued packets actually reach the listener.
+        let nfqueue_mode =
+            config.packet_engine.enabled && config.packet_engine.capture_method == "nfqueue";
+        let dpi = if config.dpi.enabled || nfqueue_mode {
+            let mut d = config.dpi.clone();
+            d.enabled = true;
+            if nfqueue_mode {
+                d.queue_num = config.packet_engine.nfqueue_num;
+            }
+            Some(d)
         } else {
             None
         };
@@ -210,8 +221,19 @@ impl Crmonban {
         } else {
             None
         };
-        let dpi = if config.dpi.enabled {
-            Some(config.dpi.clone())
+        // Enable the DPI nft queue rules when DPI is configured OR the packet
+        // engine runs in NFQUEUE mode — otherwise the engine binds a queue the
+        // kernel never feeds. Align the rule's queue number with the one the
+        // engine binds, so queued packets actually reach the listener.
+        let nfqueue_mode =
+            config.packet_engine.enabled && config.packet_engine.capture_method == "nfqueue";
+        let dpi = if config.dpi.enabled || nfqueue_mode {
+            let mut d = config.dpi.clone();
+            d.enabled = true;
+            if nfqueue_mode {
+                d.queue_num = config.packet_engine.nfqueue_num;
+            }
+            Some(d)
         } else {
             None
         };
@@ -245,7 +267,30 @@ impl Crmonban {
 
     /// Initialize the firewall (create table, chains, sets)
     pub fn init_firewall(&self) -> Result<()> {
-        self.firewall.init()
+        self.firewall.init()?;
+        // Populate the inline-DPI allow set so whitelisted AND Cloudflare sources
+        // are accepted before the NFQUEUE and never inline-dropped by the engine.
+        // NOTE: Firewall::init() early-returns when the table already exists, so
+        // these rules only materialize on a FRESH table — an already-initialized
+        // host needs a `cleanup` before the M2.2 queue/allow rules appear.
+        let mut entries: Vec<String> = self
+            .db
+            .get_whitelist()?
+            .into_iter()
+            .map(|e| e.ip.to_string())
+            .collect();
+        entries.extend(
+            crate::cloudflare::CLOUDFLARE_IPV4_RANGES
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        entries.extend(
+            crate::cloudflare::CLOUDFLARE_IPV6_RANGES
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        self.firewall.sync_dpi_allow(&entries)?;
+        Ok(())
     }
 
     /// Add a port rule to the firewall
@@ -361,6 +406,12 @@ impl Crmonban {
 
         let entry = WhitelistEntry::new(ip, comment.clone());
         self.db.add_whitelist(&entry)?;
+
+        // Keep the inline-DPI allow set in sync so the new whitelist entry takes
+        // effect immediately, not only after a restart.
+        if let Err(e) = self.firewall.sync_dpi_allow(&[ip.to_string()]) {
+            warn!("Failed to add {} to inline-DPI allow set: {}", ip, e);
+        }
 
         self.db.log_activity(
             ActivityAction::Whitelist,

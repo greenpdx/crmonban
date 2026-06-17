@@ -7,7 +7,7 @@ use nftables::{
         Chain, Element, FlushObject, NfCmd, NfListObject, NfObject, Rule, Set, SetFlag,
         SetType, SetTypeValue, Table,
     },
-    stmt::{Log, LogLevel, Match, Operator, Queue, Statement},
+    stmt::{Log, LogLevel, Match, Operator, Queue, QueueFlag, Statement},
     types::{NfChainPolicy, NfChainType, NfFamily, NfHook},
 };
 use std::borrow::Cow;
@@ -18,6 +18,12 @@ use tracing::{debug, info, warn};
 use crate::config::{DeploymentConfig, DeploymentMode, DpiConfig, NatMode, NftablesConfig, PortAction, PortRule, PortRulesConfig, PortScanConfig, TlsProxyConfig};
 
 /// Firewall manager for nftables operations
+/// nft set names for the inline-DPI source whitelist (interval/CIDR-capable).
+/// Whitelisted sources are accepted in the dpi_inspect chain before the NFQUEUE,
+/// so they are never queued or inline-dropped by the engine.
+const DPI_ALLOW_SET_V4: &str = "dpi_allow_v4";
+const DPI_ALLOW_SET_V6: &str = "dpi_allow_v6";
+
 pub struct Firewall {
     config: NftablesConfig,
     deployment: DeploymentConfig,
@@ -161,6 +167,42 @@ impl Firewall {
             gc_interval: None,
             size: None,
             comment: Some(Cow::Borrowed("crmonban blocked IPv6 addresses")),
+        })));
+
+        // Create inline-DPI whitelist sets (interval/CIDR-capable). Sources here
+        // are accepted before the NFQUEUE so they are never inline-dropped.
+        let mut allow_flags_v4 = HashSet::new();
+        allow_flags_v4.insert(SetFlag::Interval);
+        batch.add(NfListObject::Set(Box::new(Set {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            name: Cow::Borrowed(DPI_ALLOW_SET_V4),
+            handle: None,
+            set_type: SetTypeValue::Single(SetType::Ipv4Addr),
+            policy: None,
+            flags: Some(allow_flags_v4),
+            elem: None,
+            timeout: None,
+            gc_interval: None,
+            size: None,
+            comment: Some(Cow::Borrowed("crmonban inline-DPI whitelist IPv4")),
+        })));
+
+        let mut allow_flags_v6 = HashSet::new();
+        allow_flags_v6.insert(SetFlag::Interval);
+        batch.add(NfListObject::Set(Box::new(Set {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            name: Cow::Borrowed(DPI_ALLOW_SET_V6),
+            handle: None,
+            set_type: SetTypeValue::Single(SetType::Ipv6Addr),
+            policy: None,
+            flags: Some(allow_flags_v6),
+            elem: None,
+            timeout: None,
+            gc_interval: None,
+            size: None,
+            comment: Some(Cow::Borrowed("crmonban inline-DPI whitelist IPv6")),
         })));
 
         // Create chains based on deployment mode
@@ -764,6 +806,43 @@ impl Firewall {
         Ok(())
     }
 
+    /// Add IP or CIDR entries to the inline-DPI allow sets.
+    ///
+    /// Entries (single IPs from the DB whitelist, or CIDR ranges such as the
+    /// Cloudflare prefixes) are accepted in the dpi_inspect chain BEFORE the
+    /// NFQUEUE, so those sources are never queued or inline-dropped by the engine.
+    /// The sets are interval/CIDR-capable; `add element` is idempotent so this is
+    /// safe to call on every startup and on each whitelist change. v6 entries
+    /// (which contain ':') go to the v6 set; everything else to the v4 set.
+    pub fn sync_dpi_allow(&self, entries: &[String]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        info!(
+            "Syncing {} entries to the inline-DPI allow sets",
+            entries.len()
+        );
+
+        let mut batch = Batch::new();
+        for entry in entries {
+            let set_name = if entry.contains(':') {
+                DPI_ALLOW_SET_V6
+            } else {
+                DPI_ALLOW_SET_V4
+            };
+            batch.add_cmd(NfCmd::Add(NfListObject::Element(Element {
+                family: NfFamily::INet,
+                table: Cow::Owned(self.config.table_name.clone()),
+                name: Cow::Borrowed(set_name),
+                elem: Cow::Owned(vec![Expression::String(Cow::Owned(entry.clone()))]),
+            })));
+        }
+
+        let ruleset = batch.to_nftables();
+        apply_ruleset(&ruleset).context("Failed to sync inline-DPI allow set")?;
+        Ok(())
+    }
+
     /// Initialize outbound allowlist from config (for HostLite mode)
     fn init_outbound_allowlist(&self, batch: &mut Batch) {
         if self.deployment.outbound_allowlist.is_empty() {
@@ -1157,6 +1236,14 @@ impl Firewall {
     }
 
     /// Add DPI NFQUEUE rules to the batch
+    /// Add the inline-DPI NFQUEUE rule on the INPUT chain.
+    ///
+    /// Scope: INPUT only for now. The chain sits at priority+5 — AFTER the
+    /// `@blocked` drop rules (at `priority`) — so already-banned sources are
+    /// dropped in-kernel and never reach the queue. Forward/output queueing is
+    /// deliberately deferred: on a forwarding/Docker host it would funnel all
+    /// transit/egress traffic to userspace, so it needs deployment-mode gating
+    /// and its own queue number.
     fn add_dpi_rules(&self, batch: &mut Batch, config: &DpiConfig) {
         info!("Adding DPI NFQUEUE rules (queue {})", config.queue_num);
 
@@ -1174,8 +1261,64 @@ impl Firewall {
             policy: Some(NfChainPolicy::Accept),
         }));
 
-        // Queue new TCP connections to userspace for DPI
-        // This sends the first N packets of each connection to NFQUEUE
+        // Whitelist short-circuit: accept whitelisted sources in THIS chain,
+        // ABOVE the queue rule. `accept` ends this base chain for these packets,
+        // so whitelisted traffic is never queued and therefore never inline-
+        // dropped by the engine. The -100 chain's whitelist accept does NOT carry
+        // over (accept is not terminal across base chains), so the short-circuit
+        // must be repeated here. Populated from the DB whitelist via
+        // sync_whitelist(); the sets are interval/CIDR-capable.
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("dpi_inspect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Accept whitelisted IPv4 before DPI queue")),
+            expr: Cow::Owned(vec![
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("ip"),
+                            field: Cow::Borrowed("saddr"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Owned(format!("@{}", DPI_ALLOW_SET_V4))),
+                    op: Operator::IN,
+                }),
+                Statement::Accept(None),
+            ]),
+        }));
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("dpi_inspect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Accept whitelisted IPv6 before DPI queue")),
+            expr: Cow::Owned(vec![
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                        PayloadField {
+                            protocol: Cow::Borrowed("ip6"),
+                            field: Cow::Borrowed("saddr"),
+                        },
+                    ))),
+                    right: Expression::String(Cow::Owned(format!("@{}", DPI_ALLOW_SET_V6))),
+                    op: Operator::IN,
+                }),
+                Statement::Accept(None),
+            ]),
+        }));
+
+        // Queue TCP traffic to userspace for DPI.
+        //
+        // NOTE (volume): this currently queues EVERY new+established TCP packet,
+        // not just the first N of a connection. On a busy host that is a lot of
+        // userspace round-trips; narrowing to `ct packets <= packets_per_conn`
+        // and honoring inspected_ports/excluded_ports is a follow-up. The flow
+        // cache bypasses already-judged flows in userspace, but they are still
+        // queued first.
         batch.add(NfListObject::Rule(Rule {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
@@ -1195,7 +1338,7 @@ impl Firewall {
                     right: Expression::String(Cow::Borrowed("tcp")),
                     op: Operator::EQ,
                 }),
-                // Match new/established connections (first few packets)
+                // Match new + established TCP (see NOTE above re: volume)
                 Statement::Match(Match {
                     left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
                         PayloadField {
@@ -1206,10 +1349,16 @@ impl Firewall {
                     right: Expression::String(Cow::Borrowed("new,established")),
                     op: Operator::EQ,
                 }),
-                // Queue to userspace
+                // Queue to userspace with the `bypass` flag = FAIL-OPEN. The
+                // kernel ACCEPTS the packet (rather than dropping) both when there
+                // is no userspace listener (crmonban crashed/restarting) AND when
+                // the queue is FULL. Availability first: losing or saturating the
+                // inspector must not black-hole traffic — the tradeoff is that
+                // under engine overload, traffic passes UNINSPECTED (monitor queue
+                // depth to detect saturation).
                 Statement::Queue(Queue {
                     num: Expression::Number(config.queue_num as u32),
-                    flags: None, // Note: bypass flag would require HashSet<QueueFlag>
+                    flags: Some(HashSet::from([QueueFlag::Bypass])),
                 }),
             ]),
         }));
