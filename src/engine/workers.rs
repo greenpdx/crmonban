@@ -968,6 +968,13 @@ impl WorkerThread {
         self.ipfilter_config = config;
     }
 
+    /// Install a specific alert-analysis policy, replacing the default. Lets a
+    /// harness or deployment choose a stricter posture (e.g. block High-severity
+    /// immediately) than the default block-after-threshold.
+    pub fn set_alert_analyzer(&mut self, analyzer: AlertAnalyzer) {
+        self.alert_analyzer = analyzer;
+    }
+
     /// Block an IP address in the filter
     pub fn block_ip(&mut self, ip: std::net::IpAddr, reason: String) {
         self.ipfilter_worker.ip_filter_mut().block(ip, reason);

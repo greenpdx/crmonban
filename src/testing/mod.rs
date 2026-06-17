@@ -12,6 +12,7 @@
 //! - `benchmark` - Benchmark runner for PCAP and synthetic traffic
 //! - `report` - Report generation (JSON, Markdown, CSV)
 //! - `feedback` - Log analysis and improvement recommendations
+//! - `netsim` - Closed-loop reactive endpoints (INPUT/FORWARD path testing)
 
 pub mod metrics;
 pub mod ground_truth;
@@ -20,6 +21,7 @@ pub mod realistic;
 pub mod benchmark;
 pub mod report;
 pub mod feedback;
+pub mod netsim;
 
 // Re-export main types
 pub use metrics::{StageMetrics, AccuracyMetrics, PerformanceMetrics, MetricsCollector};
