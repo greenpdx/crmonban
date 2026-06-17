@@ -1363,6 +1363,11 @@ async fn start_packet_engine(
             enable_signatures: config.signatures_enabled,
             enable_ml: config.ml_detection,
             enable_correlation: false,
+            // Per-packet, per-stage instrumentation toggle. Off by default (one
+            // line per stage per packet is far too chatty for production); set
+            // CRMONBAN_TRACE_PACKETS=1 to emit the `[trace] pkt N STAGE [gates]:
+            // +Nev verdict=X` lines to stderr for live pipeline debugging.
+            trace_packets: std::env::var("CRMONBAN_TRACE_PACKETS").is_ok(),
             ..Default::default()
         },
         worker: WorkerConfig {
