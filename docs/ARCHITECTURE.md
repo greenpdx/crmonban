@@ -14,6 +14,71 @@ Companion docs: `DESIGN-INLINE-DPI-PIPELINE.md` (target design),
 > classic netfilter queue, via the `nfq` crate). There is no eBPF/XDP today; an
 > XDP pre-filter is a possible *future* layer, not the current mechanism.
 
+## 0. netfilter paths — the hooks a packet traverses
+
+nftables attaches **base chains** to the five netfilter hooks. A packet takes one
+of three paths through them, depending on the routing decision:
+
+```
+                          ┌─────────────┐
+   wire in ──────────────►│ PREROUTING  │  (every ingress packet)
+                          └──────┬──────┘
+                                 ▼  routing: dest = me?
+                       no ┌──────┴───────────────┐ yes
+            (elsewhere)   ▼                       ▼
+                   ┌─────────────┐          ┌──────────┐
+                   │   FORWARD   │          │  INPUT   │
+                   └──────┬──────┘          └────┬─────┘
+                          │                      ▼
+                          │              ┌──────────────┐
+                          │              │ LOCAL SOCKET │ (your app)
+                          │              └──────┬───────┘
+                          │                     ▼
+                          │              ┌──────────┐
+                          │              │  OUTPUT  │  (locally-generated)
+                          │              └────┬─────┘
+                          ▼                   ▼
+                   ┌──────────────────────────────┐
+                   │         POSTROUTING          │  (every egress packet)
+                   └───────────────┬──────────────┘
+                                   ▼  wire out
+```
+
+| Path | What | Hooks traversed |
+|---|---|---|
+| **A — to the host** | inbound, destined locally | `prerouting → input` |
+| **B — through the host** | transit / routed (gateway) | `prerouting → forward → postrouting` |
+| **C — from the host** | locally generated, outbound | `output → postrouting` |
+
+`prerouting` sees A+B (all ingress), `postrouting` sees B+C (all egress);
+`input` / `forward` / `output` each see exactly one path.
+
+**Priorities.** Many base chains can share a hook; they run in ascending priority
+(lower = earlier). An `accept` ends only the *current* chain — the packet still
+visits later chains on the hook; only `drop` is terminal. The standard order:
+
+```
+ conntrack(-200) → mangle(-150) → dnat(-100) → filter(0) → srcnat(+100)
+```
+
+Conntrack runs at **-200**, before any filter chain — which is why `ct state` /
+`ct packets` / `ct mark` are available to crmonban's rules: the connection is
+already tracked by the time the rule fires.
+
+**Where crmonban sits.** Its base chains live at priority **-100 / -95** — after
+conntrack (so `ct` works) but before the generic `filter` hook (0):
+
+| Path | crmonban chains |
+|---|---|
+| **A (input)** | block (-100) → `dpi_inspect` (-95, the NFQUEUE) → portscan (-90) → port_filter (-50) |
+| **B (forward)** | block (-100); DPI queue deferred |
+| **C (output)** | block (-100); DPI queue deferred |
+| egress NAT | `postrouting` masquerade / snat (gateway mode) |
+
+Today only **Path A (input)** carries the DPI queue, so crmonban inspects traffic
+**to the host**; transit (B) and egress (C) inspection are the deferred
+forward/output queueing. §1 details the input-path chains.
+
 ## 1. The kernel layer — nftables
 
 crmonban owns one table, `table inet crmonban`, with **base chains on the
