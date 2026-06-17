@@ -24,6 +24,12 @@ use crate::config::{DeploymentConfig, DeploymentMode, DpiConfig, NatMode, Nftabl
 const DPI_ALLOW_SET_V4: &str = "dpi_allow_v4";
 const DPI_ALLOW_SET_V6: &str = "dpi_allow_v6";
 
+/// Conntrack/packet mark applied to a flow once the engine judges it good, so the
+/// kernel bypasses (accepts) the rest of the flow without re-queuing it. Single
+/// high bit to avoid colliding with low-valued routing marks; sets the full mark
+/// for now (masking + making it configurable is a follow-up).
+pub const DPI_GOOD_MARK: u32 = 0x4000_0000;
+
 pub struct Firewall {
     config: NftablesConfig,
     deployment: DeploymentConfig,
@@ -1324,6 +1330,31 @@ impl Firewall {
             ]),
         }));
 
+        // Kernel fast-path: a flow the engine has already judged good (its ct mark
+        // is set by the verdict round-trip below) bypasses the queue entirely from
+        // here on — accepted in-kernel, never re-queued. This is the M3 flow cache
+        // realized at kernel speed. Placed ABOVE the queue rule so it wins first.
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("dpi_inspect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Bypass engine-marked-good flows in-kernel")),
+            expr: Cow::Owned(vec![
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                        key: Cow::Borrowed("mark"),
+                        family: None,
+                        dir: None,
+                    })),
+                    right: Expression::Number(DPI_GOOD_MARK),
+                    op: Operator::EQ,
+                }),
+                Statement::Accept(None),
+            ]),
+        }));
+
         // Queue the FIRST N packets of each TCP connection to userspace for DPI.
         //
         // First-N (`ct packets <= packets_per_conn`) is the primary volume
@@ -1395,6 +1426,36 @@ impl Firewall {
             index: None,
             comment: Some(Cow::Borrowed("Queue first-N TCP packets for DPI")),
             expr: Cow::Owned(dpi_expr),
+        }));
+
+        // Persist the engine's good verdict to conntrack: when an accepted packet
+        // returns from the queue carrying the good packet-mark, copy it to the
+        // connection's ct mark so the bypass rule above short-circuits every later
+        // packet of the flow in-kernel.
+        batch.add(NfListObject::Rule(Rule {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            chain: Cow::Borrowed("dpi_inspect"),
+            handle: None,
+            index: None,
+            comment: Some(Cow::Borrowed("Persist good packet-mark to ct mark")),
+            expr: Cow::Owned(vec![
+                Statement::Match(Match {
+                    left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta {
+                        key: nftables::expr::MetaKey::Mark,
+                    })),
+                    right: Expression::Number(DPI_GOOD_MARK),
+                    op: Operator::EQ,
+                }),
+                Statement::Mangle(nftables::stmt::Mangle {
+                    key: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                        key: Cow::Borrowed("mark"),
+                        family: None,
+                        dir: None,
+                    })),
+                    value: Expression::Number(DPI_GOOD_MARK),
+                }),
+            ]),
         }));
 
         info!("DPI rules added for NFQUEUE {}", config.queue_num);

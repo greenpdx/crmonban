@@ -81,6 +81,18 @@ pub trait PacketCapture: Send {
     /// Set verdict for NFQUEUE packets
     fn set_verdict(&mut self, packet_id: u64, accept: bool) -> anyhow::Result<()>;
 
+    /// Issue a verdict and, when `mark_good` is set and the packet is ACCEPTED,
+    /// tag it with the DPI good-flow mark so nftables bypasses the rest of the
+    /// flow in-kernel. Default: ignore the mark (passive captures cannot mark).
+    fn set_verdict_marked(
+        &mut self,
+        packet_id: u64,
+        accept: bool,
+        _mark_good: bool,
+    ) -> anyhow::Result<()> {
+        self.set_verdict(packet_id, accept)
+    }
+
     /// Get capture statistics
     fn stats(&mut self) -> CaptureStats;
 
@@ -206,16 +218,25 @@ impl PacketCapture for NfqueueCapture {
                     "NFQUEUE packet {} unparseable; accepting by default",
                     packet_id
                 );
-                self.issue_verdict(msg, true);
+                self.issue_verdict(msg, true, false);
                 Ok(None)
             }
         }
     }
 
     fn set_verdict(&mut self, packet_id: u64, accept: bool) -> anyhow::Result<()> {
+        self.set_verdict_marked(packet_id, accept, false)
+    }
+
+    fn set_verdict_marked(
+        &mut self,
+        packet_id: u64,
+        accept: bool,
+        mark_good: bool,
+    ) -> anyhow::Result<()> {
         match self.pending.remove(&packet_id) {
             Some(msg) => {
-                self.issue_verdict(msg, accept);
+                self.issue_verdict(msg, accept, mark_good);
                 Ok(())
             }
             None => {
@@ -252,7 +273,13 @@ impl PacketCapture for NfqueueCapture {
 
 impl NfqueueCapture {
     /// Send a single ACCEPT/DROP verdict to the kernel, consuming the message.
-    fn issue_verdict(&mut self, mut msg: Message, accept: bool) {
+    /// When `mark_good` is set and the packet is accepted, tag it with the DPI
+    /// good-flow mark; nftables copies that to the connection's ct mark so the
+    /// rest of the flow bypasses the queue in-kernel.
+    fn issue_verdict(&mut self, mut msg: Message, accept: bool, mark_good: bool) {
+        if accept && mark_good {
+            msg.set_nfmark(crate::firewall::DPI_GOOD_MARK);
+        }
         msg.set_verdict(if accept { Verdict::Accept } else { Verdict::Drop });
         if let Err(e) = self.queue.verdict(msg) {
             warn!("failed to send NFQUEUE verdict: {}", e);

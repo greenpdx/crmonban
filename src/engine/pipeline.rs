@@ -129,7 +129,7 @@ pub struct Pipeline {
     /// Optional sink routing inline verdicts (packet_id, accept) back to the
     /// capture layer. Used by NFQUEUE inline mode so every captured packet
     /// receives exactly one ACCEPT/DROP verdict.
-    verdict_tx: Option<Sender<(u64, bool)>>,
+    verdict_tx: Option<Sender<(u64, bool, bool)>>,
     /// Per-flow verdict cache: short-circuits the stages for streams already
     /// judged bad (drop) or proven good (bypass). See `flow_disposition`.
     flow_cache: FlowVerdictCache,
@@ -161,7 +161,7 @@ impl Pipeline {
     /// Set the verdict sink that routes inline ACCEPT/DROP decisions back to the
     /// capture layer (NFQUEUE inline mode). When unset (passive capture) the
     /// pipeline computes verdicts but issues none.
-    pub fn with_verdict_sink(mut self, verdict_tx: Sender<(u64, bool)>) -> Self {
+    pub fn with_verdict_sink(mut self, verdict_tx: Sender<(u64, bool, bool)>) -> Self {
         self.verdict_tx = Some(verdict_tx);
         self
     }
@@ -222,7 +222,9 @@ impl Pipeline {
                     };
                     if let Some(accept) = cached {
                         if let Some(ref verdict_tx) = self.verdict_tx {
-                            let _ = verdict_tx.send((packet_id, accept));
+                            // A cached-GOOD hit (accept) re-marks the flow so the
+                            // kernel keeps bypassing it; a cached-BAD hit drops.
+                            let _ = verdict_tx.send((packet_id, accept, accept));
                         }
                         // Cached flows produce no new events; just account latency.
                         let latency_us = packet_start.elapsed().as_micros() as u64;
@@ -238,9 +240,13 @@ impl Pipeline {
                         // Cache the flow disposition (TCP/UDP only). Bad is sticky
                         // for the rest of the stream; good is cached only when
                         // bypass is enabled and the flow stayed clean long enough.
-                        if cacheable {
-                            self.flow_cache.record(&flow_key, blocking, now);
-                        }
+                        // If the flow JUST became good-for-bypass, mark the verdict
+                        // so nftables bypasses the rest of the flow in-kernel.
+                        let mark_good = if cacheable {
+                            self.flow_cache.record(&flow_key, blocking, now)
+                        } else {
+                            false
+                        };
 
                         // Issue the inline verdict (NFQUEUE). accept = true for
                         // Accept/Queue, false for Drop/Reject; the bool channel
@@ -249,7 +255,7 @@ impl Pipeline {
                         if let Some(ref verdict_tx) = self.verdict_tx {
                             // Unbounded sink: send never blocks, so the async
                             // pipeline cannot deadlock against the bounded channel.
-                            let _ = verdict_tx.send((packet_id, !blocking));
+                            let _ = verdict_tx.send((packet_id, !blocking, mark_good));
                         }
 
                         // Align emitted event actions with the ENFORCED policy

@@ -163,11 +163,15 @@ impl FlowVerdictCache {
     /// `blocking` is true when the packet's verdict was Drop/Reject. A blocking
     /// verdict marks the whole flow bad (sticky); a clean verdict advances the
     /// good-bypass counter only when `bypass_good` is enabled.
-    pub fn record(&mut self, key: &FlowKey, blocking: bool, now: Instant) {
+    ///
+    /// Returns `true` when this call transitioned the flow to a cached GOOD
+    /// disposition (so the caller can mark it for the in-kernel bypass).
+    pub fn record(&mut self, key: &FlowKey, blocking: bool, now: Instant) -> bool {
         if !self.config.enabled {
-            return;
+            return false;
         }
 
+        let mut became_good = false;
         if blocking {
             // Bad is sticky for the rest of the stream.
             self.pending_good.remove(key);
@@ -192,6 +196,7 @@ impl FlowVerdictCache {
                     },
                     now,
                 );
+                became_good = true;
             } else if self.pending_good.len() > self.config.max_flows {
                 // Bound the counter map; resetting only delays a bypass (safe).
                 self.pending_good.clear();
@@ -199,6 +204,7 @@ impl FlowVerdictCache {
         }
 
         self.maybe_sweep(now);
+        became_good
     }
 
     /// Forget any cached verdict (and good-progress) for a flow — used when a new

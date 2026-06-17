@@ -227,7 +227,7 @@ impl PacketEngine {
         // steady state the backlog stays small (~NFQUEUE depth); it can grow
         // transiently during a packet-send stall, bounded by packets the pipeline
         // processed meanwhile.
-        let (verdict_tx, verdict_rx) = crossbeam_channel::unbounded::<(u64, bool)>();
+        let (verdict_tx, verdict_rx) = crossbeam_channel::unbounded::<(u64, bool, bool)>();
 
         // Create event channel if not provided
         let event_tx = self.event_tx.clone().unwrap_or_else(|| {
@@ -274,8 +274,8 @@ impl PacketEngine {
                         // Apply verdicts the pipeline produced for previously
                         // captured packets. For NFQUEUE this issues the kernel
                         // ACCEPT/DROP; for passive captures set_verdict is a no-op.
-                        while let Ok((id, accept)) = verdict_rx.try_recv() {
-                            if let Err(e) = capture.set_verdict(id, accept) {
+                        while let Ok((id, accept, mark)) = verdict_rx.try_recv() {
+                            if let Err(e) = capture.set_verdict_marked(id, accept, mark) {
                                 warn!("Failed to set verdict for packet {}: {}", id, e);
                             }
                         }
@@ -309,8 +309,8 @@ impl PacketEngine {
                     let drain_deadline =
                         std::time::Instant::now() + Duration::from_secs(5);
                     loop {
-                        while let Ok((id, accept)) = verdict_rx.try_recv() {
-                            if let Err(e) = capture.set_verdict(id, accept) {
+                        while let Ok((id, accept, mark)) = verdict_rx.try_recv() {
+                            if let Err(e) = capture.set_verdict_marked(id, accept, mark) {
                                 warn!("Failed to set verdict for packet {}: {}", id, e);
                             }
                         }
