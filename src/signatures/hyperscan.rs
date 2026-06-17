@@ -14,7 +14,7 @@
 //! dnf install hyperscan-devel
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use hyperscan::prelude::*;
@@ -38,7 +38,33 @@ struct PatternInfo {
     negated: bool,
 }
 
-/// Hyperscan-accelerated matcher
+/// Substring search for `pattern` in `payload`, optionally case-insensitive.
+fn payload_contains(payload: &[u8], pattern: &[u8], nocase: bool) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    if pattern.len() > payload.len() {
+        return false;
+    }
+    if nocase {
+        payload
+            .windows(pattern.len())
+            .any(|w| w.eq_ignore_ascii_case(pattern))
+    } else {
+        payload.windows(pattern.len()).any(|w| w == pattern)
+    }
+}
+
+/// Minimum length of the content compiled into the hyperscan prefilter as a
+/// rule's trigger. Short, common content (GET, Host, 200, ...) matches nearly
+/// every packet and would nominate thousands of rules per packet; rules whose
+/// most-specific content is shorter than this fall back to the always-check set.
+const MIN_TRIGGER_LEN: usize = 2;
+
+/// Hyperscan-accelerated matcher. The database holds ONE specific trigger pattern
+/// per rule (a prefilter); a scan hit nominates the rule, and `verify_rule`
+/// re-scans the payload to confirm ALL of the rule's content patterns. This keeps
+/// the per-packet candidate set small even with tens of thousands of rules.
 pub struct HyperscanMatcher {
     /// Compiled Hyperscan database (block mode)
     database: BlockDatabase,
@@ -50,6 +76,8 @@ pub struct HyperscanMatcher {
     rules: HashMap<u32, Arc<Rule>>,
     /// Number of patterns compiled
     pattern_count: usize,
+    /// Rules with no content long enough to be a trigger — verified every packet.
+    always_check: Vec<u32>,
 }
 
 impl HyperscanMatcher {
@@ -61,6 +89,7 @@ impl HyperscanMatcher {
 
         info!("Building Hyperscan database from {} rules", rules.len());
 
+        let mut always_check: Vec<u32> = Vec::new();
         for rule in rules {
             if !rule.enabled {
                 continue;
@@ -69,41 +98,60 @@ impl HyperscanMatcher {
             let rule_id = rule.sid;
             rule_map.insert(rule_id, Arc::new(rule.clone()));
 
-            // Extract content patterns from rule
-            for (pattern_index, opt) in rule.options.iter().enumerate() {
-                if let RuleOption::Content(content) = opt {
-                    // Convert pattern to Hyperscan format
-                    let pattern_str = Self::content_to_pattern(content);
-                    if pattern_str.is_empty() {
-                        continue;
-                    }
-
-                    let pattern_id = patterns.len();
-
-                    // Set flags
-                    let mut flags = Flags::empty();
-                    if content.nocase {
-                        flags |= Flags::CASELESS;
-                    }
-                    // Use SOM_LEFTMOST for offset tracking
-                    flags |= Flags::SOM_LEFTMOST;
-
-                    // Create Pattern with id
-                    let mut pat = Pattern::new(pattern_str)
-                        .map_err(|e| format!("Invalid pattern: {}", e))?;
-                    pat.flags = flags;
-                    pat.id = Some(pattern_id);
-
-                    patterns.push(pat);
-
-                    pattern_map.push(PatternInfo {
-                        rule_id,
-                        pattern_index,
-                        is_fast_pattern: content.fast_pattern,
-                        negated: content.negated,
-                    });
+            // Trigger = the longest POSITIVE content pattern. A rule with no
+            // positive content can't be confirmed by this content-only matcher
+            // (it needs flags/flow/pcre the hyperscan path doesn't evaluate), so
+            // skip it rather than let verify_rule pass it on every packet. A
+            // positive content shorter than the trigger minimum can't seed the
+            // prefilter, so the rule falls back to always-check.
+            let trigger = rule
+                .options
+                .iter()
+                .filter_map(|o| match o {
+                    RuleOption::Content(c) if !c.negated => Some(c),
+                    _ => None,
+                })
+                .max_by_key(|c| c.pattern.len());
+            let content = match trigger {
+                None => continue,
+                Some(c) if c.pattern.len() < MIN_TRIGGER_LEN => {
+                    always_check.push(rule_id);
+                    continue;
                 }
+                Some(c) => c,
+            };
+
+            let pattern_str = Self::content_to_pattern(content);
+            if pattern_str.is_empty() {
+                always_check.push(rule_id);
+                continue;
             }
+
+            let pattern_id = patterns.len();
+            let mut flags = Flags::empty();
+            if content.nocase {
+                flags |= Flags::CASELESS;
+            }
+            flags |= Flags::SOM_LEFTMOST;
+
+            // A single rule with an un-compilable pattern shouldn't fail the whole
+            // database — fall back to always-check.
+            let mut pat = match Pattern::new(pattern_str) {
+                Ok(p) => p,
+                Err(_) => {
+                    always_check.push(rule_id);
+                    continue;
+                }
+            };
+            pat.flags = flags;
+            pat.id = Some(pattern_id);
+            patterns.push(pat);
+            pattern_map.push(PatternInfo {
+                rule_id,
+                pattern_index: 0,
+                is_fast_pattern: true,
+                negated: false,
+            });
         }
 
         if patterns.is_empty() {
@@ -136,6 +184,7 @@ impl HyperscanMatcher {
             pattern_map,
             rules: rule_map,
             pattern_count,
+            always_check,
         })
     }
 
@@ -176,39 +225,30 @@ impl HyperscanMatcher {
             return Vec::new();
         }
 
-        // Collect matching pattern IDs
-        let mut matched_patterns: Vec<(usize, u64, u64)> = Vec::new();
-
-        // Run Hyperscan scan
-        let result = self.database.scan(payload, &self.scratch, |id, from, to, _flags| {
-            matched_patterns.push((id as usize, from, to));
+        // Prefilter: a scan hit on a rule's trigger nominates that rule.
+        let mut triggered: HashSet<u32> = HashSet::new();
+        let result = self.database.scan(payload, &self.scratch, |id, _from, _to, _flags| {
+            if let Some(info) = self.pattern_map.get(id as usize) {
+                triggered.insert(info.rule_id);
+            }
             Matching::Continue
         });
-
         if let Err(e) = result {
             warn!("Hyperscan scan error: {}", e);
             return Vec::new();
         }
 
-        // Group matches by rule ID
-        let mut rule_matches: HashMap<u32, Vec<(usize, u64, u64)>> = HashMap::new();
-        for (pattern_id, from, to) in matched_patterns {
-            if let Some(info) = self.pattern_map.get(pattern_id) {
-                if !info.negated {
-                    rule_matches
-                        .entry(info.rule_id)
-                        .or_default()
-                        .push((info.pattern_index, from, to));
-                }
-            }
+        // Rules without a usable trigger are checked on every packet.
+        for sid in &self.always_check {
+            triggered.insert(*sid);
         }
 
-        // Verify rules and build results
+        // Confirm each nominated rule by independently re-scanning the payload for
+        // all of its content patterns.
         let mut results: Vec<MatchResult> = Vec::new();
-        for (rule_id, matches) in rule_matches {
+        for rule_id in triggered {
             if let Some(rule) = self.rules.get(&rule_id) {
-                // Check if all required patterns matched
-                if self.verify_rule(rule, &matches, payload) {
+                if self.verify_rule(rule, payload) {
                     results.push(MatchResult {
                         rule_id,
                         sid: rule.sid,
@@ -218,7 +258,7 @@ impl HyperscanMatcher {
                         action: rule.action,
                         references: rule.references.clone(),
                         timestamp: std::time::Instant::now(),
-                        content_matches: matches.iter().map(|(_, from, to)| (*from as usize, *to as usize)).collect(),
+                        content_matches: Vec::new(),
                     });
                 }
             }
@@ -227,68 +267,24 @@ impl HyperscanMatcher {
         results
     }
 
-    /// Verify that all rule conditions are met
-    fn verify_rule(
-        &self,
-        rule: &Rule,
-        matches: &[(usize, u64, u64)],
-        payload: &[u8],
-    ) -> bool {
-        // Count required content patterns
-        let required_patterns: Vec<usize> = rule
-            .options
-            .iter()
-            .enumerate()
-            .filter_map(|(i, opt)| {
-                if let RuleOption::Content(c) = opt {
-                    if !c.negated {
-                        return Some(i);
-                    }
-                }
-                None
-            })
-            .collect();
-
-        // Check if all required patterns matched
-        let matched_indices: std::collections::HashSet<usize> =
-            matches.iter().map(|(idx, _, _)| *idx).collect();
-
-        for required in &required_patterns {
-            if !matched_indices.contains(required) {
-                return false;
-            }
-        }
-
-        // Check negated patterns (must NOT match)
-        for (_i, opt) in rule.options.iter().enumerate() {
+    /// Confirm a nominated rule by re-scanning the payload for every content
+    /// pattern: all non-negated content must be present and all negated content
+    /// absent. Independent of which trigger fired in the prefilter.
+    fn verify_rule(&self, rule: &Rule, payload: &[u8]) -> bool {
+        for opt in &rule.options {
             if let RuleOption::Content(c) = opt {
+                let present = payload_contains(payload, &c.pattern, c.nocase);
                 if c.negated {
-                    // Check if this pattern is in the payload
-                    let pattern = &c.pattern;
-                    if c.nocase {
-                        let pattern_lower: Vec<u8> =
-                            pattern.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let payload_lower: Vec<u8> =
-                            payload.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if payload_lower
-                            .windows(pattern_lower.len())
-                            .any(|w| w == pattern_lower.as_slice())
-                        {
-                            return false; // Negated pattern matched - rule fails
-                        }
-                    } else if payload
-                        .windows(pattern.len())
-                        .any(|w| w == pattern.as_slice())
-                    {
-                        return false; // Negated pattern matched - rule fails
+                    if present {
+                        return false;
                     }
+                } else if !present {
+                    return false;
                 }
             }
         }
-
-        // TODO: Verify distance/within constraints
-        // TODO: Verify offset/depth constraints
-
+        // TODO: distance/within and offset/depth constraints (as before, not yet
+        // enforced).
         true
     }
 
@@ -406,6 +402,48 @@ mod tests {
         let matches = matcher.match_packet(&packet, &proto_ctx, &flow_state);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].rule_id, 1003);
+    }
+
+    #[test]
+    fn trigger_then_verify_all_content() {
+        fn content(p: &[u8], negated: bool) -> RuleOption {
+            RuleOption::Content(ContentMatch {
+                pattern: p.to_vec(),
+                negated,
+                nocase: false,
+                offset: None,
+                depth: None,
+                distance: None,
+                within: None,
+                fast_pattern: false,
+                rawbytes: false,
+            })
+        }
+        // Multi-content rule: needs BOTH union and select.
+        let mut multi = make_test_rule(2001, b"union", "sqli");
+        multi.options = vec![content(b"union", false), content(b"select", false)];
+        // Negated: admin present AND "logged" absent.
+        let mut negated = make_test_rule(2002, b"admin", "admin-anon");
+        negated.options = vec![content(b"admin", false), content(b"logged", true)];
+        // Content-less rule must be skipped (else it would match every packet).
+        let mut contentless = make_test_rule(2003, b"x", "no-content");
+        contentless.options = vec![];
+
+        let m = HyperscanMatcher::new(&[multi, negated, contentless]).unwrap();
+        let ctx = ProtocolContext::default();
+        let fs = FlowState::default();
+        let hits = |p: &[u8]| -> Vec<u32> {
+            m.match_packet(&make_test_packet(p), &ctx, &fs).iter().map(|r| r.rule_id).collect()
+        };
+
+        // All content present -> match; partial -> no match.
+        assert!(hits(b"q=union+x+select+y").contains(&2001));
+        assert!(!hits(b"q=union+only").contains(&2001));
+        // Negated absent -> match; negated present -> no match.
+        assert!(hits(b"path=/admin/x").contains(&2002));
+        assert!(!hits(b"/admin logged in").contains(&2002));
+        // Content-less rule never fires.
+        assert!(!hits(b"anything at all").contains(&2003));
     }
 
     #[test]
