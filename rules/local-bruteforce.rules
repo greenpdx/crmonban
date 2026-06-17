@@ -32,8 +32,12 @@ alert tcp any any -> any 25 (msg:"LOCAL SMTP Auth Brute Force"; flow:to_server,e
 # POP3 Brute Force
 alert tcp any any -> any 110 (msg:"LOCAL POP3 Brute Force Attempt"; flow:to_server,established; content:"USER "; depth:5; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000010; rev:1; priority:1;)
 
-# IMAP Brute Force
-alert tcp any any -> any 143 (msg:"LOCAL IMAP Login Brute Force"; flow:to_server,established; content:" LOGIN "; nocase; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000011; rev:1; priority:1;)
+# IMAP Brute Force. The command is "<tag> LOGIN ..." with a variable-length tag,
+# so it can't be anchored at a fixed offset like FTP; bound the search to the
+# start of the packet (depth) where IMAP puts it after a short tag, so a stray
+# " login " deep in an HTTP body can't match it now that the pipeline doesn't
+# port-scope rules. pcre confirms the leading IMAP tag.
+alert tcp any any -> any 143 (msg:"LOCAL IMAP Login Brute Force"; flow:to_server,established; content:" LOGIN "; depth:32; nocase; pcre:"/^[A-Za-z0-9.]+ LOGIN /mi"; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000011; rev:2; priority:1;)
 
 # RDP Brute Force - detect RDP cookie/auth
 alert tcp any any -> any 3389 (msg:"LOCAL RDP Brute Force Attempt"; flow:to_server; content:"Cookie: mstshash="; threshold:type both, track by_src, count 5, seconds 60; classtype:attempted-admin; sid:9000012; rev:1; priority:1;)
