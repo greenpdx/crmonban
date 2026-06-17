@@ -41,6 +41,7 @@ pub mod config;
 pub mod detector;
 pub mod error;
 pub mod features;
+pub mod longterm;
 pub mod l2_state;
 pub mod output;
 pub mod parser;
