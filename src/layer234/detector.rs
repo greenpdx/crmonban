@@ -680,6 +680,11 @@ impl DetectorBuilder {
     }
 }
 
+/// Minimum SYN ratio for the volumetric brute-force branch: enough of the window
+/// is connection openings to mean many attempts, not a single legitimate session
+/// (one SYN followed by data has a far lower ratio).
+const BRUTE_FORCE_SYN_RATIO_MIN: f32 = 0.1;
+
 /// Heuristic-based detection that returns Some(ThreatType) if an attack is detected,
 /// or None if the traffic appears normal. This is used when no signature matches.
 fn heuristic_detect(vector: &FeatureVector, weights: &DetectionWeights) -> Option<ThreatType> {
@@ -692,7 +697,7 @@ fn heuristic_detect(vector: &FeatureVector, weights: &DetectionWeights) -> Optio
     let synack_ratio = vector[13];
     let rst_ratio = vector[14];
     let half_open_ratio = vector[17];
-    let handshake_complete_ratio = vector[18];
+    let _handshake_complete_ratio = vector[18]; // needs bidirectional view; unused on INPUT
     let rst_after_syn = vector[19];
     let auth_port_ratio = vector[20];
     let single_port_concentration = vector[21];
@@ -732,6 +737,25 @@ fn heuristic_detect(vector: &FeatureVector, weights: &DetectionWeights) -> Optio
         return Some(ThreatType::PortScan {
             scan_type: ScanType::TcpSyn,
             ports_touched: estimate_ports_touched(vector),
+        });
+    }
+
+    // === BRUTE FORCE (volumetric, mechanism #1) ===
+    // Many connection attempts (SYNs) concentrated on a single AUTH port from one
+    // source. This is the same volumetric shape as a SYN flood, but aimed at an
+    // auth service — so detect it BEFORE the flood branch and label it brute force
+    // rather than DoS. Keyed on the attacker's own SYNs (not handshake
+    // completion), so it works on the unidirectional INPUT path where the
+    // server's SYN-ACK is never seen. The SYN-rate floor separates a real attack
+    // (many attempts) from a single legitimate session (one SYN, then data).
+    if auth_port_ratio > w.brute_force.auth_port_ratio_min
+        && single_port_concentration > w.brute_force.single_port_concentration_min
+        && unique_port_ratio < w.brute_force.unique_port_ratio_max
+        && syn_ratio > BRUTE_FORCE_SYN_RATIO_MIN
+    {
+        return Some(ThreatType::BruteForce {
+            attempts: estimate_brute_force_attempts(vector),
+            target_service: extract_service_from_auth_port(vector),
         });
     }
 
@@ -813,17 +837,8 @@ fn heuristic_detect(vector: &FeatureVector, weights: &DetectionWeights) -> Optio
         });
     }
 
-    // Brute force (check before connect scan due to overlapping patterns)
-    if auth_port_ratio > w.brute_force.auth_port_ratio_min
-        && single_port_concentration > w.brute_force.single_port_concentration_min
-        && handshake_complete_ratio > w.brute_force.handshake_complete_ratio_min
-        && unique_port_ratio < w.brute_force.unique_port_ratio_max
-    {
-        return Some(ThreatType::BruteForce {
-            attempts: estimate_brute_force_attempts(vector),
-            target_service: extract_service_from_auth_port(vector),
-        });
-    }
+    // (Brute force is handled earlier — volumetric, mechanism #1 — keyed on the
+    // attacker's SYNs rather than handshake completion.)
 
     // SYN scan - large
     if syn_ratio > w.syn_scan.syn_ratio_min
