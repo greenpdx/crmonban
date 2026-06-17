@@ -36,7 +36,7 @@ use crate::ml::features::FeatureExtractor;
 use parking_lot::RwLock;
 use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent};
 use crate::signatures::SignatureEngine;
-use crate::signatures::matcher::{ProtocolContext, FlowState};
+use crate::signatures::matcher::{ProtocolContext, HttpContext, FlowState};
 use crate::wasm::{WasmEngine, StageContext};
 
 // IP filtering with GeoIP and threat intel (Stage 0)
@@ -203,6 +203,73 @@ fn stage_feature_gates(stage: PipelineStage) -> String {
     }
 }
 
+/// Parse an HTTP request payload into a signature `ProtocolContext` so the
+/// signature stage can scope sticky-buffer content (http.uri / http.header /
+/// http.host / http.user_agent) to the right field. Returns `None` for anything
+/// that doesn't start with an HTTP method (binary, responses, non-HTTP).
+fn build_sig_http_context(payload: &[u8]) -> ProtocolContext {
+    if payload.len() < 5 {
+        return ProtocolContext::None;
+    }
+    let head_end = payload
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(payload.len());
+    let head = &payload[..head_end];
+    let nl = head.iter().position(|&b| b == b'\n').unwrap_or(head.len());
+    let request_line = trim_cr(&head[..nl]);
+
+    let mut parts = request_line.splitn(3, |&b| b == b' ');
+    let method = parts.next().unwrap_or(&[]);
+    let uri = parts.next().unwrap_or(&[]);
+    if !is_http_method(method) {
+        return ProtocolContext::None;
+    }
+
+    let headers: &[u8] = if nl < head.len() { &head[nl + 1..] } else { &[] };
+    ProtocolContext::Http(HttpContext {
+        uri: Some(uri.to_vec()),
+        method: Some(method.to_vec()),
+        headers: Some(headers.to_vec()),
+        host: header_value(headers, b"host:"),
+        user_agent: header_value(headers, b"user-agent:"),
+    })
+}
+
+fn trim_cr(line: &[u8]) -> &[u8] {
+    if line.last() == Some(&b'\r') {
+        &line[..line.len() - 1]
+    } else {
+        line
+    }
+}
+
+fn is_http_method(m: &[u8]) -> bool {
+    const METHODS: [&[u8]; 9] = [
+        b"GET", b"POST", b"HEAD", b"PUT", b"DELETE", b"OPTIONS", b"PATCH", b"TRACE", b"CONNECT",
+    ];
+    METHODS.iter().any(|&x| x == m)
+}
+
+/// Value of the header whose name (lowercase, with trailing `:`) matches, with
+/// surrounding whitespace trimmed.
+fn header_value(headers: &[u8], name_lower: &[u8]) -> Option<Vec<u8>> {
+    for line in headers.split(|&b| b == b'\n') {
+        let line = trim_cr(line);
+        if line.len() > name_lower.len()
+            && line[..name_lower.len()].eq_ignore_ascii_case(name_lower)
+        {
+            let v = line[name_lower.len()..]
+                .iter()
+                .position(|&b| b != b' ')
+                .map(|s| &line[name_lower.len() + s..])
+                .unwrap_or(&[]);
+            return Some(v.to_vec());
+        }
+    }
+    None
+}
+
 /// Load the signature engine from the first existing rules directory: the
 /// configured path (a deployed install), then the in-repo / common locations so
 /// the shipped rules actually load in dev and test instead of silently finding
@@ -218,7 +285,10 @@ fn load_signature_engine(configured: Option<&std::path::Path>) -> Option<Signatu
 
     for dir in candidates {
         if dir.exists() {
-            if let Some(engine) = SignatureEngine::load_from_dir(&dir) {
+            if let Some(mut engine) = SignatureEngine::load_from_dir(&dir) {
+                // L2/L3 addressing is filtered upstream in the pipeline; the
+                // signature stage matches content/protocol/flow only.
+                engine.set_match_addresses(false);
                 return Some(engine);
             }
         }
@@ -810,7 +880,11 @@ impl WorkerThread {
                         FlowState::default()
                     };
 
-                    let proto_ctx = ProtocolContext::None;
+                    // Give the matcher an HTTP context so sticky-buffer rules
+                    // (http.uri/http.header/...) are scoped to the right field
+                    // instead of the whole payload — without it, content-only
+                    // matching against 40k rules produces heavy false positives.
+                    let proto_ctx = build_sig_http_context(analysis.packet.payload());
 
                     // Use Hyperscan-accelerated matching if available (10-50x faster)
                     #[cfg(feature = "hyperscan")]

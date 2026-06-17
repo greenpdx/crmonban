@@ -267,6 +267,26 @@ impl HyperscanMatcher {
         results
     }
 
+    /// Prefilter: return the rule IDs nominated by a payload scan (a trigger
+    /// pattern hit) plus the always-check set. No verification — the caller
+    /// (SignatureEngine) runs the full per-rule checks on these candidates.
+    pub fn prefilter(&self, payload: &[u8]) -> HashSet<u32> {
+        let mut triggered: HashSet<u32> = HashSet::new();
+        if payload.is_empty() {
+            return triggered;
+        }
+        let _ = self.database.scan(payload, &self.scratch, |id, _from, _to, _flags| {
+            if let Some(info) = self.pattern_map.get(id as usize) {
+                triggered.insert(info.rule_id);
+            }
+            Matching::Continue
+        });
+        for sid in &self.always_check {
+            triggered.insert(*sid);
+        }
+        triggered
+    }
+
     /// Confirm a nominated rule by re-scanning the payload for every content
     /// pattern: all non-negated content must be present and all negated content
     /// absent. Independent of which trigger fired in the prefilter.

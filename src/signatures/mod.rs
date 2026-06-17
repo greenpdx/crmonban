@@ -96,6 +96,14 @@ pub struct SignatureConfig {
     /// Enable threshold tracking
     pub threshold_tracking: bool,
 
+    /// Match rule L3 addresses/ports ($HOME_NET/$EXTERNAL_NET/$HTTP_PORTS) during
+    /// verification. Off in the integrated pipeline, where L2/L3 filtering is
+    /// already done upstream (kernel firewall, IP filter, conntrack) — only
+    /// inspected packets reach the signature stage, so re-checking addresses is
+    /// redundant and rejects rules whose direction doesn't match the deployment.
+    /// On by default for standalone use.
+    pub match_addresses: bool,
+
     /// Number of matcher worker threads
     pub worker_threads: usize,
 
@@ -141,6 +149,7 @@ impl Default for SignatureConfig {
             pcre_match_limit: 10000,
             flow_tracking: true,
             threshold_tracking: true,
+            match_addresses: true,
             worker_threads: 4,
             auto_reload: true,
             classification_file: None,

@@ -702,6 +702,12 @@ impl SignatureEngine {
         self.rules.len()
     }
 
+    /// Enable/disable L3 address/port matching during verification. The
+    /// integrated pipeline disables it (L2/L3 filtering is done upstream).
+    pub fn set_match_addresses(&mut self, enabled: bool) {
+        self.config.match_addresses = enabled;
+    }
+
     /// Get prefilter pattern count
     pub fn prefilter_pattern_count(&self) -> usize {
         self.prefilter.as_ref().map(|p| p.pattern_count()).unwrap_or(0)
@@ -735,7 +741,13 @@ impl SignatureEngine {
         flow_state: &FlowState,
     ) -> Vec<MatchResult> {
         if let Some(ref hs) = self.hyperscan_matcher {
-            hs.match_packet(packet, proto_ctx, flow_state)
+            // Hyperscan only PREFILTERS — the candidates go through the same full
+            // verification as the AC path (protocol/port/flow/buffer-scoped
+            // content/pcre), so the two paths agree and false positives from
+            // content-only matching are eliminated.
+            let payload = packet.payload();
+            let candidates = hs.prefilter(payload);
+            self.verify_candidates(&candidates, packet, proto_ctx, flow_state, payload)
         } else {
             self.match_packet(packet, proto_ctx, flow_state)
         }
@@ -758,188 +770,104 @@ impl SignatureEngine {
         fwd_stream: Option<&[u8]>,
         bwd_stream: Option<&[u8]>,
     ) -> Vec<MatchResult> {
-        use tracing::debug;
-        use std::time::Instant;
-
-        let start = Instant::now();
-        let mut results = Vec::new();
-
-        // Extract packet info once
+        // Select payload: stream data if present, else the packet payload.
         let packet_payload = packet.payload();
-        // Use stream data if available and has content, otherwise use packet payload
         let payload = if flow_state.to_server {
             fwd_stream.filter(|s| !s.is_empty()).unwrap_or(packet_payload)
         } else {
             bwd_stream.filter(|s| !s.is_empty()).unwrap_or(packet_payload)
         };
         let protocol = ip_protocol_to_sig_protocol(packet.protocol());
-        let src_ip = Some(packet.src_ip());
-        let dst_ip = Some(packet.dst_ip());
-        let src_port = Some(packet.src_port());
-        let dst_port = Some(packet.dst_port());
 
-        // Get candidate rules from prefilter
-        let prefilter_start = Instant::now();
+        // Aho-Corasick prefilter, plus rules the prefilter can't cover.
         let mut candidates = if let Some(ref prefilter) = self.prefilter {
-            let c = prefilter.find_candidates(payload);
-            // Debug: log candidate count for non-empty payloads
-            if !payload.is_empty() && c.len() > 0 {
-                debug!("Prefilter found {} candidates for payload len {} in {:?}",
-                    c.len(), payload.len(), prefilter_start.elapsed());
-            }
-            c
+            prefilter.find_candidates(payload)
         } else {
-            // No prefilter - check all rules for matching protocol
-            debug!("No prefilter, checking protocol rules for {:?}", protocol);
             self.get_protocol_rules(protocol)
         };
+        candidates.extend(self.get_non_prefilter_rules(protocol, proto_ctx));
 
-        // Also include rules that couldn't be in prefilter:
-        // - Rules with sticky buffers (HTTP/DNS/TLS context)
-        // - Rules with short patterns (< min_length)
-        // - Rules with no content patterns
-        let non_prefilter_rules = self.get_non_prefilter_rules(protocol, proto_ctx);
-        candidates.extend(non_prefilter_rules);
+        self.verify_candidates(&candidates, packet, proto_ctx, flow_state, payload)
+    }
 
-        // Debug: periodically log candidate stats
-        static MATCH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let count = MATCH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count % 10000 == 0 {
-            debug!(
-                "match_packet #{}: payload_len={}, candidates={}, proto={:?}",
-                count, payload.len(), candidates.len(), protocol
-            );
-        }
-
-        // Debug: track verification stats
-        let mut verified_count = 0u32;
-        let mut failed_protocol = 0u32;
-        let mut failed_flags = 0u32;
-        let mut failed_address = 0u32;
-        let mut failed_flow = 0u32;
-        let mut failed_flowbits = 0u32;
-        let mut failed_content = 0u32;
-        let mut failed_pcre = 0u32;
-        let mut failed_threshold = 0u32;
-
-        // Get TCP flags once for all rules
+    /// Verify a candidate rule set against the packet with the FULL rule
+    /// conditions — protocol, ports/addresses, flow, flowbits, content in the
+    /// correct (sticky) buffer, pcre, and threshold. Both the Aho-Corasick and
+    /// the hyperscan paths funnel their prefiltered candidates through this, so
+    /// the hyperscan DB only PREFILTERS and verification is identical and correct.
+    fn verify_candidates(
+        &self,
+        candidates: &HashSet<u32>,
+        packet: &Packet,
+        proto_ctx: &ProtocolContext,
+        flow_state: &FlowState,
+        payload: &[u8],
+    ) -> Vec<MatchResult> {
+        use std::time::Instant;
+        let protocol = ip_protocol_to_sig_protocol(packet.protocol());
+        let src_ip = Some(packet.src_ip());
         let tcp_flags = packet.tcp_flags();
+        let mut results = Vec::new();
 
-        // Verify each candidate rule
-        let verify_start = Instant::now();
-        for rule_id in &candidates {
-            if let Some(rule) = self.rules.get(rule_id) {
-                // Skip disabled rules
-                if !rule.enabled {
-                    continue;
-                }
-
-                verified_count += 1;
-
-                // Check each stage and count failures
-                if !self.check_protocol_direct(rule, protocol) {
-                    failed_protocol += 1;
-                    continue;
-                }
-                if !self.check_tcp_flags_direct(rule, tcp_flags) {
-                    failed_flags += 1;
-                    continue;
-                }
-                if !self.check_addresses_direct(rule, src_ip, dst_ip, src_port, dst_port, flow_state.to_server) {
-                    failed_address += 1;
-                    // Log first few address failures for debugging
-                    if failed_address <= 3 && count % 10000 == 0 {
-                        debug!(
-                            "Addr fail SID {}: src_ip={:?} (rule: {:?}), dst_ip={:?} (rule: {:?}), src_port={:?} (rule: {:?}), dst_port={:?} (rule: {:?}), dir={:?}",
-                            rule.sid,
-                            src_ip, rule.src_ip,
-                            dst_ip, rule.dst_ip,
-                            src_port, rule.src_port,
-                            dst_port, rule.dst_port,
-                            rule.direction
-                        );
-                    }
-                    continue;
-                }
-                if !self.check_flow_direct(rule, flow_state) {
-                    failed_flow += 1;
-                    continue;
-                }
-                if !self.check_flowbits_prereqs_direct(rule, packet, flow_state) {
-                    failed_flowbits += 1;
-                    continue;
-                }
-
-                // Match content patterns
-                let content_matches = match self.match_contents_direct(rule, payload, proto_ctx) {
-                    Some(m) => m,
-                    None => {
-                        failed_content += 1;
-                        // Log first few content failures for debugging
-                        if failed_content <= 3 && count % 10000 == 0 {
-                            let patterns: Vec<_> = rule.options.iter()
-                                .filter_map(|o| match o {
-                                    RuleOption::Content(cm) => Some(format!("{:?}", String::from_utf8_lossy(&cm.pattern))),
-                                    _ => None,
-                                })
-                                .collect();
-                            debug!(
-                                "Content fail SID {}: payload_len={}, patterns={:?}",
-                                rule.sid, payload.len(), patterns
-                            );
-                        }
-                        continue;
-                    }
-                };
-
-                // Match PCRE patterns
-                if !self.match_pcre_direct(rule, payload, proto_ctx) {
-                    failed_pcre += 1;
-                    continue;
-                }
-
-                // Check threshold
-                if !self.check_threshold_direct(rule, src_ip) {
-                    failed_threshold += 1;
-                    continue;
-                }
-
-                // Update flowbits state
-                self.update_flowbits_direct(rule, packet, flow_state);
-
-                // Check for noalert
-                if rule.options.iter().any(|o| matches!(o, RuleOption::Noalert)) {
-                    continue;
-                }
-
-                debug!("Rule {} (SID {}) MATCHED: {}", rule.id, rule.sid, rule.msg);
-                results.push(MatchResult {
-                    rule_id: rule.id,
-                    sid: rule.sid,
-                    msg: rule.msg.clone(),
-                    classtype: rule.classtype.clone(),
-                    priority: rule.priority,
-                    action: rule.action,
-                    references: rule.references.clone(),
-                    timestamp: Instant::now(),
-                    content_matches,
-                });
+        for rule_id in candidates {
+            let rule = match self.rules.get(rule_id) {
+                Some(r) if r.enabled => r,
+                _ => continue,
+            };
+            if !self.check_protocol_direct(rule, protocol) {
+                continue;
             }
-        }
-
-        // Log verification stats periodically
-        if count % 10000 == 0 && candidates.len() > 0 {
-            debug!(
-                "Verify stats #{}: checked={}, proto_fail={}, flags_fail={}, addr_fail={}, flow_fail={}, flowbits_fail={}, content_fail={}, pcre_fail={}, thresh_fail={}, matched={}, time={:?}",
-                count, verified_count, failed_protocol, failed_flags, failed_address, failed_flow,
-                failed_flowbits, failed_content, failed_pcre, failed_threshold,
-                results.len(), verify_start.elapsed()
-            );
-        }
-
-        // Log total time periodically
-        if count % 100000 == 0 {
-            debug!("match_packet #{}: total_time={:?}", count, start.elapsed());
+            if !self.check_tcp_flags_direct(rule, tcp_flags) {
+                continue;
+            }
+            // L2/L3 address/port matching ($HOME_NET/$EXTERNAL_NET/$HTTP_PORTS) is
+            // off in the integrated pipeline (already enforced upstream by the
+            // kernel firewall / IP filter / conntrack, so re-checking it here is
+            // redundant and rejects rules whose direction doesn't match the
+            // deployment's variables). On for standalone library use.
+            if self.config.match_addresses
+                && !self.check_addresses_direct(
+                    rule,
+                    src_ip,
+                    Some(packet.dst_ip()),
+                    Some(packet.src_port()),
+                    Some(packet.dst_port()),
+                    flow_state.to_server,
+                )
+            {
+                continue;
+            }
+            if !self.check_flow_direct(rule, flow_state) {
+                continue;
+            }
+            if !self.check_flowbits_prereqs_direct(rule, packet, flow_state) {
+                continue;
+            }
+            let content_matches = match self.match_contents_direct(rule, payload, proto_ctx) {
+                Some(m) => m,
+                None => continue,
+            };
+            if !self.match_pcre_direct(rule, payload, proto_ctx) {
+                continue;
+            }
+            if !self.check_threshold_direct(rule, src_ip) {
+                continue;
+            }
+            self.update_flowbits_direct(rule, packet, flow_state);
+            if rule.options.iter().any(|o| matches!(o, RuleOption::Noalert)) {
+                continue;
+            }
+            results.push(MatchResult {
+                rule_id: rule.id,
+                sid: rule.sid,
+                msg: rule.msg.clone(),
+                classtype: rule.classtype.clone(),
+                priority: rule.priority,
+                action: rule.action,
+                references: rule.references.clone(),
+                timestamp: Instant::now(),
+                content_matches,
+            });
         }
 
         results
@@ -1251,7 +1179,21 @@ impl SignatureEngine {
     /// Check protocol match (direct version)
     #[inline]
     fn check_protocol_direct(&self, rule: &Rule, protocol: Protocol) -> bool {
-        rule.protocol == Protocol::Any || rule.protocol == protocol
+        if rule.protocol == Protocol::Any || rule.protocol == protocol {
+            return true;
+        }
+        // App-layer rules (http, tls, ...) run over a transport; a packet only
+        // carries its IP protocol here, so let an app-layer rule apply to its
+        // transport — the port / flow / buffer-scoped content checks confirm the
+        // application. Without this, every `alert http` rule (most of ET) would be
+        // rejected against a TCP packet.
+        match rule.protocol {
+            Protocol::Http | Protocol::Tls | Protocol::Ssh | Protocol::Ftp | Protocol::Smtp => {
+                protocol == Protocol::Tcp
+            }
+            Protocol::Dns => protocol == Protocol::Tcp || protocol == Protocol::Udp,
+            _ => false,
+        }
     }
 
     /// Check TCP flags match (direct version)
