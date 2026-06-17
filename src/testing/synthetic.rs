@@ -712,6 +712,89 @@ impl MixedTrafficGenerator {
     }
 }
 
+/// A never-ending, on-the-fly traffic stream.
+///
+/// Rotates realistic segments — mostly benign, with a periodic scan / SYN-flood /
+/// brute-force — each from a fresh source IP. `next_packet()` never returns
+/// `None`: when a segment's inner generator exhausts, the next segment is
+/// re-seeded. Constant memory, so it can run indefinitely — ideal for training
+/// the learn-normal baseline to `is_ready` and then watching it fast-path, or for
+/// soak-testing the flow cache over time.
+pub struct ContinuousTrafficGenerator {
+    inner: AttackGenerator,
+    dst: IpAddr,
+    seg: u64,
+    /// Every Nth segment is an attack; the rest are benign.
+    attack_every: u64,
+    /// Packets per benign segment (one client's connection).
+    benign_len: u64,
+}
+
+impl ContinuousTrafficGenerator {
+    /// New generator targeting `dst`, with ~1-in-10 segments being an attack.
+    pub fn new(dst: IpAddr) -> Self {
+        Self::with_params(dst, 10, 24)
+    }
+
+    /// `attack_every`: 1-in-N segments is an attack (>= 1). `benign_len`: packets
+    /// per benign segment.
+    pub fn with_params(dst: IpAddr, attack_every: u64, benign_len: u64) -> Self {
+        let attack_every = attack_every.max(1);
+        let cfg = Self::config_for(dst, attack_every, benign_len, 1);
+        Self {
+            inner: AttackGenerator::new(cfg),
+            dst,
+            seg: 1,
+            attack_every,
+            benign_len,
+        }
+    }
+
+    /// A distinct source IP per segment (10.<hi>.<lo>.1).
+    fn src_for(seg: u64) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(
+            10,
+            ((seg >> 8) & 0xff) as u8,
+            (seg & 0xff) as u8,
+            1,
+        ))
+    }
+
+    fn config_for(dst: IpAddr, attack_every: u64, benign_len: u64, seg: u64) -> AttackConfig {
+        let src = Self::src_for(seg);
+        if seg % attack_every == 0 {
+            match (seg / attack_every) % 3 {
+                0 => AttackConfig::port_scan(src, dst, (1..=256).collect()),
+                1 => AttackConfig::syn_flood(src, dst, 80, 200),
+                _ => AttackConfig::ssh_brute_force(src, dst, 60),
+            }
+        } else {
+            AttackConfig::benign(src, dst, benign_len)
+        }
+    }
+
+    fn reseed(&mut self) {
+        self.seg = self.seg.wrapping_add(1);
+        let cfg = Self::config_for(self.dst, self.attack_every, self.benign_len, self.seg);
+        self.inner = AttackGenerator::new(cfg);
+    }
+
+    /// The next packet — never `None`; re-seeds a fresh segment when needed.
+    pub fn next_packet(&mut self) -> Packet {
+        loop {
+            if let Some(p) = self.inner.next_packet() {
+                return p;
+            }
+            self.reseed();
+        }
+    }
+
+    /// Which segment is currently being emitted (for stats).
+    pub fn segment(&self) -> u64 {
+        self.seg
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
