@@ -43,6 +43,7 @@ pub mod pipeline;
 pub mod workers;
 pub mod actions;
 pub mod flow_buffer;
+pub mod flow_disposition;
 
 #[cfg(feature = "profiling")]
 pub mod profiling;
@@ -63,6 +64,9 @@ pub use pipeline::{Pipeline, PipelineConfig, PipelineStage, StageProcessor};
 pub use workers::{WorkerPool, WorkerThread, WorkerConfig};
 pub use actions::{ActionExecutor, Action, ActionConfig};
 pub use flow_buffer::{FlowBuffer, FlowBufferConfig, FlowBatch, FlushTrigger};
+pub use flow_disposition::{
+    FlowCacheStats, FlowDisposition, FlowVerdictCache, FlowVerdictCacheConfig,
+};
 
 #[cfg(feature = "profiling")]
 pub use profiling::{PipelineProfiler, PipelineProfileSnapshot, StageProfile, StageProfileSnapshot};

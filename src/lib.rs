@@ -631,24 +631,29 @@ impl Daemon {
 
         // Spawn packet engine task if enabled
         #[cfg(feature = "packet-engine")]
-        let packet_engine_handle = if packet_engine_config.enabled {
+        let (packet_engine_handle, engine_shutdown_tx) = if packet_engine_config.enabled {
             let event_tx_engine = event_tx.clone();
             let crmonban_for_engine = self.crmonban.clone();
-            Some(tokio::spawn(async move {
-                if let Err(e) = start_packet_engine(packet_engine_config, event_tx_engine, crmonban_for_engine).await {
+            let (eng_sd_tx, eng_sd_rx) = tokio::sync::oneshot::channel::<()>();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = start_packet_engine(packet_engine_config, event_tx_engine, crmonban_for_engine, eng_sd_rx).await {
                     error!("Packet engine error: {}", e);
                 }
-            }))
+            });
+            (Some(handle), Some(eng_sd_tx))
         } else {
             info!("Packet engine is disabled");
-            None
+            (None, None)
         };
         #[cfg(not(feature = "packet-engine"))]
-        let packet_engine_handle: Option<tokio::task::JoinHandle<()>> = {
+        let (packet_engine_handle, engine_shutdown_tx): (
+            Option<tokio::task::JoinHandle<()>>,
+            Option<tokio::sync::oneshot::Sender<()>>,
+        ) = {
             if packet_engine_config.enabled {
                 warn!("Packet engine requested but not compiled in (missing packet-engine feature)");
             }
-            None
+            (None, None)
         };
 
         // Spawn cleanup task (runs every minute)
@@ -820,8 +825,16 @@ impl Daemon {
         if let Some(handle) = dpi_handle {
             handle.abort();
         }
+        if let Some(tx) = engine_shutdown_tx {
+            let _ = tx.send(());
+        }
         if let Some(handle) = packet_engine_handle {
-            handle.abort();
+            // Let the engine stop gracefully (drain in-flight verdicts + unbind
+            // NFQUEUE), bounded so a stuck engine cannot hang shutdown.
+            match tokio::time::timeout(std::time::Duration::from_secs(8), handle).await {
+                Ok(_) => {}
+                Err(_) => warn!("Packet engine did not stop within 8s"),
+            }
         }
         cleanup_handle.abort();
 
@@ -1252,15 +1265,22 @@ async fn handle_action(
 #[cfg(feature = "packet-engine")]
 async fn start_packet_engine(
     config: config::PacketEngineConfig,
-    _event_tx: mpsc::Sender<MonitorEvent>,
+    event_tx: mpsc::Sender<MonitorEvent>,
     _crmonban: Arc<RwLock<Crmonban>>,
+    engine_shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
-    use engine::capture::{CaptureConfig, CaptureMethod, create_capture};
-    
+    use crate::core::{DetectionAction, DetectionEvent};
+    use crate::models::{AttackEvent, AttackEventType};
+    use engine::capture::{CaptureConfig, CaptureMethod};
+    use engine::{PacketEngine, PacketEngineConfig as EngineConfig, PipelineConfig, WorkerConfig};
 
     info!("Starting packet engine on interface: {:?}", config.interface);
 
-    // Convert config to capture config
+    // Rules freshness check (carried over from the previous engine).
+    if let Some(ref rules_dir) = config.rules_dir {
+        check_rules_freshness(rules_dir);
+    }
+
     let capture_method = match config.capture_method.as_str() {
         "af_packet" | "afpacket" => CaptureMethod::AfPacket,
         "nfqueue" => CaptureMethod::Nfqueue,
@@ -1268,151 +1288,114 @@ async fn start_packet_engine(
         _ => CaptureMethod::AfPacket,
     };
 
-    let capture_config = CaptureConfig {
-        method: capture_method,
-        nfqueue_num: config.nfqueue_num,
-        interface: config.interface.clone(),
-        pcap_file: None,
-        snaplen: config.snaplen,
-        timeout_ms: config.timeout_ms,
-        buffer_size: 65536,
-        promiscuous: config.promiscuous,
-    };
-
-    // Create capture
-    let mut capture = create_capture(&capture_config)?;
-
-    // Check rules freshness if rules_dir is configured
-    if let Some(ref rules_dir) = config.rules_dir {
-        check_rules_freshness(rules_dir);
-    }
-
-    info!("Packet engine started, listening for packets...");
-
-    // Create flow buffer for stream reassembly
-    let mut flow_buffer = engine::FlowBuffer::new(engine::FlowBufferConfig::default());
-
-    // Create channel for sending batches to workers
-    let (worker_tx, worker_rx) = crossbeam_channel::bounded::<engine::FlowBatch>(1000);
-
-    // Create pipeline config from packet engine config
-    let pipeline_config = engine::PipelineConfig {
-        enable_flows: true,
-        enable_layer234: true,
-        enable_signatures: config.signatures_enabled,
-        enable_ml: config.ml_detection,
-        enable_correlation: false,
-        ..Default::default()
-    };
-
-    // Spawn worker thread to process batches
-    let rules_dir = config.rules_dir.clone();
-    let _worker_handle = std::thread::spawn(move || {
-        // Create a tokio runtime for async processing
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create worker runtime");
-
-        // Create worker with detection engines
-        let worker_config = engine::WorkerConfig {
-            rules_dir: rules_dir.map(std::path::PathBuf::from),
+    // Map the daemon's packet-engine config onto the engine's config.
+    let engine_config = EngineConfig {
+        enabled: true,
+        capture: CaptureConfig {
+            method: capture_method,
+            nfqueue_num: config.nfqueue_num,
+            interface: config.interface.clone(),
+            pcap_file: None,
+            snaplen: config.snaplen,
+            timeout_ms: config.timeout_ms,
+            buffer_size: 65536,
+            promiscuous: config.promiscuous,
+        },
+        pipeline: PipelineConfig {
+            enable_flows: true,
+            enable_layer234: true,
+            enable_signatures: config.signatures_enabled,
+            enable_ml: config.ml_detection,
+            enable_correlation: false,
             ..Default::default()
-        };
-        let mut worker = engine::WorkerThread::new(worker_config);
+        },
+        worker: WorkerConfig {
+            rules_dir: config.rules_dir.clone().map(std::path::PathBuf::from),
+            ..Default::default()
+        },
+        action: Default::default(),
+    };
 
-        let mut batch_count: u64 = 0;
-        let mut packet_count: u64 = 0;
-        let mut event_count: u64 = 0;
-        let mut last_log = std::time::Instant::now();
+    // The engine emits DetectionEvents; bridge them to the daemon's existing
+    // MonitorEvent consumer so the packet engine shares the SAME ban+audit path as
+    // the log monitors: record the event, and on a blocking detection call
+    // crmonban.ban -> firewall @blocked + DB audit + whitelist check.
+    let (det_tx, mut det_rx) = mpsc::channel::<DetectionEvent>(1024);
+    let bridge_tx = event_tx.clone();
+    tokio::spawn(async move {
+        // Default ban length for packet-engine detections (seconds).
+        const PACKET_ENGINE_BAN_SECS: i64 = 3600;
+        // Suppress duplicate bans for the same source within this window (bounds
+        // re-bans from a non-cacheable flood, e.g. ICMP).
+        const BAN_DEDUPE_SECS: u64 = 60;
+        let mut recently_banned: std::collections::HashMap<std::net::IpAddr, std::time::Instant> =
+            std::collections::HashMap::new();
+        while let Some(ev) = det_rx.recv().await {
+            // Audit: record every detection as an attack event.
+            let attack = AttackEvent {
+                id: None,
+                ip: ev.src_ip,
+                timestamp: Utc::now(),
+                service: "packet-engine".to_string(),
+                event_type: AttackEventType::Other(format!("{:?}", ev.event_type)),
+                details: Some(ev.message.clone()),
+                log_line: ev.message.clone(),
+            };
+            if bridge_tx.send(MonitorEvent::Attack(attack)).await.is_err() {
+                break;
+            }
 
-        // Process batches from channel
-        while let Ok(batch) = worker_rx.recv() {
-            batch_count += 1;
-            let packets_in_batch = batch.packets.len();
-            packet_count += packets_in_batch as u64;
-
-            // Process each packet through detection pipeline
-            for packet in batch.packets {
-                let events = rt.block_on(worker.process(packet, &pipeline_config));
-                event_count += events.len() as u64;
-
-                // Log detection events
-                for event in &events {
-                    info!(
-                        "Detection: {:?} from {} - {}",
-                        event.event_type,
-                        event.src_ip,
-                        event.message
-                    );
+            // Resolution: a blocking verdict (the pipeline rewrites event.action
+            // to Ban only when it actually enforces a block) escalates to banning
+            // the source so its future traffic is dropped in-kernel (@blocked) and
+            // never re-queued.
+            if matches!(
+                ev.action,
+                DetectionAction::Drop | DetectionAction::Reject | DetectionAction::Ban
+            ) {
+                let now = std::time::Instant::now();
+                let recent = recently_banned
+                    .get(&ev.src_ip)
+                    .map(|t| now.duration_since(*t) < std::time::Duration::from_secs(BAN_DEDUPE_SECS))
+                    .unwrap_or(false);
+                if !recent {
+                    if recently_banned.len() > 100_000 {
+                        recently_banned.clear();
+                    }
+                    recently_banned.insert(ev.src_ip, now);
+                    let ban = MonitorEvent::Ban {
+                        ip: ev.src_ip,
+                        service: "packet-engine".to_string(),
+                        reason: ev.message.clone(),
+                        duration_secs: PACKET_ENGINE_BAN_SECS,
+                    };
+                    if bridge_tx.send(ban).await.is_err() {
+                        break;
+                    }
                 }
             }
-
-            // Log stats every 5 seconds
-            if last_log.elapsed() >= std::time::Duration::from_secs(5) {
-                let elapsed = last_log.elapsed().as_secs_f64();
-                info!(
-                    "Worker stats: batches={}, packets={}, events={}, rate={:.1} pkt/s",
-                    batch_count,
-                    packet_count,
-                    event_count,
-                    packet_count as f64 / elapsed
-                );
-                // Reset for rate calculation
-                packet_count = 0;
-                last_log = std::time::Instant::now();
-            }
         }
-        info!("Worker thread exiting");
+        debug!("Packet-engine event bridge exiting");
     });
 
-    let mut packet_count: u64 = 0;
-    let mut batch_count: u64 = 0;
-    let mut last_timeout_check = std::time::Instant::now();
+    // Build, wire, and run the engine. PacketEngine carries the 8-stage pipeline,
+    // inline NFQUEUE verdict feedback, and the per-flow verdict cache.
+    let mut engine = PacketEngine::new(engine_config);
+    engine.set_event_channel(det_tx);
+    engine.start().await?;
 
-    // Main capture loop
-    loop {
-        packet_count += 1;
-        match capture.next_packet(packet_count) {
-            Ok(Some(packet)) => {
+    info!("Packet engine started (PacketEngine): inline verdicts + flow cache + ban resolution active");
 
-                // Push packet to flow buffer, get any ready batches
-                let batches = flow_buffer.push( packet);
-                for batch in batches {
-                    batch_count += 1;
-                    if let Err(e) = worker_tx.send(batch) {
-                        warn!("Failed to send batch to worker: {}", e);
-                    }
-                }
-
-                // Log stats periodically (every 1000 packets for better visibility)
-                if packet_count % 1000 == 0 {
-                    debug!(
-                        "Capture: {} packets | {} batches | {} active flows",
-                        packet_count, batch_count, flow_buffer.flow_count()
-                    );
-                }
-            }
-            Ok(None) => {
-                // No packet available - check for timed-out flows
-                if last_timeout_check.elapsed() > std::time::Duration::from_millis(10) {
-                    let batches = flow_buffer.check_timeouts();
-                    for batch in batches {
-                        batch_count += 1;
-                        if let Err(e) = worker_tx.send(batch) {
-                            warn!("Failed to send batch to worker: {}", e);
-                        }
-                    }
-                    last_timeout_check = std::time::Instant::now();
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
-            }
-            Err(e) => {
-                error!("Capture error: {}", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            }
-        }
+    // Run until the daemon signals shutdown, then stop the engine GRACEFULLY:
+    // stop() flips state to Stopping, joins the capture thread (draining in-flight
+    // verdicts within its 5s deadline) and unbinds the NFQUEUE — rather than being
+    // aborted mid-flight, which would leak the capture thread and the queue bind.
+    let _ = engine_shutdown_rx.await;
+    info!("Packet engine: shutdown signal received, stopping...");
+    if let Err(e) = engine.stop().await {
+        warn!("Error stopping packet engine: {}", e);
     }
+    Ok(())
 }
 
 #[cfg(test)]

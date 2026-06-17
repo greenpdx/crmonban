@@ -28,9 +28,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing::debug;
 
-use crate::core::{DetectionEvent, Packet};
+use crate::core::{DetectionAction, DetectionEvent, FlowKey, IpProtocol, Packet};
 use crate::database::{BatchedWriterHandle, IntervalStats};
 
+use super::flow_disposition::{FlowVerdictCache, FlowVerdictCacheConfig};
 use super::workers::{WorkerPool, WorkerConfig};
 use super::EngineStats;
 
@@ -129,6 +130,9 @@ pub struct Pipeline {
     /// capture layer. Used by NFQUEUE inline mode so every captured packet
     /// receives exactly one ACCEPT/DROP verdict.
     verdict_tx: Option<Sender<(u64, bool)>>,
+    /// Per-flow verdict cache: short-circuits the stages for streams already
+    /// judged bad (drop) or proven good (bypass). See `flow_disposition`.
+    flow_cache: FlowVerdictCache,
 }
 
 impl Pipeline {
@@ -144,6 +148,7 @@ impl Pipeline {
             event_tx,
             db_writer: None,
             verdict_tx: None,
+            flow_cache: FlowVerdictCache::new(FlowVerdictCacheConfig::default()),
         }
     }
 
@@ -163,7 +168,7 @@ impl Pipeline {
 
     /// Run the pipeline
     pub async fn run(
-        self,
+        mut self,
         worker_config: WorkerConfig,
         stats: Arc<RwLock<EngineStats>>,
     ) -> anyhow::Result<()> {
@@ -186,48 +191,116 @@ impl Pipeline {
                     packets_this_interval += 1;
                     bytes_this_interval += packet.raw_len as u64;
 
-                    // Process packet through worker pool. Use the full analysis
-                    // so we can read the verdict and route it back to the capture.
                     let packet_id = packet.id;
-                    let analysis = worker_pool.process_full(packet, &self.config).await;
+                    let flow_key = FlowKey::from_packet(&packet);
+                    let now = Instant::now();
 
-                    // Issue the inline verdict for this packet (NFQUEUE). The
-                    // verdict defaults to Accept and is set to Drop/Reject by the
-                    // alert analyzer when a stage flags the packet. Accept unless
-                    // blocking, so every captured packet gets exactly one verdict.
-                    if let Some(ref verdict_tx) = self.verdict_tx {
-                        // accept = true for Accept/Queue, false for Drop/Reject.
-                        // The bool channel downgrades Reject to a plain DROP (no
-                        // RST/ICMP) and treats Queue(n) as Accept; no stage emits
-                        // those today — revisit (pass the full PacketVerdict) if
-                        // Reject/requeue are ever wired up.
-                        let accept = !analysis.verdict.is_blocking();
-                        // Unbounded sink: send never blocks, so the async pipeline
-                        // cannot deadlock against the bounded packet channel.
-                        let _ = verdict_tx.send((packet_id, accept));
+                    // Only connection-ish protocols are flow-cached; ICMP "ports"
+                    // are not connection identifiers, so ICMP is always inspected.
+                    let cacheable =
+                        matches!(packet.protocol(), IpProtocol::Tcp | IpProtocol::Udp);
+                    // A new TCP connection (SYN without ACK) is a new instance on a
+                    // possibly-reused 5-tuple: forget any stale verdict so it is
+                    // re-inspected instead of inheriting the old connection's.
+                    let is_syn = packet
+                        .tcp_flags()
+                        .as_ref()
+                        .map(|f| f.syn && !f.ack)
+                        .unwrap_or(false);
+                    if is_syn {
+                        self.flow_cache.invalidate(&flow_key);
                     }
 
-                    let events = analysis.events;
+                    // Fast-path: a flow already judged short-circuits the 8 stages.
+                    // A cached BAD stream is dropped without re-inspection (the
+                    // sticky "new drop"); a cached GOOD stream is bypassed
+                    // (accepted). See `flow_disposition`.
+                    let cached = if cacheable && !is_syn {
+                        self.flow_cache.lookup(&flow_key, now)
+                    } else {
+                        None
+                    };
+                    if let Some(accept) = cached {
+                        if let Some(ref verdict_tx) = self.verdict_tx {
+                            let _ = verdict_tx.send((packet_id, accept));
+                        }
+                        // Cached flows produce no new events; just account latency.
+                        let latency_us = packet_start.elapsed().as_micros() as u64;
+                        latency_sum_us += latency_us;
+                        if latency_us > latency_max_us {
+                            latency_max_us = latency_us;
+                        }
+                    } else {
+                        // Full inspection: run the stages and read the verdict.
+                        let analysis = worker_pool.process_full(packet, &self.config).await;
+                        let blocking = analysis.verdict.is_blocking();
 
-                    // Record latency
-                    let latency_us = packet_start.elapsed().as_micros() as u64;
-                    latency_sum_us += latency_us;
-                    if latency_us > latency_max_us {
-                        latency_max_us = latency_us;
-                    }
-
-                    // Send events and record to database
-                    for event in events {
-                        events_this_interval += 1;
-
-                        // Record to database if writer is available
-                        if let Some(ref writer) = self.db_writer {
-                            writer.record_event(event.clone());
+                        // Cache the flow disposition (TCP/UDP only). Bad is sticky
+                        // for the rest of the stream; good is cached only when
+                        // bypass is enabled and the flow stayed clean long enough.
+                        if cacheable {
+                            self.flow_cache.record(&flow_key, blocking, now);
                         }
 
-                        if self.event_tx.send(event).await.is_err() {
-                            // Channel closed
-                            return Ok(());
+                        // Issue the inline verdict (NFQUEUE). accept = true for
+                        // Accept/Queue, false for Drop/Reject; the bool channel
+                        // downgrades Reject to DROP and Queue(n) to Accept (no stage
+                        // emits those today — revisit with the full PacketVerdict).
+                        if let Some(ref verdict_tx) = self.verdict_tx {
+                            // Unbounded sink: send never blocks, so the async
+                            // pipeline cannot deadlock against the bounded channel.
+                            let _ = verdict_tx.send((packet_id, !blocking));
+                        }
+
+                        // Align emitted event actions with the ENFORCED policy
+                        // verdict so the daemon's ban bridge bans the source
+                        // exactly when the engine actually blocks this flow — not
+                        // on a pre-policy stage suggestion that the alert analyzer
+                        // (confidence + per-severity policy) downgraded to Accept.
+                        // One ban per newly-bad flow; the flow cache suppresses
+                        // repeats for cacheable protocols.
+                        let mut events = analysis.events;
+                        if blocking {
+                            for (i, ev) in events.iter_mut().enumerate() {
+                                ev.action = if i == 0 {
+                                    DetectionAction::Ban
+                                } else {
+                                    DetectionAction::Alert
+                                };
+                            }
+                        } else {
+                            for ev in events.iter_mut() {
+                                if matches!(
+                                    ev.action,
+                                    DetectionAction::Drop
+                                        | DetectionAction::Reject
+                                        | DetectionAction::Ban
+                                ) {
+                                    ev.action = DetectionAction::Alert;
+                                }
+                            }
+                        }
+
+                        // Record latency
+                        let latency_us = packet_start.elapsed().as_micros() as u64;
+                        latency_sum_us += latency_us;
+                        if latency_us > latency_max_us {
+                            latency_max_us = latency_us;
+                        }
+
+                        // Send events and record to database
+                        for event in events {
+                            events_this_interval += 1;
+
+                            // Record to database if writer is available
+                            if let Some(ref writer) = self.db_writer {
+                                writer.record_event(event.clone());
+                            }
+
+                            if self.event_tx.send(event).await.is_err() {
+                                // Channel closed
+                                return Ok(());
+                            }
                         }
                     }
                 }
