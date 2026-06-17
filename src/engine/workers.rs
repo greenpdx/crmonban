@@ -230,14 +230,17 @@ impl WorkerThread {
             // Stage 1: Flow Tracking
             flow_tracker: FlowTracker::new(FlowConfig::default()),
 
-            // Stage 2: Layer 2-4 Detection (scans, DoS, brute force)
-            layer234_detector: Layer234Detector::builder()
-                .with_scan_detection(true)
-                .with_bruteforce_detection(true)
-                .with_dos_detection(true)
-                .with_anomaly_detection(false)  // ML handles anomaly detection
-                .build()
-                .expect("Failed to create Layer234Detector"),
+            // Stage 2: Layer 2-4 Detection (scans, DoS, brute force).
+            // Build via `build_with_config` so the crvecdb signature index is
+            // populated with the default scan/connect/brute-force vectors —
+            // `build()` alone leaves the index EMPTY, so `match_signature` can
+            // never hit and the detector falls back to heuristics only.
+            layer234_detector: {
+                let l234_config = crate::layer234::Config::default();
+                crate::layer234::DetectorBuilder::from_config(&l234_config)
+                    .build_with_config(&l234_config)
+                    .expect("Failed to create Layer234Detector")
+            },
 
             // Stage 3: Signature Matching
             signature_engine,
