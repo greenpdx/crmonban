@@ -166,6 +166,10 @@ const NORMAL_MIN_SAMPLES: u64 = 1000;
 /// normal and stays on the full inspection path. Conservative; tunable in 2b.3.
 const NORMAL_ANOMALY_THRESHOLD: f32 = 3.0;
 
+/// A flow needs at least this many packets before the model scores it — its
+/// feature shape is meaningless on a bare handshake.
+const NORMAL_SCORE_MIN_PACKET: u64 = 4;
+
 impl WorkerThread {
     /// Create a new worker thread
     pub fn new(config: WorkerConfig) -> Self {
@@ -251,10 +255,28 @@ impl WorkerThread {
         // Reset stage context for this packet
         self.stage_context = StageContext::new();
 
+        // 2b.3 in-pipeline fast-path: once the model scores a flow normal (after
+        // FlowTracker), skip the HEAVY stages for that flow's packets. The cheap
+        // detectors (IP filter, flow, Layer234 scans, signatures) still run, so a
+        // normal-looking flow that trips a signature is still caught.
+        let mut skip_heavy = false;
+
         // Process through each stage in configured order
         for stage in &config.stage_order {
             // Skip disabled stages
             if !config.is_stage_enabled(*stage) {
+                continue;
+            }
+
+            // Skip the heavy stages for model-scored-normal flows.
+            if skip_heavy
+                && matches!(
+                    *stage,
+                    PipelineStage::ProtocolAnalysis
+                        | PipelineStage::WasmPlugins
+                        | PipelineStage::MLDetection
+                )
+            {
                 continue;
             }
 
@@ -269,6 +291,12 @@ impl WorkerThread {
 
             // Process through the appropriate stage
             analysis = self.process_stage(*stage, analysis, config).await;
+
+            // 2b.3: right after flow tracking, score the flow against the learned
+            // baseline; if normal, skip the heavy stages below for this packet.
+            if *stage == PipelineStage::FlowTracker {
+                skip_heavy = self.score_flow_normal(&analysis);
+            }
 
             // Calculate if this stage marked the packet (added events)
             let stage_marked = analysis.event_count() > events_before;
@@ -359,10 +387,28 @@ impl WorkerThread {
         // Reset stage context for this packet
         self.stage_context = StageContext::new();
 
+        // 2b.3 in-pipeline fast-path: once the model scores a flow normal (after
+        // FlowTracker), skip the HEAVY stages for that flow's packets. The cheap
+        // detectors (IP filter, flow, Layer234 scans, signatures) still run, so a
+        // normal-looking flow that trips a signature is still caught.
+        let mut skip_heavy = false;
+
         // Process through each stage in configured order
         for stage in &config.stage_order {
             // Skip disabled stages
             if !config.is_stage_enabled(*stage) {
+                continue;
+            }
+
+            // Skip the heavy stages for model-scored-normal flows.
+            if skip_heavy
+                && matches!(
+                    *stage,
+                    PipelineStage::ProtocolAnalysis
+                        | PipelineStage::WasmPlugins
+                        | PipelineStage::MLDetection
+                )
+            {
                 continue;
             }
 
@@ -377,6 +423,12 @@ impl WorkerThread {
 
             // Process through the appropriate stage
             analysis = self.process_stage(*stage, analysis, config).await;
+
+            // 2b.3: right after flow tracking, score the flow against the learned
+            // baseline; if normal, skip the heavy stages below for this packet.
+            if *stage == PipelineStage::FlowTracker {
+                skip_heavy = self.score_flow_normal(&analysis);
+            }
 
             // Calculate if this stage marked the packet (added events)
             let stage_marked = analysis.event_count() > events_before;
@@ -441,33 +493,19 @@ impl WorkerThread {
         // flow cache short-circuits flagged flows before they re-enter the
         // pipeline). Learn once per flow, when it reaches a representative packet
         // count, so we neither over-weight long flows nor learn bare handshakes.
+        // 2b.2 — mark the flow good for the in-kernel bypass only if the in-loop
+        // gate scored it normal AND no stage flagged it (the cheap detectors still
+        // ran, so a normal-looking flow that trips a signature is not bypassed).
+        // 2b.1 — learn this clean flow into the baseline at a representative count.
         if analysis.events.is_empty() {
-            // Extract the flow's features at a representative packet count. The
-            // match also ends the immutable borrow of `analysis.flow` before we
-            // touch `analysis` mutably below.
-            let features = match analysis.flow {
-                Some(ref flow)
-                    if flow.fwd_packets + flow.bwd_packets == NORMAL_LEARN_AT_PACKET =>
-                {
-                    Some(self.normal_extractor.extract(flow))
+            if skip_heavy {
+                analysis.fast_path_good = true;
+            }
+            if let Some(ref flow) = analysis.flow {
+                if flow.fwd_packets + flow.bwd_packets == NORMAL_LEARN_AT_PACKET {
+                    let features = self.normal_extractor.extract(flow);
+                    self.normal_model.write().update(&features);
                 }
-                _ => None,
-            };
-            if let Some(features) = features {
-                // SCORE FIRST (against the model as it stands, before this flow is
-                // added): a ready model that finds this clean flow un-anomalous
-                // fast-paths it — the pipeline marks it good and nftables (2a)
-                // bypasses the rest of the flow in-kernel.
-                let is_normal = {
-                    let model = self.normal_model.read();
-                    model.is_ready(NORMAL_MIN_SAMPLES)
-                        && !model.is_anomalous(&features, NORMAL_ANOMALY_THRESHOLD)
-                };
-                if is_normal {
-                    analysis.fast_path_good = true;
-                }
-                // Then LEARN: add this clean flow to the baseline.
-                self.normal_model.write().update(&features);
             }
         }
 
@@ -479,6 +517,23 @@ impl WorkerThread {
     /// flows, exposed for early scoring (2b.2) and observability.
     pub fn normal_model(&self) -> Arc<RwLock<Baseline>> {
         self.normal_model.clone()
+    }
+
+    /// 2b.3: score a flow against the learned baseline. Returns true when the
+    /// model is trained, the flow has enough shape, and its features are not
+    /// anomalous — i.e. the flow looks normal and may skip the heavy stages.
+    fn score_flow_normal(&mut self, analysis: &PacketAnalysis) -> bool {
+        let features = match analysis.flow {
+            Some(ref flow)
+                if flow.fwd_packets + flow.bwd_packets >= NORMAL_SCORE_MIN_PACKET =>
+            {
+                self.normal_extractor.extract(flow)
+            }
+            _ => return false,
+        };
+        let model = self.normal_model.read();
+        model.is_ready(NORMAL_MIN_SAMPLES)
+            && !model.is_anomalous(&features, NORMAL_ANOMALY_THRESHOLD)
     }
 
     /// Process a single pipeline stage
