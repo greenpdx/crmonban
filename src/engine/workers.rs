@@ -27,7 +27,7 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use tracing::{trace, debug};
 
-use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packet, AlertAnalyzer, AnalyzerDecision};
+use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, DetectionAction, Severity, Packet, AlertAnalyzer, AnalyzerDecision};
 use crate::correlation::{CorrelationEngine, CorrelationConfig, CorrelationResult};
 use crate::flow::{FlowTracker, FlowConfig};
 use crate::ml::{MLEngine, MLConfig, AnomalyCategory};
@@ -201,6 +201,77 @@ fn stage_feature_gates(stage: PipelineStage) -> String {
     } else {
         gates.join(" ")
     }
+}
+
+/// Percent-decode (`%XX` and `+`) and lowercase a URI, so an encoded or
+/// mixed-case web-attack payload isn't hidden from the keyword match. Invalid
+/// `%` sequences are left as-is. Decoded bytes are mapped to chars 1:1 (Latin-1),
+/// which is fine for matching ASCII attack keywords.
+fn normalize_uri(uri: &str) -> String {
+    let b = uri.as_bytes();
+    let mut out = String::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => match (hex_val(b[i + 1]), hex_val(b[i + 2])) {
+                (Some(h), Some(l)) => {
+                    out.push((h * 16 + l) as char);
+                    i += 3;
+                }
+                _ => {
+                    out.push('%');
+                    i += 1;
+                }
+            },
+            b'+' => {
+                out.push(' ');
+                i += 1;
+            }
+            c => {
+                out.push(c as char);
+                i += 1;
+            }
+        }
+    }
+    out.to_lowercase()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Classify a web attack in an already-decoded, lowercased request target.
+/// Returns the detection type and a human label, or None.
+fn detect_web_attack(s: &str) -> Option<(DetectionType, &'static str)> {
+    if s.contains("../") || s.contains("..\\") || s.contains("/etc/passwd") {
+        return Some((DetectionType::PathTraversal, "Path traversal"));
+    }
+    if s.contains("<script")
+        || s.contains("javascript:")
+        || s.contains("onerror=")
+        || s.contains("onload=")
+    {
+        return Some((DetectionType::Xss, "Cross-site scripting"));
+    }
+    let sqli = (s.contains("union") && s.contains("select"))
+        || (s.contains("select") && s.contains(" from "))
+        || s.contains("' or ")
+        || s.contains("\" or ")
+        || s.contains(" or 1=1")
+        || s.contains("'='")
+        || s.contains("' and ")
+        || s.contains("'--")
+        || s.contains("; drop ")
+        || s.contains("xp_cmdshell");
+    if sqli {
+        return Some((DetectionType::SqlInjection, "SQL injection"));
+    }
+    None
 }
 
 impl WorkerThread {
@@ -750,21 +821,26 @@ impl WorkerThread {
                     for proto_event in proto_events {
                         match &proto_event {
                             ProtocolEvent::Http(tx) => {
-                                if tx.request.as_ref().map(|r| {
-                                    r.uri.contains("..") || // Path traversal
-                                    r.uri.contains("select") || // SQL injection
-                                    r.uri.contains("<script") // XSS
-                                }).unwrap_or(false) {
+                                // Inspect the URL-decoded, lowercased URI so an
+                                // encoded payload (%27, %20, +, mixed case) is not
+                                // hidden from the keyword match — the raw check
+                                // missed exactly that.
+                                if let Some((dtype, label)) = tx
+                                    .request
+                                    .as_ref()
+                                    .and_then(|r| detect_web_attack(&normalize_uri(&r.uri)))
+                                {
+                                    let uri = tx.request.as_ref().map(|r| r.uri.clone()).unwrap_or_default();
                                     analysis.add_event(
                                         DetectionEvent::new(
-                                            DetectionType::ProtocolAnomaly,
-                                            Severity::Medium,
+                                            dtype,
+                                            Severity::High,
                                             analysis.packet.src_ip(),
                                             analysis.packet.dst_ip(),
-                                            format!("Suspicious HTTP request: {:?}",
-                                                tx.request.as_ref().map(|r| &r.uri)),
+                                            format!("{label} in HTTP request: {uri}"),
                                         )
                                         .with_detector("protocol_analyzer")
+                                        .with_action(DetectionAction::Drop)
                                         .with_ports(analysis.packet.src_port(), analysis.packet.dst_port())
                                         .with_protocol("HTTP")
                                     );
@@ -1263,6 +1339,33 @@ mod tests {
         config.enable_ml = stage == PipelineStage::MLDetection;
         config.enable_correlation = stage == PipelineStage::Correlation;
         config
+    }
+
+    #[test]
+    fn web_attack_detection_decodes_and_classifies() {
+        // Encoded SQLi (the realistic form) is decoded and caught.
+        assert_eq!(
+            detect_web_attack(&normalize_uri(
+                "/x?id=1%27%20UNION%20SELECT%20a%20FROM%20b%20--%20"
+            ))
+            .map(|(t, _)| t),
+            Some(DetectionType::SqlInjection)
+        );
+        // Encoded path traversal (%2e%2e -> ..).
+        assert_eq!(
+            detect_web_attack(&normalize_uri("/%2e%2e/%2e%2e/etc/passwd")).map(|(t, _)| t),
+            Some(DetectionType::PathTraversal)
+        );
+        // Mixed-case, encoded XSS.
+        assert_eq!(
+            detect_web_attack(&normalize_uri("/s?q=%3CScRiPt%3Ealert(1)%3C/script%3E"))
+                .map(|(t, _)| t),
+            Some(DetectionType::Xss)
+        );
+        // Benign requests are not flagged.
+        assert!(detect_web_attack(&normalize_uri("/index.html?page=2&sort=name")).is_none());
+        assert!(detect_web_attack(&normalize_uri("/products?category=books&id=42")).is_none());
+        assert!(detect_web_attack(&normalize_uri("/search?q=rust%20programming")).is_none());
     }
 
     #[test]
