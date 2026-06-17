@@ -1207,14 +1207,14 @@ impl Firewall {
             index: None,
             comment: Some(Cow::Borrowed("Log new connections for port scan tracking")),
             expr: Cow::Owned(vec![
-                // Match new connections (ct state new)
+                // Match new connections (ct state new) — proper ct expression,
+                // not a payload field (the payload form is invalid nft JSON).
                 Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("ct"),
-                            field: Cow::Borrowed("state"),
-                        },
-                    ))),
+                    left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                        key: Cow::Borrowed("state"),
+                        family: None,
+                        dir: None,
+                    })),
                     right: Expression::String(Cow::Borrowed("new")),
                     op: Operator::EQ,
                 }),
@@ -1637,14 +1637,22 @@ impl Firewall {
                 index: None,
                 comment: Some(Cow::Borrowed("Allow established/related")),
                 expr: Cow::Owned(vec![
+                    // ct state { established, related } — proper ct expression and
+                    // an anonymous SET (the comma-string form is invalid nft JSON).
                     Statement::Match(Match {
-                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                            PayloadField {
-                                protocol: Cow::Borrowed("ct"),
-                                field: Cow::Borrowed("state"),
-                            },
-                        ))),
-                        right: Expression::String(Cow::Borrowed("established,related")),
+                        left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                            key: Cow::Borrowed("state"),
+                            family: None,
+                            dir: None,
+                        })),
+                        right: Expression::Named(NamedExpression::Set(vec![
+                            nftables::expr::SetItem::Element(Expression::String(Cow::Borrowed(
+                                "established",
+                            ))),
+                            nftables::expr::SetItem::Element(Expression::String(Cow::Borrowed(
+                                "related",
+                            ))),
+                        ])),
                         op: Operator::EQ,
                     }),
                     Statement::Accept(None),
