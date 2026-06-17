@@ -8,11 +8,14 @@ alert tcp any any -> any 22 (msg:"CICIDS SSH Connection"; flow:to_server; conten
 # SSH Protocol Version - detect SSH version response
 alert tcp any 22 -> any any (msg:"CICIDS SSH Server Response"; flow:to_client; content:"SSH-"; depth:4; classtype:attempted-admin; sid:9100002; rev:1; priority:3;)
 
-# FTP USER command - detect login attempts
-alert tcp any any -> any 21 (msg:"CICIDS FTP USER Command"; flow:to_server; content:"USER "; nocase; classtype:attempted-admin; sid:9100003; rev:1; priority:2;)
+# FTP USER command - detect login attempts. Anchored to the start of the packet
+# (FTP commands begin the line) with depth, so it can't match "User-Agent" or
+# other "user" substrings in an HTTP payload now that the pipeline doesn't
+# port-scope rules.
+alert tcp any any -> any 21 (msg:"CICIDS FTP USER Command"; flow:to_server; content:"USER "; depth:5; nocase; classtype:attempted-admin; sid:9100003; rev:1; priority:2;)
 
-# FTP PASS command - detect password attempts
-alert tcp any any -> any 21 (msg:"CICIDS FTP PASS Command"; flow:to_server; content:"PASS "; nocase; classtype:attempted-admin; sid:9100004; rev:1; priority:2;)
+# FTP PASS command - detect password attempts (anchored, see USER above)
+alert tcp any any -> any 21 (msg:"CICIDS FTP PASS Command"; flow:to_server; content:"PASS "; depth:5; nocase; classtype:attempted-admin; sid:9100004; rev:1; priority:2;)
 
 # FTP Response 530 - Login incorrect (failed auth)
 alert tcp any 21 -> any any (msg:"CICIDS FTP Login Failed"; flow:to_client; content:"530 "; depth:4; classtype:attempted-admin; sid:9100005; rev:1; priority:1;)
