@@ -554,7 +554,18 @@ impl Firewall {
         // Add DPI NFQUEUE rules if enabled
         if let Some(ref dpi_config) = self.dpi_config {
             if dpi_config.enabled {
-                self.add_dpi_rules(&mut batch, dpi_config);
+                self.add_dpi_rules(&mut batch, dpi_config); // INPUT chain
+                // Gateway deployments also inspect transit (forward) traffic on a
+                // separate base chain. Deferred on host-only / Docker boxes where
+                // all forward traffic would otherwise be funnelled to userspace.
+                if self.deployment.has_forward_protection() {
+                    self.add_dpi_chain(
+                        &mut batch,
+                        "dpi_inspect_forward",
+                        NfHook::Forward,
+                        dpi_config,
+                    );
+                }
             }
         }
 
@@ -1254,27 +1265,36 @@ impl Firewall {
         Ok(())
     }
 
-    /// Add DPI NFQUEUE rules to the batch
-    /// Add the inline-DPI NFQUEUE rule on the INPUT chain.
-    ///
-    /// Scope: INPUT only for now. The chain sits at priority+5 — AFTER the
-    /// `@blocked` drop rules (at `priority`) — so already-banned sources are
-    /// dropped in-kernel and never reach the queue. Forward/output queueing is
-    /// deliberately deferred: on a forwarding/Docker host it would funnel all
-    /// transit/egress traffic to userspace, so it needs deployment-mode gating
-    /// and its own queue number.
+    /// Add the INPUT inline-DPI chain. Entry point (also used by `init_dpi`).
     fn add_dpi_rules(&self, batch: &mut Batch, config: &DpiConfig) {
-        info!("Adding DPI NFQUEUE rules (queue {})", config.queue_num);
+        self.add_dpi_chain(batch, "dpi_inspect", NfHook::Input, config);
+    }
 
-        // Create a separate chain for DPI processing
+    /// Add the inline-DPI NFQUEUE chain `chain_name` on `hook`.
+    ///
+    /// The chain sits at priority+5 — AFTER the `@blocked` drop rules (at
+    /// `priority`) — so already-banned sources are dropped in-kernel and never
+    /// reach the queue. Used for the INPUT chain always, and the FORWARD chain on
+    /// gateway deployments.
+    ///
+    /// NOTE: on the forward hook this queues ALL transit TCP; on a gateway that is
+    /// also a Docker/forwarding host, scope it by interface (`iifname`) so
+    /// container traffic isn't funnelled to userspace — a follow-up.
+    fn add_dpi_chain(&self, batch: &mut Batch, chain_name: &str, hook: NfHook, config: &DpiConfig) {
+        info!(
+            "Adding DPI NFQUEUE chain {} (queue {})",
+            chain_name, config.queue_num
+        );
+
+        // Create a separate base chain for DPI processing on this hook.
         batch.add(NfListObject::Chain(Chain {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
-            name: Cow::Borrowed("dpi_inspect"),
+            name: Cow::Owned(chain_name.to_string()),
             newname: None,
             handle: None,
             _type: Some(NfChainType::Filter),
-            hook: Some(NfHook::Input),
+            hook: Some(hook),
             prio: Some(self.config.priority + 5), // After block rules, before port scan
             dev: None,
             policy: Some(NfChainPolicy::Accept),
@@ -1290,7 +1310,7 @@ impl Firewall {
         batch.add(NfListObject::Rule(Rule {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
-            chain: Cow::Borrowed("dpi_inspect"),
+            chain: Cow::Owned(chain_name.to_string()),
             handle: None,
             index: None,
             comment: Some(Cow::Borrowed("Accept whitelisted IPv4 before DPI queue")),
@@ -1311,7 +1331,7 @@ impl Firewall {
         batch.add(NfListObject::Rule(Rule {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
-            chain: Cow::Borrowed("dpi_inspect"),
+            chain: Cow::Owned(chain_name.to_string()),
             handle: None,
             index: None,
             comment: Some(Cow::Borrowed("Accept whitelisted IPv6 before DPI queue")),
@@ -1337,7 +1357,7 @@ impl Firewall {
         batch.add(NfListObject::Rule(Rule {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
-            chain: Cow::Borrowed("dpi_inspect"),
+            chain: Cow::Owned(chain_name.to_string()),
             handle: None,
             index: None,
             comment: Some(Cow::Borrowed("Bypass engine-marked-good flows in-kernel")),
@@ -1421,7 +1441,7 @@ impl Firewall {
         batch.add(NfListObject::Rule(Rule {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
-            chain: Cow::Borrowed("dpi_inspect"),
+            chain: Cow::Owned(chain_name.to_string()),
             handle: None,
             index: None,
             comment: Some(Cow::Borrowed("Queue first-N TCP packets for DPI")),
@@ -1435,7 +1455,7 @@ impl Firewall {
         batch.add(NfListObject::Rule(Rule {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
-            chain: Cow::Borrowed("dpi_inspect"),
+            chain: Cow::Owned(chain_name.to_string()),
             handle: None,
             index: None,
             comment: Some(Cow::Borrowed("Persist good packet-mark to ct mark")),
