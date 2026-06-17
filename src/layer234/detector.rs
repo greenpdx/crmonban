@@ -53,6 +53,14 @@ impl Detector {
             self.handle_session_event(event).await;
         }
 
+        // Per-packet TCP flag validity — catches crafted/stealth-scan flag
+        // combinations on a single packet, no window required.
+        if self.config.scan_detection {
+            if let Some(event) = detect_invalid_flags(&analysis.packet) {
+                analysis.add_event(event);
+            }
+        }
+
         // Mechanism #2 — cumulative slow brute force: count connection attempts
         // (SYNs) to an auth port per source across windows. Catches a low-and-slow
         // campaign that never piles up enough inside a single aggregation window.
@@ -222,27 +230,44 @@ impl Detector {
             }
         }
 
-        // Check for anomalies
-        if self.config.anomaly_detection && !self.baseline_store.is_empty() {
-            if let Ok((true, distance)) = self
-                .baseline_store
-                .is_anomaly(&window.vector, self.config.anomaly_threshold)
-            {
-                let event = DetectionEvent::new(
-                    DetectionType::AnomalyDetection,
-                    Severity::Medium,
-                    window.src_ip,
-                    placeholder_dst,
-                    format!("Anomaly detected with deviation score {:.2}", distance),
-                )
-                .with_detector("layer2detect")
-                .with_subtype(DetectionSubType::Anomaly(AnomalySubType::BehaviorAnomaly))
-                .with_action(DetectionAction::Alert) // Anomalies are informational
-                .with_confidence(distance.min(1.0))
-                .with_feature_array(window.vector)
-                .with_detail("deviation_score", serde_json::json!(distance));
+        // === Anomaly detection + online baseline learning ===
+        // The signature/heuristic branches above name KNOWN attack shapes. This
+        // branch is the generalization defense for UNKNOWN ones: a window whose
+        // feature vector sits far from every learned-normal vector is flagged,
+        // even though it matches no signature. The baseline is learned online
+        // from clean windows (auto_baseline), gated by a warmup count so the
+        // cold-start baseline doesn't flag everything.
+        if self.config.anomaly_detection {
+            let trained = self.baseline_store.len() >= self.config.min_baseline_samples;
+            if trained {
+                if let Ok((true, distance)) = self
+                    .baseline_store
+                    .is_anomaly(&window.vector, self.config.anomaly_threshold)
+                {
+                    let event = DetectionEvent::new(
+                        DetectionType::AnomalyDetection,
+                        Severity::Medium,
+                        window.src_ip,
+                        placeholder_dst,
+                        format!("Anomaly detected with deviation score {:.2}", distance),
+                    )
+                    .with_detector("layer2detect")
+                    .with_subtype(DetectionSubType::Anomaly(AnomalySubType::BehaviorAnomaly))
+                    .with_action(DetectionAction::Alert) // Anomalies are informational
+                    .with_confidence(distance.min(1.0))
+                    .with_feature_array(window.vector)
+                    .with_detail("deviation_score", serde_json::json!(distance));
 
-                detections.push(event);
+                    detections.push(event);
+                }
+            }
+
+            // Fold a window that tripped NOTHING into the baseline — it is, by
+            // definition, normal traffic. A window that fired any detection is not
+            // learned (so a post-warmup attack can't poison the baseline). During
+            // warmup this is how the baseline fills.
+            if self.config.auto_baseline && detections.is_empty() {
+                let _ = self.baseline_store.add_baseline(&window.vector);
             }
         }
 
@@ -683,6 +708,8 @@ impl DetectorBuilder {
                 anomaly_detection: config.detector.anomaly_detection,
                 dos_detection: config.detector.dos_detection,
                 anomaly_threshold: config.anomaly.threshold,
+                auto_baseline: config.anomaly.auto_baseline,
+                min_baseline_samples: config.anomaly.min_baseline_samples,
                 signature_threshold: config.scan.signature_threshold,
                 window_size_ms: config.detector.window_size_ms,
                 min_packets_for_detection: config.detector.min_packets,
@@ -735,6 +762,53 @@ impl DetectorBuilder {
 
         Ok(detector)
     }
+}
+
+/// Per-packet TCP flag validity. Some combinations are stealth-scan probes
+/// (NULL/FIN/XMAS, sent without ACK to elicit a RST-or-nothing oracle) and some
+/// are simply impossible on a real stack (SYN+FIN, SYN+RST, FIN+RST, every flag
+/// set) — a single such packet is hand-crafted, so it is caught immediately with
+/// no window and no learning. Returns the detection for a bad combination, or
+/// None for an ordinary one.
+fn detect_invalid_flags(packet: &Packet) -> Option<DetectionEvent> {
+    let tcp = packet.tcp()?;
+    let f = &tcp.flags;
+    let none_set = !f.syn && !f.ack && !f.fin && !f.rst && !f.psh && !f.urg;
+
+    // (label, detection type, severity, action). Impossible combinations are
+    // malformed and dropped; stealth scans are recon and alerted (like other
+    // scans). Order matters: check impossible combos before the scan patterns.
+    let (label, dtype, severity, action) = if f.syn && f.fin {
+        ("SYN+FIN", DetectionType::MalformedPacket, Severity::High, DetectionAction::Drop)
+    } else if f.syn && f.rst {
+        ("SYN+RST", DetectionType::MalformedPacket, Severity::High, DetectionAction::Drop)
+    } else if f.fin && f.rst {
+        ("FIN+RST", DetectionType::MalformedPacket, Severity::High, DetectionAction::Drop)
+    } else if f.syn && f.ack && f.fin && f.rst && f.psh && f.urg {
+        ("all flags set", DetectionType::MalformedPacket, Severity::High, DetectionAction::Drop)
+    } else if none_set {
+        ("NULL scan", DetectionType::PortScan, Severity::Medium, DetectionAction::Alert)
+    } else if f.fin && f.psh && f.urg && !f.ack && !f.syn && !f.rst {
+        ("XMAS scan", DetectionType::PortScan, Severity::Medium, DetectionAction::Alert)
+    } else if f.fin && !f.ack && !f.syn && !f.rst && !f.psh && !f.urg {
+        ("FIN scan", DetectionType::PortScan, Severity::Medium, DetectionAction::Alert)
+    } else {
+        return None;
+    };
+
+    Some(
+        DetectionEvent::new(
+            dtype,
+            severity,
+            packet.src_ip(),
+            packet.dst_ip(),
+            format!("Invalid TCP flags: {label}"),
+        )
+        .with_detector("layer2detect")
+        .with_action(action)
+        .with_confidence(0.95)
+        .with_ports(packet.src_port(), packet.dst_port()),
+    )
 }
 
 /// Minimum SYN ratio for the volumetric brute-force branch: enough of the window
@@ -2102,6 +2176,63 @@ fn format_threat_message(threat: &ThreatType, signature: Option<&str>) -> String
 mod tests {
     use super::*;
     use crate::layer234::types::VECTOR_DIM;
+
+    fn tcp_with_flags(flags: crate::types::TcpFlags) -> Packet {
+        let mut p = Packet::new(
+            0,
+            "203.0.113.5".parse().unwrap(),
+            "10.0.0.1".parse().unwrap(),
+            crate::types::IpProtocol::Tcp,
+            "test",
+        );
+        if let Some(t) = p.tcp_mut() {
+            t.src_port = 40000;
+            t.dst_port = 80;
+            t.flags = flags;
+        }
+        p
+    }
+
+    fn flags(syn: bool, ack: bool, fin: bool, rst: bool, psh: bool, urg: bool) -> crate::types::TcpFlags {
+        crate::types::TcpFlags { syn, ack, fin, rst, psh, urg, ece: false, cwr: false }
+    }
+
+    #[test]
+    fn valid_flag_combinations_are_not_flagged() {
+        for fl in [
+            flags(true, false, false, false, false, false),  // SYN
+            flags(true, true, false, false, false, false),   // SYN+ACK
+            flags(false, true, false, false, false, false),  // ACK
+            flags(false, true, false, false, true, false),   // PSH+ACK
+            flags(false, true, true, false, false, false),   // FIN+ACK
+            flags(false, true, false, true, false, false),   // RST+ACK
+            flags(false, true, true, false, true, false),    // FIN+PSH+ACK
+        ] {
+            assert!(
+                detect_invalid_flags(&tcp_with_flags(fl.clone())).is_none(),
+                "valid flags wrongly flagged: {fl:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_flag_combinations_are_flagged() {
+        // (flags, expected detection type)
+        let cases = [
+            (flags(false, false, false, false, false, false), DetectionType::PortScan), // NULL
+            (flags(false, false, true, false, false, false), DetectionType::PortScan),  // FIN scan
+            (flags(false, false, true, false, true, true), DetectionType::PortScan),    // XMAS
+            (flags(true, false, true, false, false, false), DetectionType::MalformedPacket), // SYN+FIN
+            (flags(true, false, false, true, false, false), DetectionType::MalformedPacket), // SYN+RST
+            (flags(false, false, true, true, false, false), DetectionType::MalformedPacket), // FIN+RST
+            (flags(true, true, true, true, true, true), DetectionType::MalformedPacket),  // all flags
+        ];
+        for (fl, expected) in cases {
+            let ev = detect_invalid_flags(&tcp_with_flags(fl.clone()))
+                .unwrap_or_else(|| panic!("invalid flags not flagged: {fl:?}"));
+            assert_eq!(ev.event_type, expected, "wrong type for {fl:?}");
+        }
+    }
 
     #[test]
     fn test_builder() {

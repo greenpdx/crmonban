@@ -523,6 +523,11 @@ pub struct DetectorConfig {
     pub anomaly_detection: bool,
     pub dos_detection: bool,
     pub anomaly_threshold: f32,
+    /// Auto-learn the anomaly baseline from clean windows (online).
+    pub auto_baseline: bool,
+    /// Baseline samples required before anomaly detection is enabled (warmup, so
+    /// the cold-start baseline doesn't flag everything as anomalous).
+    pub min_baseline_samples: usize,
     pub signature_threshold: f32,
     pub window_size_ms: u64,
     pub min_packets_for_detection: usize,
@@ -554,6 +559,8 @@ impl Default for DetectorConfig {
             anomaly_detection: true,
             dos_detection: true,
             anomaly_threshold: 0.7,
+            auto_baseline: false,
+            min_baseline_samples: 100,
             signature_threshold: 0.85,
             window_size_ms: 60_000,
             min_packets_for_detection: 10,

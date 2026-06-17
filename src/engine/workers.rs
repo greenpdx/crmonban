@@ -1212,6 +1212,10 @@ mod tests {
         if let Some(tcp) = packet.tcp_mut() {
             tcp.src_port = 12345;
             tcp.dst_port = 80;
+            // A valid established-connection packet (ACK). Without any flag set
+            // this would be an all-zero-flags packet — a NULL scan — which the
+            // flag-validity detector correctly flags.
+            tcp.flags = ack_flags();
         }
         packet.raw_len = 100;
         packet

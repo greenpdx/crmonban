@@ -20,8 +20,16 @@ pub struct VectorStore {
 
 impl VectorStore {
     pub fn new(capacity: usize) -> Result<Self> {
+        Self::with_metric(capacity, DistanceMetric::Cosine)
+    }
+
+    /// Build a store with a specific distance metric. Signatures match by shape
+    /// (Cosine), but the anomaly baseline wants magnitude sensitivity (Euclidean)
+    /// so that volumetric/rate deviations — which Cosine normalizes away — are
+    /// actually far from normal.
+    pub fn with_metric(capacity: usize, metric: DistanceMetric) -> Result<Self> {
         let index = Index::builder(VECTOR_DIM)
-            .metric(DistanceMetric::Cosine)
+            .metric(metric)
             .m(16)
             .ef_construction(200)
             .capacity(capacity)
@@ -296,8 +304,11 @@ pub struct BaselineStore {
 
 impl BaselineStore {
     pub fn new(capacity: usize) -> Result<Self> {
+        // Euclidean: anomaly = "far from normal" in magnitude, not just a
+        // different direction. Cosine is blind to volume/rate (it normalizes
+        // magnitude away), which is exactly the signal a behavioral anomaly has.
         Ok(Self {
-            store: VectorStore::new(capacity)?,
+            store: VectorStore::with_metric(capacity, DistanceMetric::Euclidean)?,
         })
     }
 
