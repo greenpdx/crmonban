@@ -90,6 +90,30 @@ impl Detector {
         Ok(())
     }
 
+    /// Finalize ALL open windows and RETURN their detections (instead of emitting
+    /// to the output handler). Inline `process()` only sees a window once a later
+    /// packet crosses its boundary, so a burst that stops — or shutdown — would
+    /// otherwise leave its window unexamined. Use this to force analysis.
+    pub async fn flush_all_collect(&mut self) -> Vec<DetectionEvent> {
+        let windows = self.aggregator.flush();
+        let mut out = Vec::new();
+        for window in windows {
+            out.extend(self.analyze_window_collect(window).await);
+        }
+        out
+    }
+
+    /// Like [`flush_all_collect`](Self::flush_all_collect) but only for windows
+    /// older than the aggregation window relative to `now_ns`.
+    pub async fn flush_expired_collect(&mut self, now_ns: u64) -> Vec<DetectionEvent> {
+        let windows = self.aggregator.flush_expired(now_ns);
+        let mut out = Vec::new();
+        for window in windows {
+            out.extend(self.analyze_window_collect(window).await);
+        }
+        out
+    }
+
     /// Analyze a window and collect detection events (for process())
     async fn analyze_window_collect(&mut self, window: AggregatedWindow) -> Vec<DetectionEvent> {
         // Process any pending signature updates before analysis
@@ -1548,7 +1572,9 @@ fn threat_to_severity(threat: &ThreatType) -> Severity {
         ThreatType::ConnectionExhaustion { .. } => Severity::High,
         ThreatType::Amplification { .. } => Severity::High,
         ThreatType::PortScan { .. } => Severity::Medium,
-        ThreatType::BruteForce { .. } => Severity::Medium,
+        // Auth brute force is actionable (the action is Ban); keep it at a
+        // severity the block policy will enforce rather than alert-only.
+        ThreatType::BruteForce { .. } => Severity::High,
         ThreatType::PingSweep { .. } => Severity::Low,
         ThreatType::Anomaly { deviation_score } => {
             if *deviation_score > 0.8 {

@@ -978,6 +978,15 @@ impl WorkerThread {
         self.alert_analyzer = analyzer;
     }
 
+    /// Force analysis of any open Layer234 aggregation windows and return their
+    /// detections. Inline `process_full` only analyzes a window when a later
+    /// packet crosses its boundary, so a burst attack that stops — or end of a
+    /// test feed — would otherwise leave its window unexamined. A periodic caller
+    /// (or shutdown) uses this to flush the tail.
+    pub async fn flush_layer234(&mut self) -> Vec<DetectionEvent> {
+        self.layer234_detector.flush_all_collect().await
+    }
+
     /// Block an IP address in the filter
     pub fn block_ip(&mut self, ip: std::net::IpAddr, reason: String) {
         self.ipfilter_worker.ip_filter_mut().block(ip, reason);

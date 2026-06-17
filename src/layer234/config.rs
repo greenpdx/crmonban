@@ -366,7 +366,11 @@ impl Default for DetectorSettings {
             brute_force_detection: true,
             anomaly_detection: true,
             dos_detection: true,
-            window_size_ms: 60_000,
+            // 10s aggregation window. The old 60s default meant a burst attack
+            // that finished within a minute sat in an open window and was never
+            // analyzed inline (windows only close when a later packet crosses the
+            // boundary, or on an explicit flush). 10s keeps detection timely.
+            window_size_ms: 10_000,
             min_packets: 10,
         }
     }
