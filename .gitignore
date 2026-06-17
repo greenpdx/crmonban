@@ -29,3 +29,7 @@ Cargo.lock
 node_modules
 *.lock
 package-lock.json
+
+# Third-party rule sets (large; install at runtime, not committed)
+rules/emerging-all.rules
+rules/emerging-*.rules
