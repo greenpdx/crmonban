@@ -31,6 +31,9 @@ use crate::core::{PacketAnalysis, DetectionEvent, DetectionType, Severity, Packe
 use crate::correlation::{CorrelationEngine, CorrelationConfig, CorrelationResult};
 use crate::flow::{FlowTracker, FlowConfig};
 use crate::ml::{MLEngine, MLConfig, AnomalyCategory};
+use crate::ml::baseline::Baseline;
+use crate::ml::features::FeatureExtractor;
+use parking_lot::RwLock;
 use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent};
 use crate::signatures::SignatureEngine;
 use crate::signatures::matcher::{ProtocolContext, FlowState};
@@ -133,6 +136,13 @@ pub struct WorkerThread {
     // Alert Analyzer - decides block/continue after detection events
     alert_analyzer: AlertAnalyzer,
 
+    /// Phase 2b: "normal" traffic baseline, learned here (stage 6) from
+    /// full-pipeline-clean flows and queried early to fast-path normal flows.
+    /// Behind an Arc<RwLock> so it can be shared across workers and read early.
+    normal_model: Arc<RwLock<Baseline>>,
+    /// Feature extractor used for the normal-model learning path.
+    normal_extractor: FeatureExtractor,
+
     /// Per-stage metrics (basic counters)
     stage_metrics: PipelineMetrics,
     /// Last metrics log time
@@ -142,6 +152,11 @@ pub struct WorkerThread {
     #[cfg(feature = "profiling")]
     profiler: PipelineProfiler,
 }
+
+/// Learn each clean flow into the normal-traffic baseline once, when it reaches
+/// this many packets — enough to capture the flow's established shape without
+/// over-weighting long flows or learning from a bare handshake.
+const NORMAL_LEARN_AT_PACKET: u64 = 8;
 
 impl WorkerThread {
     /// Create a new worker thread
@@ -199,6 +214,10 @@ impl WorkerThread {
 
             // Alert Analyzer
             alert_analyzer: AlertAnalyzer::default(),
+
+            // Phase 2b: normal-traffic baseline + its feature extractor
+            normal_model: Arc::new(RwLock::new(Baseline::new())),
+            normal_extractor: FeatureExtractor::new(),
 
             stage_metrics: PipelineMetrics::new(),
             last_metrics_log: Instant::now(),
@@ -409,8 +428,28 @@ impl WorkerThread {
         #[cfg(feature = "profiling")]
         self.profiler.record_total(elapsed);
 
+        // Phase 2b — learn the "normal" baseline from full-pipeline-clean flows.
+        // A flow that reaches this packet with no detection events is clean (the
+        // flow cache short-circuits flagged flows before they re-enter the
+        // pipeline). Learn once per flow, when it reaches a representative packet
+        // count, so we neither over-weight long flows nor learn bare handshakes.
+        if analysis.events.is_empty() {
+            if let Some(ref flow) = analysis.flow {
+                if flow.fwd_packets + flow.bwd_packets == NORMAL_LEARN_AT_PACKET {
+                    let features = self.normal_extractor.extract(flow);
+                    self.normal_model.write().update(&features);
+                }
+            }
+        }
+
         // Return the full analysis (not just events)
         analysis
+    }
+
+    /// Shared "normal" traffic baseline (Phase 2b) — learned here from clean
+    /// flows, exposed for early scoring (2b.2) and observability.
+    pub fn normal_model(&self) -> Arc<RwLock<Baseline>> {
+        self.normal_model.clone()
     }
 
     /// Process a single pipeline stage
@@ -820,6 +859,12 @@ impl WorkerPool {
             packets_processed: Arc::new(AtomicU64::new(0)),
             events_generated: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Shared "normal" traffic baseline (Phase 2b). Single-worker today; returns
+    /// worker 0's model (multi-worker sharing is a follow-up).
+    pub fn normal_model(&self) -> Arc<RwLock<Baseline>> {
+        self.workers[0].normal_model()
     }
 
     /// Process a packet through the detection pipeline
