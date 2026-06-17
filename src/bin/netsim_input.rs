@@ -12,7 +12,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use crmonban::testing::netsim::{InputNetwork, MockClient, MockServer, DEFAULT_FIRST_N};
+use crmonban::testing::netsim::{MockClient, MockServer, PathNetwork, DEFAULT_FIRST_N};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -23,7 +23,7 @@ async fn main() {
 
     let host = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
     let server = MockServer::new(host, vec![80, 443]);
-    let mut net = InputNetwork::new(server, DEFAULT_FIRST_N);
+    let mut net = PathNetwork::new_input(server, DEFAULT_FIRST_N);
 
     // A fleet of benign clients, each from a distinct source running a short
     // HTTP-ish conversation against the host.
@@ -60,6 +60,8 @@ async fn main() {
 
     println!("INPUT-path simulation ({benign} benign clients + blocked attacker)\n");
     println!("  inbound packets   : {}", stats.inbound);
+    println!("  routed to INPUT   : {}  (dst == host)", stats.input);
+    println!("  routed to FORWARD : {}  (dst elsewhere)", stats.forward);
     println!("  outbound (replies): {}", stats.outbound);
     println!("  ── netfilter funnel ──");
     println!("  inspected (pipeline): {:>6}  ({inspect_pct:.1}% of inbound)", stats.inspected);

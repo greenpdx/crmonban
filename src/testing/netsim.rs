@@ -17,10 +17,11 @@
 //! # Phases
 //!
 //! - **A** — the endpoint state machines ([`Tcb`], [`MockServer`], [`MockClient`]).
-//! - **B** — [`MockDataplane`] (mock netfilter: conntrack funnel + inline
-//!   pipeline) and [`InputNetwork`], which routes the endpoints' packets across
-//!   the **INPUT** path and applies pipeline verdicts, so a dropped packet
-//!   genuinely suppresses the response it would have caused.
+//! - **B/C** — [`MockDataplane`] (mock netfilter: conntrack funnel + inline
+//!   pipeline) and [`PathNetwork`], which routes the endpoints' packets and
+//!   applies pipeline verdicts so a dropped packet genuinely suppresses the
+//!   response it would have caused. The same harness serves both the **INPUT**
+//!   and **FORWARD** paths — only the IP addressing differs.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::IpAddr;
@@ -599,9 +600,15 @@ impl MockDataplane {
 /// inspected vs bypassed (the funnel), and how many packets were dropped/banned.
 #[derive(Debug, Default, Clone)]
 pub struct NetSimStats {
-    /// Packets toward the protected host (hit the netfilter input path).
+    /// Packets entering an inspected path — terminating at the host (INPUT) or
+    /// transiting it (FORWARD). Equals `input + forward`.
     pub inbound: u64,
-    /// Host replies (OUTPUT path — trusted, not inspected).
+    /// Packets routed to INPUT: destination IP is the host's own address.
+    pub input: u64,
+    /// Packets routed to FORWARD: destination IP is elsewhere (transit).
+    pub forward: u64,
+    /// Host-originated packets (OUTPUT path — trusted, not inspected). Nonzero
+    /// only on the INPUT path, where the host itself is the server.
     pub outbound: u64,
     /// Inbound packets that ran the pipeline.
     pub inspected: u64,
@@ -617,11 +624,39 @@ pub struct NetSimStats {
     pub aborted: bool,
 }
 
-/// A closed-loop **INPUT-path** simulation: remote clients connecting to a
-/// server running on the protected host, every inbound packet passing through
-/// the [`MockDataplane`]. Host replies are trusted (OUTPUT path, not inspected),
-/// matching the real deployment where `firewall.rs` only queues INPUT/FORWARD.
-pub struct InputNetwork {
+/// Which netfilter path a packet takes, decided as the kernel routes it. A
+/// host-originated packet takes OUTPUT; otherwise the **destination IP** selects
+/// the path — destined to the host's own address it is delivered locally
+/// (INPUT), destined elsewhere it is routed through (FORWARD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Path {
+    /// Source is the host — a locally generated packet (e.g. a local server's
+    /// reply). Trusted; not inspected.
+    Output,
+    /// Destination is the host's own address — delivered locally, inspected at
+    /// the input hook.
+    Input,
+    /// Destination is elsewhere — routed through the host, inspected at the
+    /// forward hook.
+    Forward,
+}
+
+/// A closed-loop path simulation. The same client/server endpoints model **both**
+/// netfilter paths — the only difference is the addressing:
+///
+/// - **INPUT**: the server runs *on* the protected host (`server.ip() == host`).
+///   Requests terminate at the host and are inspected; the host's replies leave
+///   via OUTPUT and are trusted (not inspected).
+/// - **FORWARD**: the host is a *router* at a distinct `host_ip`, and the server
+///   lives behind it at a different address. Neither endpoint is the host, so
+///   **both directions** transit the forward hook and are inspected.
+///
+/// Routing falls straight out of one question per packet — *did the host
+/// originate it?* If so it is trusted (OUTPUT); otherwise it terminates at the
+/// host (INPUT) or transits it (FORWARD) and goes through the dpi chain. So the
+/// run loop is path-agnostic; INPUT vs FORWARD is decided entirely by which IPs
+/// you hand the constructor.
+pub struct PathNetwork {
     dataplane: MockDataplane,
     server: MockServer,
     clients: HashMap<(IpAddr, u16), MockClient>,
@@ -630,11 +665,8 @@ pub struct InputNetwork {
     stats: NetSimStats,
 }
 
-impl InputNetwork {
-    /// New INPUT-path network: the protected host runs `server`; `first_n` sets
-    /// how many opening packets of each flow are inspected.
-    pub fn new(server: MockServer, first_n: u64) -> Self {
-        let host_ip = server.ip();
+impl PathNetwork {
+    fn with_host(host_ip: IpAddr, server: MockServer, first_n: u64) -> Self {
         Self {
             dataplane: MockDataplane::new(host_ip, first_n),
             server,
@@ -643,6 +675,23 @@ impl InputNetwork {
             id: IdGen::default(),
             stats: NetSimStats::default(),
         }
+    }
+
+    /// **INPUT path**: the protected host runs `server` (the server's address is
+    /// the host's). `first_n` sets how many opening packets of each flow are
+    /// inspected. Requests are inspected; the host's replies are trusted.
+    pub fn new_input(server: MockServer, first_n: u64) -> Self {
+        let host_ip = server.ip();
+        Self::with_host(host_ip, server, first_n)
+    }
+
+    /// **FORWARD path**: the protected host is a router at `host_ip`; `server`
+    /// sits behind it at a *different* address. Both directions transit and are
+    /// inspected. Same harness as [`new_input`](Self::new_input) — only the IPs
+    /// differ.
+    pub fn new_forward(host_ip: IpAddr, server: MockServer, first_n: u64) -> Self {
+        debug_assert_ne!(host_ip, server.ip(), "forward server must not be the router/host");
+        Self::with_host(host_ip, server, first_n)
     }
 
     /// Mutable access to the dataplane (block an IP, whitelist, tweak config).
@@ -666,6 +715,34 @@ impl InputNetwork {
         self.queue.push_back(pkt);
     }
 
+    /// Classify a packet's netfilter path exactly as the kernel routes it: a
+    /// host-originated packet takes OUTPUT; otherwise the **destination IP**
+    /// decides — destined to the host's own address it is delivered locally
+    /// (INPUT), destined elsewhere it is routed through (FORWARD).
+    fn classify(&self, pkt: &Packet) -> Path {
+        let host = self.dataplane.host_ip();
+        if pkt.src_ip() == host {
+            Path::Output
+        } else if pkt.dst_ip() == host {
+            Path::Input
+        } else {
+            Path::Forward
+        }
+    }
+
+    /// Hand a packet to whichever endpoint owns its destination (the server, or
+    /// a registered client) and collect that endpoint's responses. Path-agnostic:
+    /// the server is matched by IP, a client by (ip, port).
+    fn deliver_to_endpoint(&mut self, pkt: &Packet) -> Vec<Packet> {
+        if pkt.dst_ip() == self.server.ip() {
+            self.server.deliver(pkt, &mut self.id)
+        } else if let Some(client) = self.clients.get_mut(&(pkt.dst_ip(), pkt.dst_port())) {
+            client.deliver(pkt, &mut self.id)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Run the simulation to quiescence, or until `max_steps` packets have been
     /// routed (a runaway guard). Returns the accumulated stats.
     pub async fn run(&mut self, max_steps: usize) -> NetSimStats {
@@ -677,35 +754,39 @@ impl InputNetwork {
                 break;
             }
 
-            if pkt.dst_ip() == self.dataplane.host_ip() {
-                // Inbound: prerouting -> input -> the dpi chain.
-                self.stats.inbound += 1;
-                match self.dataplane.admit(&pkt).await {
-                    Admission::Accept { inspected, marked_good: _ } => {
-                        self.stats.accepted += 1;
-                        if inspected {
-                            self.stats.inspected += 1;
-                        } else {
-                            self.stats.bypassed += 1;
-                        }
-                        let replies = self.server.deliver(&pkt, &mut self.id);
-                        self.queue.extend(replies);
-                    }
-                    Admission::Drop { banned } => {
-                        self.stats.inspected += 1; // a drop is always an inspected packet
-                        self.stats.dropped += 1;
-                        if banned.is_some() {
-                            self.stats.bans += 1;
-                        }
-                        // No delivery, no reply: the closed loop in action.
-                    }
-                }
-            } else {
-                // Outbound host reply: output -> postrouting, trusted, not inspected.
-                self.stats.outbound += 1;
-                if let Some(client) = self.clients.get_mut(&(pkt.dst_ip(), pkt.dst_port())) {
-                    let replies = client.deliver(&pkt, &mut self.id);
+            // The destination IP routes the packet: OUTPUT (host-originated,
+            // trusted), INPUT (destined to the host), or FORWARD (transit). INPUT
+            // and FORWARD both go through the dpi chain; OUTPUT is trusted.
+            match self.classify(&pkt) {
+                Path::Output => {
+                    self.stats.outbound += 1;
+                    let replies = self.deliver_to_endpoint(&pkt);
                     self.queue.extend(replies);
+                    continue;
+                }
+                Path::Input => self.stats.input += 1,
+                Path::Forward => self.stats.forward += 1,
+            }
+
+            self.stats.inbound += 1;
+            match self.dataplane.admit(&pkt).await {
+                Admission::Accept { inspected, marked_good: _ } => {
+                    self.stats.accepted += 1;
+                    if inspected {
+                        self.stats.inspected += 1;
+                    } else {
+                        self.stats.bypassed += 1;
+                    }
+                    let replies = self.deliver_to_endpoint(&pkt);
+                    self.queue.extend(replies);
+                }
+                Admission::Drop { banned } => {
+                    self.stats.inspected += 1; // a drop is always an inspected packet
+                    self.stats.dropped += 1;
+                    if banned.is_some() {
+                        self.stats.bans += 1;
+                    }
+                    // No delivery, no reply: the closed loop in action.
                 }
             }
         }
@@ -834,7 +915,7 @@ mod tests {
     #[tokio::test]
     async fn benign_input_flow_is_admitted_and_served() {
         let server = MockServer::new(ip(10, 0, 0, 1), vec![80, 443]);
-        let mut net = InputNetwork::new(server, DEFAULT_FIRST_N);
+        let mut net = PathNetwork::new_input(server, DEFAULT_FIRST_N);
         let client_ip = ip(203, 0, 113, 20);
         net.add_client(MockClient::new(client_ip, 50001, ip(10, 0, 0, 1), 80, 4, 0x1000_0000));
 
@@ -844,6 +925,9 @@ mod tests {
         assert!(net.client(client_ip, 50001).unwrap().is_finished());
         assert_eq!(stats.dropped, 0, "benign flow must not be dropped");
         assert!(stats.inbound > 0 && stats.outbound > 0, "traffic must flow both ways");
+        // Server is on the host, so every inspected packet routes to INPUT and
+        // the host's replies take OUTPUT — nothing is forwarded.
+        assert!(stats.input > 0 && stats.forward == 0, "host-local traffic is INPUT, not FORWARD");
         // The server actually answered (pongs went back out).
         assert!(stats.accepted >= stats.inbound, "all inbound benign packets accepted");
     }
@@ -851,7 +935,7 @@ mod tests {
     #[tokio::test]
     async fn blocked_source_syn_is_dropped_and_gets_no_reply() {
         let server = MockServer::new(ip(10, 0, 0, 1), vec![80]);
-        let mut net = InputNetwork::new(server, DEFAULT_FIRST_N);
+        let mut net = PathNetwork::new_input(server, DEFAULT_FIRST_N);
 
         // Mark an attacker IP as known-bad in the pipeline's IP filter.
         let attacker = ip(198, 51, 100, 66);
@@ -880,7 +964,7 @@ mod tests {
         let server = MockServer::new(ip(10, 0, 0, 1), vec![80]);
         // Inspect only the first 2 opening packets; the rest of the flow bypasses.
         let first_n = 2;
-        let mut net = InputNetwork::new(server, first_n);
+        let mut net = PathNetwork::new_input(server, first_n);
         let client_ip = ip(203, 0, 113, 30);
         // 5 rounds => well more than `first_n` inbound packets on the flow.
         net.add_client(MockClient::new(client_ip, 50002, ip(10, 0, 0, 1), 80, 5, 0x3000_0000));
@@ -896,7 +980,7 @@ mod tests {
     #[tokio::test]
     async fn whitelisted_source_is_never_inspected() {
         let server = MockServer::new(ip(10, 0, 0, 1), vec![80]);
-        let mut net = InputNetwork::new(server, DEFAULT_FIRST_N);
+        let mut net = PathNetwork::new_input(server, DEFAULT_FIRST_N);
         let client_ip = ip(203, 0, 113, 40);
         net.dataplane_mut().whitelist(client_ip);
         net.add_client(MockClient::new(client_ip, 50003, ip(10, 0, 0, 1), 80, 3, 0x4000_0000));
@@ -906,5 +990,59 @@ mod tests {
         assert!(net.client(client_ip, 50003).unwrap().is_finished());
         assert_eq!(stats.inspected, 0, "whitelisted source must skip the pipeline entirely");
         assert!(stats.bypassed > 0);
+    }
+
+    // === Phase C: FORWARD path (same endpoints, different IPs) ==================
+
+    #[tokio::test]
+    async fn forward_benign_flow_inspects_both_directions() {
+        // Host is a router; the server lives behind it at a distinct address, so
+        // neither endpoint is the host and ALL traffic transits the dpi chain.
+        let router = ip(192, 168, 0, 1);
+        let server_ip = ip(93, 184, 216, 34);
+        let server = MockServer::new(server_ip, vec![80]);
+        let mut net = PathNetwork::new_forward(router, server, DEFAULT_FIRST_N);
+
+        let client_ip = ip(192, 168, 0, 50);
+        net.add_client(MockClient::new(client_ip, 51000, server_ip, 80, 4, 0x1000_0000));
+
+        let stats = net.run(10_000).await;
+
+        assert!(net.client(client_ip, 51000).unwrap().is_finished());
+        assert_eq!(stats.dropped, 0, "benign forward flow must not be dropped");
+        // The defining FORWARD property: the router originates nothing, so there
+        // is no trusted OUTPUT traffic — the server's replies are inspected
+        // transit, unlike INPUT where they would be trusted.
+        assert_eq!(stats.outbound, 0, "router originates nothing; both directions transit");
+        // The destination is never the host, so every packet routes to FORWARD.
+        assert!(stats.forward > 0 && stats.input == 0, "transit traffic is FORWARD, not INPUT");
+        assert!(stats.inbound > 0 && stats.inspected > 0);
+    }
+
+    #[tokio::test]
+    async fn forward_blocked_source_syn_is_dropped() {
+        let router = ip(192, 168, 0, 1);
+        let server_ip = ip(93, 184, 216, 34);
+        let server = MockServer::new(server_ip, vec![80]);
+        let mut net = PathNetwork::new_forward(router, server, DEFAULT_FIRST_N);
+
+        // A compromised LAN host (known-bad) trying to reach the WAN server.
+        let attacker = ip(192, 168, 0, 66);
+        net.dataplane_mut()
+            .worker_mut()
+            .block_ip(attacker, "compromised lan host (test)".to_string());
+
+        let mut atk = MockClient::new(attacker, 40000, server_ip, 80, 2, 0x2000_0000);
+        let mut id = IdGen::starting_at(700_000);
+        for syn in atk.open(&mut id) {
+            net.inject_inbound(syn);
+        }
+
+        let stats = net.run(10_000).await;
+
+        assert!(stats.dropped >= 1, "blocked LAN host SYN must be dropped on the forward path");
+        assert!(stats.bans >= 1);
+        assert_eq!(stats.outbound, 0);
+        assert!(!atk.is_finished(), "forwarded connection cannot establish");
     }
 }
