@@ -89,6 +89,10 @@ pub struct LongTermProfile {
     horizon: usize,
     first_seen_ns: u64,
     last_seen_ns: u64,
+    /// Smoothed reference of this source's past profile vectors (self-drift).
+    ewma: Option<[f32; LONGTERM_DIM]>,
+    /// Completed epochs observed (warmup for self-drift).
+    history_epochs: usize,
 }
 
 impl LongTermProfile {
@@ -102,6 +106,8 @@ impl LongTermProfile {
             horizon: horizon_epochs.max(1),
             first_seen_ns: 0,
             last_seen_ns: 0,
+            ewma: None,
+            history_epochs: 0,
         }
     }
 
@@ -115,14 +121,16 @@ impl LongTermProfile {
         dst_port: u16,
         dst_ip: IpAddr,
         is_auth_port: bool,
-    ) {
+    ) -> bool {
         if self.first_seen_ns == 0 {
             self.first_seen_ns = now_ns;
         }
         // Roll over once when the current epoch (with data) has elapsed. A long
         // idle gap just means the in-between epochs were empty (not stored); the
-        // active span is recovered from timestamps.
-        if self.current.has_data() && now_ns >= self.current.start_ns + self.epoch_ns {
+        // active span is recovered from timestamps. Returns true on a rollover,
+        // which is the natural point to (re)evaluate the source.
+        let rolled = self.current.has_data() && now_ns >= self.current.start_ns + self.epoch_ns;
+        if rolled {
             let finished = std::mem::take(&mut self.current);
             self.epochs.push_back(finished);
             while self.epochs.len() > self.horizon {
@@ -152,11 +160,35 @@ impl LongTermProfile {
             c.dst_ips.insert(dst_ip);
         }
         self.last_seen_ns = now_ns;
+        rolled
     }
 
     /// Last activity timestamp (for eviction).
     pub fn last_seen_ns(&self) -> u64 {
         self.last_seen_ns
+    }
+
+    /// Self-drift: distance of the current profile vector from this source's own
+    /// smoothed history, then fold the current vector into the reference. Returns
+    /// `None` until `min_history` epochs have been observed (warmup). This is the
+    /// primary signal — a host compared to itself, immune to cross-host variety.
+    fn drift_and_update(&mut self, min_history: usize) -> Option<f32> {
+        let v = self.features().to_vector();
+        let drift = self.ewma.as_ref().map(|r| euclidean(&v, r));
+        match self.ewma {
+            Some(ref mut r) => {
+                for i in 0..LONGTERM_DIM {
+                    r[i] = 0.8 * r[i] + 0.2 * v[i];
+                }
+            }
+            None => self.ewma = Some(v),
+        }
+        self.history_epochs += 1;
+        if self.history_epochs > min_history {
+            drift
+        } else {
+            None
+        }
     }
 
     fn epochs_with_current(&self) -> impl Iterator<Item = &EpochStats> {
@@ -226,6 +258,251 @@ fn interval_stats(sorted_times: &[u64]) -> (f32, f32) {
     let var = gaps.iter().map(|g| (g - mean).powi(2)).sum::<f32>() / n;
     let cv = var.sqrt() / mean;
     (cv, mean)
+}
+
+/// Euclidean distance between two long-term vectors.
+fn euclidean(a: &[f32; LONGTERM_DIM], b: &[f32; LONGTERM_DIM]) -> f32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f32>()
+        .sqrt()
+}
+
+// === Classification ============================================================
+
+/// What kind of long-term behavior an anomalous profile most resembles. The
+/// anomaly itself is decided by distance; this just names the dominant deviation
+/// for the emitted event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongTermKind {
+    Beaconing,
+    Exfiltration,
+    SlowScan,
+    SlowBrute,
+    Anomaly,
+}
+
+/// Label an anomalous profile by its dominant feature. Order reflects specificity.
+fn classify(f: &LongTermFeatures) -> LongTermKind {
+    if f.conn_count >= 8 && f.interval_cv < 0.25 {
+        LongTermKind::Beaconing
+    } else if f.auth_syns >= 10 {
+        LongTermKind::SlowBrute
+    } else if f.distinct_dst_ports >= 20 {
+        LongTermKind::SlowScan
+    } else if f.bytes_sent >= 1_000_000 {
+        LongTermKind::Exfiltration
+    } else {
+        LongTermKind::Anomaly
+    }
+}
+
+// === Population store ==========================================================
+
+/// Euclidean crvecdb of learned NORMAL per-source profile vectors. A source whose
+/// current profile is far from every normal one is anomalous even with no clean
+/// self-history (a host that was bad from first observation).
+pub struct LongTermStore {
+    index: crvecdb::Index,
+    next_id: u64,
+}
+
+impl LongTermStore {
+    pub fn new(capacity: usize) -> super::error::Result<Self> {
+        let index = crvecdb::Index::builder(LONGTERM_DIM)
+            .metric(crvecdb::DistanceMetric::Euclidean)
+            .m(16)
+            .ef_construction(200)
+            .capacity(capacity)
+            .build()
+            .map_err(|e| super::error::NetVecError::StoreError(e.to_string()))?;
+        Ok(Self { index, next_id: 0 })
+    }
+
+    /// Learn a normal profile. Insert failures are non-fatal (detection must not
+    /// crash on a store hiccup).
+    pub fn learn(&mut self, v: &[f32; LONGTERM_DIM]) {
+        let id = self.next_id;
+        if self.index.insert(id, &v[..]).is_ok() {
+            self.next_id += 1;
+        }
+    }
+
+    /// Distance to the nearest learned profile, or None if empty/error.
+    pub fn nearest(&self, v: &[f32; LONGTERM_DIM]) -> Option<f32> {
+        self.index
+            .search(&v[..], 1)
+            .ok()
+            .and_then(|r| r.first().map(|m| m.distance))
+    }
+
+    pub fn len(&self) -> usize {
+        self.index.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.index.is_empty()
+    }
+}
+
+// === Tracker ===================================================================
+
+/// Configuration for the long-term tracker.
+#[derive(Debug, Clone)]
+pub struct LongTermConfig {
+    pub epoch_secs: u64,
+    pub horizon_epochs: usize,
+    pub max_sources: usize,
+    /// Normal profiles required before population anomaly is enabled (warmup).
+    pub min_baseline_profiles: usize,
+    /// Per-source epochs of history before self-drift fires (warmup).
+    pub min_history_epochs: usize,
+    pub population_threshold: f32,
+    pub self_drift_threshold: f32,
+    /// Learn clean profiles into the population store online.
+    pub auto_learn: bool,
+}
+
+impl Default for LongTermConfig {
+    fn default() -> Self {
+        Self {
+            epoch_secs: 60,
+            horizon_epochs: 60,
+            max_sources: 50_000,
+            min_baseline_profiles: 200,
+            min_history_epochs: 3,
+            population_threshold: 1.5,
+            self_drift_threshold: 1.5,
+            auto_learn: true,
+        }
+    }
+}
+
+/// A confirmed long-term anomaly for a source.
+#[derive(Debug, Clone)]
+pub struct LongTermHit {
+    pub src: IpAddr,
+    pub kind: LongTermKind,
+    /// Which signal fired.
+    pub signal: &'static str,
+    pub distance: f32,
+}
+
+/// Per-source long-term profiles + the population store; evaluates a source on
+/// each epoch rollover via self-drift (primary) and population anomaly (backstop).
+pub struct LongTermTracker {
+    profiles: std::collections::HashMap<IpAddr, LongTermProfile>,
+    store: LongTermStore,
+    config: LongTermConfig,
+    last_cleanup_ns: u64,
+}
+
+impl LongTermTracker {
+    pub fn new(config: LongTermConfig) -> super::error::Result<Self> {
+        let store = LongTermStore::new(config.max_sources.max(1))?;
+        Ok(Self {
+            profiles: std::collections::HashMap::new(),
+            store,
+            config,
+            last_cleanup_ns: 0,
+        })
+    }
+
+    /// Fold one packet from `src` into its profile. Returns a hit when an epoch
+    /// rollover evaluation finds the source anomalous.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record(
+        &mut self,
+        src: IpAddr,
+        now_ns: u64,
+        bytes: u32,
+        is_syn: bool,
+        dst_port: u16,
+        dst_ip: IpAddr,
+        is_auth_port: bool,
+    ) -> Option<LongTermHit> {
+        let (epoch_secs, horizon) = (self.config.epoch_secs, self.config.horizon_epochs);
+        let rolled = self
+            .profiles
+            .entry(src)
+            .or_insert_with(|| LongTermProfile::new(epoch_secs, horizon))
+            .record(now_ns, bytes, is_syn, dst_port, dst_ip, is_auth_port);
+
+        let hit = if rolled { self.evaluate(src) } else { None };
+        self.maybe_cleanup(now_ns);
+        hit
+    }
+
+    /// Evaluate a source's just-rolled profile: self-drift first, then population
+    /// anomaly; learn the profile if it looks clean.
+    fn evaluate(&mut self, src: IpAddr) -> Option<LongTermHit> {
+        let (v, features, drift) = {
+            let profile = self.profiles.get_mut(&src)?;
+            let features = profile.features();
+            let v = features.to_vector();
+            let drift = profile.drift_and_update(self.config.min_history_epochs);
+            (v, features, drift)
+        };
+
+        let drift_hit = drift
+            .map(|d| d > self.config.self_drift_threshold)
+            .unwrap_or(false);
+
+        let trained = self.store.len() >= self.config.min_baseline_profiles;
+        let pop_dist = self.store.nearest(&v);
+        let pop_hit = trained
+            && pop_dist
+                .map(|d| d > self.config.population_threshold)
+                .unwrap_or(false);
+
+        if drift_hit || pop_hit {
+            let (signal, distance) = if drift_hit {
+                ("self-drift", drift.unwrap_or(0.0))
+            } else {
+                ("population", pop_dist.unwrap_or(0.0))
+            };
+            return Some(LongTermHit { src, kind: classify(&features), signal, distance });
+        }
+
+        // Clean profile — fold it into the population baseline.
+        if self.config.auto_learn {
+            self.store.learn(&v);
+        }
+        None
+    }
+
+    fn maybe_cleanup(&mut self, now_ns: u64) {
+        let horizon_ns = self.config.epoch_secs * self.config.horizon_epochs as u64 * 1_000_000_000;
+        if now_ns.saturating_sub(self.last_cleanup_ns) < horizon_ns.max(1) {
+            return;
+        }
+        self.last_cleanup_ns = now_ns;
+        // Drop sources idle for longer than the horizon.
+        self.profiles
+            .retain(|_, p| now_ns.saturating_sub(p.last_seen_ns()) <= horizon_ns);
+        // Hard cap: if still over budget, evict the least-recently-seen.
+        while self.profiles.len() > self.config.max_sources {
+            if let Some(oldest) = self
+                .profiles
+                .iter()
+                .min_by_key(|(_, p)| p.last_seen_ns())
+                .map(|(ip, _)| *ip)
+            {
+                self.profiles.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn tracked_sources(&self) -> usize {
+        self.profiles.len()
+    }
+
+    pub fn baseline_len(&self) -> usize {
+        self.store.len()
+    }
 }
 
 #[cfg(test)]
@@ -310,5 +587,109 @@ mod tests {
             p.record(i * 20 * S, 60, true, 22, ip(1), true);
         }
         assert_eq!(p.features().auth_syns, 12);
+    }
+
+    // === Phase B ===============================================================
+
+    fn src_ip(n: u32) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(10, (n >> 8) as u8, (n & 0xff) as u8, 1))
+    }
+
+    fn feats(bytes: u64, conns: u64, cv: f32, ports: u32, auth: u64) -> LongTermFeatures {
+        LongTermFeatures {
+            bytes_sent: bytes,
+            conn_count: conns,
+            interval_cv: cv,
+            interval_mean_secs: 60.0,
+            distinct_dst_ports: ports,
+            distinct_dst_ips: 1,
+            auth_syns: auth,
+            packets_per_sec: 1.0,
+        }
+    }
+
+    #[test]
+    fn classify_labels_dominant_behavior() {
+        assert_eq!(classify(&feats(2000, 20, 0.02, 1, 0)), LongTermKind::Beaconing);
+        assert_eq!(classify(&feats(2000, 30, 0.9, 1, 15)), LongTermKind::SlowBrute);
+        assert_eq!(classify(&feats(2000, 5, 0.9, 40, 0)), LongTermKind::SlowScan);
+        assert_eq!(classify(&feats(5_000_000, 5, 0.9, 2, 0)), LongTermKind::Exfiltration);
+        assert_eq!(classify(&feats(2000, 2, 0.9, 1, 0)), LongTermKind::Anomaly);
+    }
+
+    #[test]
+    fn population_store_flags_outlier() {
+        let mut store = LongTermStore::new(1000).unwrap();
+        // Learn many "normal" light profiles.
+        for i in 0..50u32 {
+            let f = feats(2000 + i as u64 * 10, 5, 0.9, 2, 0);
+            store.learn(&f.to_vector());
+        }
+        let normal = feats(2500, 5, 0.9, 2, 0).to_vector();
+        let exfil = feats(5_000_000, 5, 0.9, 2, 0).to_vector();
+        let dn = store.nearest(&normal).unwrap();
+        let dx = store.nearest(&exfil).unwrap();
+        assert!(dn < 0.5, "a normal profile is close to the baseline: {dn}");
+        assert!(dx > 3.0, "the exfil profile is far from the baseline: {dx}");
+    }
+
+    /// Feed a source `epochs` epochs of a behavior; return the last hit seen.
+    fn drive(
+        t: &mut LongTermTracker,
+        src: IpAddr,
+        epoch_range: std::ops::Range<u64>,
+        bytes: u32,
+        pkts: u64,
+        ports: &[u16],
+    ) -> Option<LongTermHit> {
+        let mut last = None;
+        for e in epoch_range {
+            let est = e * 60 * S;
+            for i in 0..pkts {
+                let now = est + i * S; // within the 60s epoch
+                let port = ports[(i as usize) % ports.len()];
+                if let Some(h) = t.record(src, now, bytes, i == 0, port, ip(1), false) {
+                    last = Some(h);
+                }
+            }
+        }
+        last
+    }
+
+    #[test]
+    fn population_anomaly_flags_exfil() {
+        let mut cfg = LongTermConfig::default();
+        cfg.min_baseline_profiles = 20;
+        cfg.min_history_epochs = 1000; // disable self-drift; isolate population signal
+        cfg.population_threshold = 1.0;
+        let mut t = LongTermTracker::new(cfg).unwrap();
+
+        // Train: many normal sources, light traffic over several epochs.
+        for s in 0..40u32 {
+            drive(&mut t, src_ip(s), 0..4, 200, 10, &[443]);
+        }
+        assert!(t.baseline_len() >= 20, "baseline should be trained: {}", t.baseline_len());
+
+        // A new high-volume source — far from the learned normal profiles.
+        let hit = drive(&mut t, src_ip(9999), 0..4, 1400, 50, &[443]);
+        let hit = hit.expect("exfil should be flagged by population anomaly");
+        assert_eq!(hit.signal, "population");
+    }
+
+    #[test]
+    fn self_drift_detects_behavior_change() {
+        let mut cfg = LongTermConfig::default();
+        cfg.min_baseline_profiles = usize::MAX; // disable population; isolate self-drift
+        cfg.min_history_epochs = 2;
+        cfg.self_drift_threshold = 1.0;
+        let mut t = LongTermTracker::new(cfg).unwrap();
+
+        let src = src_ip(1);
+        // Establish a normal history for this one source.
+        drive(&mut t, src, 0..5, 200, 10, &[443]);
+        // Then it abruptly starts exfiltrating — drifts from its OWN history.
+        let hit = drive(&mut t, src, 5..8, 1400, 50, &[443]);
+        let hit = hit.expect("a source changing its own behavior should drift");
+        assert_eq!(hit.signal, "self-drift");
     }
 }
