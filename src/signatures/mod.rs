@@ -155,32 +155,22 @@ impl Default for SignatureConfig {
     }
 }
 
-/// Default classtypes to exclude from signature loading
-/// These are handled by other pipeline stages or are low-priority:
-/// - Layer 2-4: layer2detect (scans, DoS, brute force)
-/// - HTTP/DNS/TLS: ProtocolAnalysis (web attacks, DNS tunneling, TLS attacks)
-/// - Low-value: games, chat, policy violations, etc.
+/// Default classtypes to exclude from signature loading.
+///
+/// Trimmed to genuine NON-attack / overwhelmingly-noisy categories so the engine
+/// loads as many ATTACK rules as possible. Scans, DoS, web-application-attack,
+/// misc-attack, protocol-command-decode and bad-unknown now load — as defense in
+/// depth alongside layer2detect / ProtocolAnalysis, which also cover some of
+/// them. Only categories that are not attacks (or are mostly noise) stay
+/// excluded. Set `excluded_classtypes = []` in config to load literally
+/// everything (accepting the misc-activity noise and the perf cost).
 fn default_excluded_classtypes() -> Vec<String> {
     vec![
-        // L2-4: Handled by layer2detect
-        "attempted-recon".into(),           // Port scans, network mapping
-        "network-scan".into(),              // Network scanning
-        "denial-of-service".into(),         // DoS/DDoS attacks
-        "attempted-dos".into(),             // DoS attempts
-
-        // HTTP: Handled by ProtocolAnalysis + http_detect
-        "web-application-attack".into(),    // SQL injection, XSS, etc.
-        "web-application-activity".into(),  // HTTP anomalies
-
-        // Low-priority / noise reduction
-        "misc-activity".into(),             // Generic activity (4,716 rules - mostly noise)
-        "misc-attack".into(),               // Generic attacks
-        "policy-violation".into(),          // Policy violations (not security threats)
-        "pup-activity".into(),              // Potentially unwanted programs
-        "protocol-command-decode".into(),   // Protocol anomalies (handled by parsers)
-        "unknown".into(),                   // Uncategorized rules
-        "not-suspicious".into(),            // Explicitly not suspicious
-        "bad-unknown".into(),               // Unknown but suspicious (high FP rate)
+        "misc-activity".into(),    // ~4,700 generic-activity rules, mostly noise
+        "not-suspicious".into(),   // explicitly benign
+        "policy-violation".into(), // policy, not a security threat
+        "pup-activity".into(),     // potentially-unwanted programs, not attacks
+        "unknown".into(),          // uncategorized
     ]
 }
 

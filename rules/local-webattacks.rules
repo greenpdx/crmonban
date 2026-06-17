@@ -1,17 +1,27 @@
-# Local web-application exploit rules for crmonban (Suricata/Snort-compatible).
+# Local web-application attack rules for crmonban (Suricata/Snort-compatible).
 #
-# NOTE on division of labor: classic web-app attacks (SQL injection, XSS, path
-# traversal) are classed "web-application-attack", which is in the engine's
-# default excluded_classtypes — they are handled by the ProtocolAnalysis stage
-# (the URL-decoding heuristic) and http_detect, NOT the signature engine, to
-# avoid the large/noisy community web ruleset. So those live in the protocol
-# analyzer, not here.
-#
-# Log4Shell / JNDI is an exploitation attempt (classtype attempted-admin), not a
-# generic web-app attack, so it belongs in the signature engine and loads here.
-# It also arrives in a header (User-Agent, X-Forwarded-For), which http.header
-# covers. sids in the local 90001xx range.
+# These run in the signature engine as defense in depth alongside the
+# ProtocolAnalysis URL-decoding heuristic. Keywords (union, select, jndi, ...)
+# appear literally even in a URL-encoded request (only separators are
+# percent-encoded), so plain content matches on the http.uri / http.header
+# buffers catch the common cases. sids in the local 90001xx range.
 
+# --- SQL injection ---
+alert http any any -> any any (msg:"LOCAL Web SQLi UNION SELECT"; flow:established,to_server; http.uri; content:"union"; nocase; http.uri; content:"select"; nocase; classtype:web-application-attack; sid:9000100; rev:1; priority:1;)
+alert http any any -> any any (msg:"LOCAL Web SQLi boolean OR 1=1"; flow:established,to_server; http.uri; content:"or 1=1"; nocase; classtype:web-application-attack; sid:9000101; rev:1; priority:1;)
+alert http any any -> any any (msg:"LOCAL Web SQLi SELECT FROM"; flow:established,to_server; http.uri; content:"select"; nocase; http.uri; content:"from"; nocase; classtype:web-application-attack; sid:9000102; rev:1; priority:1;)
+alert http any any -> any any (msg:"LOCAL Web SQLi xp_cmdshell"; flow:established,to_server; http.uri; content:"xp_cmdshell"; nocase; classtype:web-application-attack; sid:9000103; rev:1; priority:1;)
+
+# --- Cross-site scripting ---
+alert http any any -> any any (msg:"LOCAL Web XSS script tag"; flow:established,to_server; http.uri; content:"<script"; nocase; classtype:web-application-attack; sid:9000110; rev:1; priority:1;)
+alert http any any -> any any (msg:"LOCAL Web XSS javascript URI"; flow:established,to_server; http.uri; content:"javascript:"; nocase; classtype:web-application-attack; sid:9000111; rev:1; priority:1;)
+alert http any any -> any any (msg:"LOCAL Web XSS event handler"; flow:established,to_server; http.uri; content:"onerror="; nocase; classtype:web-application-attack; sid:9000112; rev:1; priority:1;)
+
+# --- Path traversal ---
+alert http any any -> any any (msg:"LOCAL Web Path Traversal dotdot"; flow:established,to_server; http.uri; content:"../"; classtype:web-application-attack; sid:9000120; rev:1; priority:1;)
+alert http any any -> any any (msg:"LOCAL Web Path Traversal etc passwd"; flow:established,to_server; http.uri; content:"/etc/passwd"; nocase; classtype:web-application-attack; sid:9000121; rev:1; priority:1;)
+
+# --- Log4Shell / JNDI (exploit attempt; also rides in headers) ---
 alert http any any -> any any (msg:"LOCAL Log4Shell JNDI in header"; flow:established,to_server; http.header; content:"jndi:"; nocase; classtype:attempted-admin; sid:9000130; rev:1; priority:1;)
 alert http any any -> any any (msg:"LOCAL Log4Shell JNDI in URI"; flow:established,to_server; http.uri; content:"jndi:"; nocase; classtype:attempted-admin; sid:9000131; rev:1; priority:1;)
 alert http any any -> any any (msg:"LOCAL Log4Shell nested lookup obfuscation"; flow:established,to_server; http.header; content:"${"; content:":-"; distance:0; classtype:attempted-admin; sid:9000132; rev:1; priority:1;)
