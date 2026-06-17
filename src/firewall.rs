@@ -2,12 +2,12 @@ use anyhow::{Context, Result};
 use nftables::{
     batch::Batch,
     expr::{Elem, Expression, NamedExpression, Payload, PayloadField, Range},
-    helper::{apply_ruleset, get_current_ruleset},
+    helper::{apply_ruleset, get_current_ruleset_with_args, DEFAULT_NFT},
     schema::{
         Chain, Element, FlushObject, NfCmd, NfListObject, NfObject, Rule, Set, SetFlag,
         SetType, SetTypeValue, Table,
     },
-    stmt::{Log, LogLevel, Match, Operator, Queue, QueueFlag, Statement},
+    stmt::{Counter, Log, LogLevel, Match, Operator, Queue, QueueFlag, Statement},
     types::{NfChainPolicy, NfChainType, NfFamily, NfHook},
 };
 use std::borrow::Cow;
@@ -29,6 +29,26 @@ const DPI_ALLOW_SET_V6: &str = "dpi_allow_v6";
 /// high bit to avoid colliding with low-valued routing marks; sets the full mark
 /// for now (masking + making it configurable is a follow-up).
 pub const DPI_GOOD_MARK: u32 = 0x4000_0000;
+
+/// True if `s` is a literal IP address or `addr/prefix` CIDR — i.e. something nft
+/// can add to an interval set WITHOUT a DNS lookup. Used to filter the inline-DPI
+/// allow entries so a stray hostname can't fail the whole atomic batch.
+fn is_ip_or_cidr(s: &str) -> bool {
+    if s.parse::<IpAddr>().is_ok() {
+        return true;
+    }
+    match s.split_once('/') {
+        Some((addr, prefix)) => {
+            let ok_addr = addr.parse::<IpAddr>();
+            match ok_addr {
+                Ok(IpAddr::V4(_)) => prefix.parse::<u8>().map(|p| p <= 32).unwrap_or(false),
+                Ok(IpAddr::V6(_)) => prefix.parse::<u8>().map(|p| p <= 128).unwrap_or(false),
+                Err(_) => false,
+            }
+        }
+        None => false,
+    }
+}
 
 pub struct Firewall {
     config: NftablesConfig,
@@ -269,6 +289,8 @@ impl Firewall {
                         right: Expression::String(Cow::Owned(set_ref_v4.clone())),
                         op: Operator::IN,
                     }),
+                    // Counter = packets dropped because their source is banned.
+                    Statement::Counter(Counter::Anonymous(None)),
                     Statement::Drop(None),
                 ]),
             }));
@@ -292,6 +314,7 @@ impl Firewall {
                         right: Expression::String(Cow::Owned(set_ref_v6.clone())),
                         op: Operator::IN,
                     }),
+                    Statement::Counter(Counter::Anonymous(None)),
                     Statement::Drop(None),
                 ]),
             }));
@@ -333,6 +356,8 @@ impl Firewall {
                         right: Expression::String(Cow::Owned(set_ref_v4.clone())),
                         op: Operator::IN,
                     }),
+                    // Counter = packets dropped because their source is banned.
+                    Statement::Counter(Counter::Anonymous(None)),
                     Statement::Drop(None),
                 ]),
             }));
@@ -356,6 +381,7 @@ impl Firewall {
                         right: Expression::String(Cow::Owned(set_ref_v6.clone())),
                         op: Operator::IN,
                     }),
+                    Statement::Counter(Counter::Anonymous(None)),
                     Statement::Drop(None),
                 ]),
             }));
@@ -592,7 +618,14 @@ impl Firewall {
 
     /// Check if our table exists
     fn table_exists(&self) -> Result<bool> {
-        let ruleset = get_current_ruleset()?;
+        // List ONLY tables (no chains/rules). Listing the full ruleset would force
+        // the nftables crate to deserialize our own NFQUEUE rule, whose single
+        // queue flag nft renders as `"flags":"bypass"` (a bare string) — a form
+        // this crate version can't parse, so a full read-back of a live crmonban
+        // table fails. Tables-only JSON has no statements and sidesteps that.
+        let args = ["list", "tables", "inet"];
+        let ruleset = get_current_ruleset_with_args(DEFAULT_NFT, args.iter())
+            .context("Failed to list nftables tables")?;
 
         for obj in ruleset.objects.iter() {
             if let NfObject::ListObject(NfListObject::Table(table)) = obj {
@@ -726,14 +759,26 @@ impl Firewall {
 
     /// Get list of currently banned IPs from nftables
     pub fn get_banned_ips(&self) -> Result<Vec<String>> {
-        let ruleset = get_current_ruleset()?;
         let mut banned = Vec::new();
 
-        for obj in ruleset.objects.iter() {
-            if let NfObject::ListObject(NfListObject::Set(set)) = obj {
-                if set.table == self.config.table_name
-                    && (set.name == self.config.set_v4 || set.name == self.config.set_v6)
-                {
+        // Query each ban set on its own (`nft list set inet <table> <set>`) rather
+        // than the whole ruleset: a full read-back would deserialize the DPI queue
+        // rule, whose `"flags":"bypass"` form the nftables crate can't parse. A
+        // scoped set listing has no rules. A missing set/table just yields nothing.
+        for set_name in [self.config.set_v4.as_str(), self.config.set_v6.as_str()] {
+            let args = [
+                "list",
+                "set",
+                "inet",
+                self.config.table_name.as_str(),
+                set_name,
+            ];
+            let ruleset = match get_current_ruleset_with_args(DEFAULT_NFT, args.iter()) {
+                Ok(r) => r,
+                Err(_) => continue, // set or table not present yet — nothing banned
+            };
+            for obj in ruleset.objects.iter() {
+                if let NfObject::ListObject(NfListObject::Set(set)) = obj {
                     if let Some(elems) = &set.elem {
                         for elem in elems.iter() {
                             match elem {
@@ -854,18 +899,48 @@ impl Firewall {
         );
 
         let mut batch = Batch::new();
+        let mut added = 0usize;
         for entry in entries {
+            // Only feed nft a literal IP or CIDR. A bare hostname (or any other
+            // non-address token) makes nft attempt a DNS resolution; that fails
+            // the whole ATOMIC batch — one bad whitelist row would otherwise take
+            // the daemon down at startup. Validate and skip instead.
+            if !is_ip_or_cidr(entry) {
+                warn!(
+                    "Skipping non-IP/CIDR inline-DPI allow entry {:?} (not an address)",
+                    entry
+                );
+                continue;
+            }
             let set_name = if entry.contains(':') {
                 DPI_ALLOW_SET_V6
             } else {
                 DPI_ALLOW_SET_V4
             };
+            // A CIDR must be a `prefix` expression, NOT a bare "addr/len" string:
+            // nft can't parse a slash-bearing string element and falls back to a
+            // (failing) DNS lookup — "Could not resolve hostname" — which fails the
+            // whole atomic batch. A single IP stays a plain string. is_ip_or_cidr
+            // above guarantees the split parses.
+            let elem_expr = match entry.split_once('/') {
+                Some((addr, len)) => {
+                    Expression::Named(NamedExpression::Prefix(nftables::expr::Prefix {
+                        addr: Box::new(Expression::String(Cow::Owned(addr.to_string()))),
+                        len: len.parse().unwrap_or(0),
+                    }))
+                }
+                None => Expression::String(Cow::Owned(entry.clone())),
+            };
             batch.add_cmd(NfCmd::Add(NfListObject::Element(Element {
                 family: NfFamily::INet,
                 table: Cow::Owned(self.config.table_name.clone()),
                 name: Cow::Borrowed(set_name),
-                elem: Cow::Owned(vec![Expression::String(Cow::Owned(entry.clone()))]),
+                elem: Cow::Owned(vec![elem_expr]),
             })));
+            added += 1;
+        }
+        if added == 0 {
+            return Ok(());
         }
 
         let ruleset = batch.to_nftables();
@@ -905,8 +980,14 @@ impl Firewall {
                         })));
                     }
                 }
-            } else if addr_str.contains('/') {
-                // CIDR notation - add as range
+            } else if let Some((addr, len)) = addr_str.split_once('/') {
+                // CIDR notation — emit a `prefix` expression, not a bare
+                // "addr/len" string (nft can't parse the latter and tries a DNS
+                // lookup, failing the whole batch). Skip if the parts don't parse.
+                let (Ok(_), Ok(plen)) = (addr.parse::<IpAddr>(), len.parse::<u32>()) else {
+                    warn!("Invalid CIDR in outbound allowlist: {}", addr_str);
+                    continue;
+                };
                 batch.add_cmd(NfCmd::Add(NfListObject::Element(Element {
                     family: NfFamily::INet,
                     table: Cow::Owned(self.config.table_name.clone()),
@@ -915,7 +996,12 @@ impl Firewall {
                     } else {
                         Cow::Borrowed("allowed_outbound_v4")
                     },
-                    elem: Cow::Owned(vec![Expression::String(Cow::Owned(addr_str.clone()))]),
+                    elem: Cow::Owned(vec![Expression::Named(NamedExpression::Prefix(
+                        nftables::expr::Prefix {
+                            addr: Box::new(Expression::String(Cow::Owned(addr.to_string()))),
+                            len: plen,
+                        },
+                    ))]),
                 })));
             } else {
                 warn!("Invalid address in outbound allowlist: {}", addr_str);
@@ -1056,12 +1142,7 @@ impl Firewall {
             expr: Cow::Owned(vec![
                 // Match TCP protocol
                 Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("meta"),
-                            field: Cow::Borrowed("l4proto"),
-                        },
-                    ))),
+                    left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                     right: Expression::String(Cow::Borrowed("tcp")),
                     op: Operator::EQ,
                 }),
@@ -1089,12 +1170,7 @@ impl Firewall {
             comment: Some(Cow::Borrowed("Log NULL scan attempts")),
             expr: Cow::Owned(vec![
                 Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("meta"),
-                            field: Cow::Borrowed("l4proto"),
-                        },
-                    ))),
+                    left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                     right: Expression::String(Cow::Borrowed("tcp")),
                     op: Operator::EQ,
                 }),
@@ -1121,12 +1197,7 @@ impl Firewall {
             comment: Some(Cow::Borrowed("Log XMAS scan attempts")),
             expr: Cow::Owned(vec![
                 Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("meta"),
-                            field: Cow::Borrowed("l4proto"),
-                        },
-                    ))),
+                    left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                     right: Expression::String(Cow::Borrowed("tcp")),
                     op: Operator::EQ,
                 }),
@@ -1153,12 +1224,7 @@ impl Firewall {
             comment: Some(Cow::Borrowed("Log FIN scan attempts")),
             expr: Cow::Owned(vec![
                 Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("meta"),
-                            field: Cow::Borrowed("l4proto"),
-                        },
-                    ))),
+                    left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                     right: Expression::String(Cow::Borrowed("tcp")),
                     op: Operator::EQ,
                 }),
@@ -1185,12 +1251,7 @@ impl Firewall {
             comment: Some(Cow::Borrowed("Log UDP scan attempts")),
             expr: Cow::Owned(vec![
                 Statement::Match(Match {
-                    left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                        PayloadField {
-                            protocol: Cow::Borrowed("meta"),
-                            field: Cow::Borrowed("l4proto"),
-                        },
-                    ))),
+                    left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                     right: Expression::String(Cow::Borrowed("udp")),
                     op: Operator::EQ,
                 }),
@@ -1325,6 +1386,9 @@ impl Firewall {
                     right: Expression::String(Cow::Owned(format!("@{}", DPI_ALLOW_SET_V4))),
                     op: Operator::IN,
                 }),
+                // Counter makes this path observable: how many packets were
+                // short-circuited as whitelisted before ever reaching the queue.
+                Statement::Counter(Counter::Anonymous(None)),
                 Statement::Accept(None),
             ]),
         }));
@@ -1346,6 +1410,7 @@ impl Firewall {
                     right: Expression::String(Cow::Owned(format!("@{}", DPI_ALLOW_SET_V6))),
                     op: Operator::IN,
                 }),
+                Statement::Counter(Counter::Anonymous(None)),
                 Statement::Accept(None),
             ]),
         }));
@@ -1371,6 +1436,10 @@ impl Firewall {
                     right: Expression::Number(DPI_GOOD_MARK),
                     op: Operator::EQ,
                 }),
+                // Counter = how many packets bypassed the queue in-kernel because
+                // the engine had already marked the flow good (the fast-path hit
+                // rate — the whole point of the ct-mark cache).
+                Statement::Counter(Counter::Anonymous(None)),
                 Statement::Accept(None),
             ]),
         }));
@@ -1386,14 +1455,14 @@ impl Firewall {
         // cost. (packets_per_conn == 0 disables the limit and queues all
         // new+established.)
         let mut dpi_expr = vec![
-            // meta l4proto tcp
+            // meta l4proto tcp. This is a meta expression, NOT a payload field:
+            // `{"payload":{"protocol":"meta",...}}` makes nft reject the whole
+            // ruleset with "Unknown payload protocol 'meta'". It must be
+            // `{"meta":{"key":"l4proto"}}`.
             Statement::Match(Match {
-                left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                    PayloadField {
-                        protocol: Cow::Borrowed("meta"),
-                        field: Cow::Borrowed("l4proto"),
-                    },
-                ))),
+                left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta {
+                    key: nftables::expr::MetaKey::L4proto,
+                })),
                 right: Expression::String(Cow::Borrowed("tcp")),
                 op: Operator::EQ,
             }),
@@ -1434,6 +1503,10 @@ impl Firewall {
         // ACCEPTS (rather than drops) when there is no listener OR the queue is
         // full. Availability first — under overload, traffic passes UNINSPECTED
         // (monitor queue depth to detect saturation).
+        // Counter BEFORE the queue verdict = how many packets were actually sent
+        // to userspace for inspection (the first-N of each flow). Comparing this to
+        // the bypass counter shows the inspect-vs-fast-path split.
+        dpi_expr.push(Statement::Counter(Counter::Anonymous(None)));
         dpi_expr.push(Statement::Queue(Queue {
             num: Expression::Number(config.queue_num as u32),
             flags: Some(HashSet::from([QueueFlag::Bypass])),
@@ -1467,6 +1540,10 @@ impl Firewall {
                     right: Expression::Number(DPI_GOOD_MARK),
                     op: Operator::EQ,
                 }),
+                // Counter = how many good-verdict packets returned from userspace
+                // and persisted their mark to conntrack (i.e. flows newly promoted
+                // to the in-kernel fast-path).
+                Statement::Counter(Counter::Anonymous(None)),
                 Statement::Mangle(nftables::stmt::Mangle {
                     key: Expression::Named(NamedExpression::CT(nftables::expr::CT {
                         key: Cow::Borrowed("mark"),
@@ -1519,12 +1596,7 @@ impl Firewall {
                 expr: Cow::Owned(vec![
                     // Match TCP protocol
                     Statement::Match(Match {
-                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                            PayloadField {
-                                protocol: Cow::Borrowed("meta"),
-                                field: Cow::Borrowed("l4proto"),
-                            },
-                        ))),
+                        left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                         right: Expression::String(Cow::Borrowed("tcp")),
                         op: Operator::EQ,
                     }),
@@ -1633,12 +1705,7 @@ impl Firewall {
                 comment: Some(Cow::Borrowed("Allow loopback")),
                 expr: Cow::Owned(vec![
                     Statement::Match(Match {
-                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                            PayloadField {
-                                protocol: Cow::Borrowed("meta"),
-                                field: Cow::Borrowed("iifname"),
-                            },
-                        ))),
+                        left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::Iifname })),
                         right: Expression::String(Cow::Borrowed("lo")),
                         op: Operator::EQ,
                     }),
@@ -1692,12 +1759,7 @@ impl Firewall {
                 comment: Some(Cow::Borrowed("Allow ICMP (ping)")),
                 expr: Cow::Owned(vec![
                     Statement::Match(Match {
-                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                            PayloadField {
-                                protocol: Cow::Borrowed("meta"),
-                                field: Cow::Borrowed("l4proto"),
-                            },
-                        ))),
+                        left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                         right: Expression::String(Cow::Borrowed("icmp")),
                         op: Operator::EQ,
                     }),
@@ -1714,12 +1776,7 @@ impl Firewall {
                 comment: Some(Cow::Borrowed("Allow ICMPv6")),
                 expr: Cow::Owned(vec![
                     Statement::Match(Match {
-                        left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                            PayloadField {
-                                protocol: Cow::Borrowed("meta"),
-                                field: Cow::Borrowed("l4proto"),
-                            },
-                        ))),
+                        left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                         right: Expression::String(Cow::Borrowed("ipv6-icmp")),
                         op: Operator::EQ,
                     }),
@@ -1774,12 +1831,7 @@ impl Firewall {
         // Protocol match (unless "any")
         if protocol != "any" {
             exprs.push(Statement::Match(Match {
-                left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
-                    PayloadField {
-                        protocol: Cow::Borrowed("meta"),
-                        field: Cow::Borrowed("l4proto"),
-                    },
-                ))),
+                left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta { key: nftables::expr::MetaKey::L4proto })),
                 right: Expression::String(Cow::Owned(protocol.to_string())),
                 op: Operator::EQ,
             }));

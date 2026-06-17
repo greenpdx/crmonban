@@ -24,10 +24,13 @@ echo "== dpi_inspect chain + rules =="
 chk "dpi_inspect chain"        'echo "$R" | grep -q "chain dpi_inspect"'
 chk "whitelist accept (@dpi_allow)" 'echo "$R" | grep -A20 "chain dpi_inspect" | grep -q "@dpi_allow"'
 chk "ct mark bypass accept"    'echo "$R" | grep -A20 "chain dpi_inspect" | grep -qE "ct mark .* accept"'
-chk "queue num"                'echo "$R" | grep -q "queue num"'
+# nft renders the queue statement as `queue flags bypass to <N>` (no literal
+# "queue num") and the first-N match as `ct original packets <= <N>` (the
+# `original` direction sits between "ct" and "packets").
+chk "queue target"             'echo "$R" | grep -qE "queue .*to [0-9]+"'
 chk "queue bypass flag"        'echo "$R" | grep -q "queue.*bypass"'
 chk "ct state new/established" 'echo "$R" | grep -qE "ct state \{? *(new|established)"'
-chk "ct packets first-N"       'echo "$R" | grep -q "ct packets"'
+chk "ct packets first-N"       'echo "$R" | grep -qE "ct (original |reply )?packets"'
 chk "ct mark set (persist)"    'echo "$R" | grep -qE "ct mark set"'
 
 echo "== block rule before queue (ordering) =="
