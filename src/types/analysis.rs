@@ -86,6 +86,10 @@ pub struct PacketAnalysis {
     /// Suggested verdict from detection stages (before policy)
     /// Shows what stages wanted to do, for logging/visibility
     pub suggested_verdict: PacketVerdict,
+
+    /// Phase 2b: set when the learn-normal model scores this (clean) flow as
+    /// un-anomalous, so the pipeline marks it good for the in-kernel bypass.
+    pub fast_path_good: bool,
 }
 
 impl PacketAnalysis {
@@ -99,6 +103,7 @@ impl PacketAnalysis {
             control: FlowControl::default(),
             verdict: PacketVerdict::Accept,
             suggested_verdict: PacketVerdict::Accept,
+            fast_path_good: false,
         }
     }
 

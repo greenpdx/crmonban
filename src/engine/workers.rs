@@ -158,6 +158,14 @@ pub struct WorkerThread {
 /// over-weighting long flows or learning from a bare handshake.
 const NORMAL_LEARN_AT_PACKET: u64 = 8;
 
+/// Minimum learned samples before the normal model is trusted to fast-path flows
+/// (cold start fully inspects until then).
+const NORMAL_MIN_SAMPLES: u64 = 1000;
+
+/// Anomaly threshold (z-score): a flow scoring at or above this is NOT treated as
+/// normal and stays on the full inspection path. Conservative; tunable in 2b.3.
+const NORMAL_ANOMALY_THRESHOLD: f32 = 3.0;
+
 impl WorkerThread {
     /// Create a new worker thread
     pub fn new(config: WorkerConfig) -> Self {
@@ -434,11 +442,32 @@ impl WorkerThread {
         // pipeline). Learn once per flow, when it reaches a representative packet
         // count, so we neither over-weight long flows nor learn bare handshakes.
         if analysis.events.is_empty() {
-            if let Some(ref flow) = analysis.flow {
-                if flow.fwd_packets + flow.bwd_packets == NORMAL_LEARN_AT_PACKET {
-                    let features = self.normal_extractor.extract(flow);
-                    self.normal_model.write().update(&features);
+            // Extract the flow's features at a representative packet count. The
+            // match also ends the immutable borrow of `analysis.flow` before we
+            // touch `analysis` mutably below.
+            let features = match analysis.flow {
+                Some(ref flow)
+                    if flow.fwd_packets + flow.bwd_packets == NORMAL_LEARN_AT_PACKET =>
+                {
+                    Some(self.normal_extractor.extract(flow))
                 }
+                _ => None,
+            };
+            if let Some(features) = features {
+                // SCORE FIRST (against the model as it stands, before this flow is
+                // added): a ready model that finds this clean flow un-anomalous
+                // fast-paths it — the pipeline marks it good and nftables (2a)
+                // bypasses the rest of the flow in-kernel.
+                let is_normal = {
+                    let model = self.normal_model.read();
+                    model.is_ready(NORMAL_MIN_SAMPLES)
+                        && !model.is_anomalous(&features, NORMAL_ANOMALY_THRESHOLD)
+                };
+                if is_normal {
+                    analysis.fast_path_good = true;
+                }
+                // Then LEARN: add this clean flow to the baseline.
+                self.normal_model.write().update(&features);
             }
         }
 

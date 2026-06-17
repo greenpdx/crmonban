@@ -242,11 +242,15 @@ impl Pipeline {
                         // bypass is enabled and the flow stayed clean long enough.
                         // If the flow JUST became good-for-bypass, mark the verdict
                         // so nftables bypasses the rest of the flow in-kernel.
-                        let mark_good = if cacheable {
+                        let became_good = if cacheable {
                             self.flow_cache.record(&flow_key, blocking, now)
                         } else {
                             false
                         };
+                        // The learn-normal model (2b.2) can also mark a clean flow
+                        // good for the in-kernel bypass, independent of the
+                        // packet-count heuristic.
+                        let mark_good = became_good || analysis.fast_path_good;
 
                         // Issue the inline verdict (NFQUEUE). accept = true for
                         // Accept/Queue, false for Drop/Reject; the bool channel
