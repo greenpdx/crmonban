@@ -66,6 +66,9 @@ pub struct PipelineConfig {
     /// Default order: IpFilter, Flow, Layer234Detect, Signatures, Protocols, Wasm, ML, Correlation
     #[serde(default = "default_stage_order")]
     pub stage_order: Vec<PipelineStage>,
+    /// Trace each packet's journey through the stages to stderr (debugging).
+    #[serde(default)]
+    pub trace_packets: bool,
 }
 
 /// Default stage order per v4 spec (with Layer234Detect replacing individual stages)
@@ -96,6 +99,7 @@ impl Default for PipelineConfig {
             enable_wasm: false,
             stats_interval_secs: 1,
             stage_order: default_stage_order(),
+            trace_packets: false,
         }
     }
 }

@@ -18,10 +18,15 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(200_000);
 
+    // `traffic_soak [num_packets] [trace]` — "trace" prints each packet's path
+    // through the stages (use a small num_packets to avoid a flood).
+    let trace = std::env::args().nth(2).as_deref() == Some("trace");
+
     let dst: IpAddr = "10.0.0.1".parse().unwrap();
     let mut generator = ContinuousTrafficGenerator::new(dst);
     let mut worker = WorkerThread::new(WorkerConfig::default());
-    let config = PipelineConfig::default();
+    let mut config = PipelineConfig::default();
+    config.trace_packets = trace;
 
     let mut events = 0u64;
     let mut blocked = 0u64;

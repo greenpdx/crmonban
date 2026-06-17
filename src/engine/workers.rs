@@ -170,6 +170,39 @@ const NORMAL_ANOMALY_THRESHOLD: f32 = 3.0;
 /// feature shape is meaningless on a bare handshake.
 const NORMAL_SCORE_MIN_PACKET: u64 = 4;
 
+/// The cargo feature(s) that gate a pipeline stage's real behavior, with their
+/// compile-time status in THIS build. `cfg!` is resolved by the compiler, so the
+/// string reflects what was actually built — a stage whose feature is `off` is
+/// compiled out (a no-op pass-through), which is exactly what the trace needs to
+/// show between stages. Stages with no cargo gate (always compiled) return `—`.
+fn stage_feature_gates(stage: PipelineStage) -> String {
+    let g = |name: &str, on: bool| format!("{}={}", name, if on { "on" } else { "off" });
+    let gates: Vec<String> = match stage {
+        PipelineStage::IpFilter => vec![g("threat-intel", cfg!(feature = "threat-intel"))],
+        PipelineStage::FlowTracker => vec![g("flow-tracking", cfg!(feature = "flow-tracking"))],
+        PipelineStage::Layer234Detect => vec![
+            g("extra234", cfg!(feature = "extra234")),
+            g("extra34", cfg!(feature = "extra34")),
+        ],
+        PipelineStage::SignatureMatching => vec![
+            g("signatures", cfg!(feature = "signatures")),
+            g("hyperscan", cfg!(feature = "hyperscan")),
+        ],
+        PipelineStage::ProtocolAnalysis => vec![g("protocols", cfg!(feature = "protocols"))],
+        PipelineStage::WasmPlugins => vec![],
+        PipelineStage::MLDetection => vec![
+            g("ml-detection", cfg!(feature = "ml-detection")),
+            g("ml-advanced", cfg!(feature = "ml-advanced")),
+        ],
+        PipelineStage::Correlation => vec![g("correlation", cfg!(feature = "correlation"))],
+    };
+    if gates.is_empty() {
+        "—".to_string()
+    } else {
+        gates.join(" ")
+    }
+}
+
 impl WorkerThread {
     /// Create a new worker thread
     pub fn new(config: WorkerConfig) -> Self {
@@ -261,10 +294,31 @@ impl WorkerThread {
         // normal-looking flow that trips a signature is still caught.
         let mut skip_heavy = false;
 
+        if config.trace_packets {
+            let p = &analysis.packet;
+            eprintln!(
+                "[trace] pkt {} {}:{} -> {}:{} {:?} — entry",
+                p.id,
+                p.src_ip(),
+                p.src_port(),
+                p.dst_ip(),
+                p.dst_port(),
+                p.protocol()
+            );
+        }
+
         // Process through each stage in configured order
         for stage in &config.stage_order {
             // Skip disabled stages
             if !config.is_stage_enabled(*stage) {
+                if config.trace_packets {
+                    eprintln!(
+                        "[trace] pkt {}   {:?} [{}]: disabled (config)",
+                        analysis.packet.id,
+                        stage,
+                        stage_feature_gates(*stage)
+                    );
+                }
                 continue;
             }
 
@@ -277,6 +331,14 @@ impl WorkerThread {
                         | PipelineStage::MLDetection
                 )
             {
+                if config.trace_packets {
+                    eprintln!(
+                        "[trace] pkt {}   {:?} [{}]: SKIPPED (model-normal fast-path)",
+                        analysis.packet.id,
+                        stage,
+                        stage_feature_gates(*stage)
+                    );
+                }
                 continue;
             }
 
@@ -300,6 +362,17 @@ impl WorkerThread {
 
             // Calculate if this stage marked the packet (added events)
             let stage_marked = analysis.event_count() > events_before;
+
+            if config.trace_packets {
+                eprintln!(
+                    "[trace] pkt {}   {:?} [{}]: +{}ev verdict={}",
+                    analysis.packet.id,
+                    stage,
+                    stage_feature_gates(*stage),
+                    analysis.event_count() - events_before,
+                    analysis.verdict
+                );
+            }
 
             // Update stage metrics
             let stage_latency_ns = stage_start.elapsed().as_nanos() as u64;
@@ -393,10 +466,31 @@ impl WorkerThread {
         // normal-looking flow that trips a signature is still caught.
         let mut skip_heavy = false;
 
+        if config.trace_packets {
+            let p = &analysis.packet;
+            eprintln!(
+                "[trace] pkt {} {}:{} -> {}:{} {:?} — entry",
+                p.id,
+                p.src_ip(),
+                p.src_port(),
+                p.dst_ip(),
+                p.dst_port(),
+                p.protocol()
+            );
+        }
+
         // Process through each stage in configured order
         for stage in &config.stage_order {
             // Skip disabled stages
             if !config.is_stage_enabled(*stage) {
+                if config.trace_packets {
+                    eprintln!(
+                        "[trace] pkt {}   {:?} [{}]: disabled (config)",
+                        analysis.packet.id,
+                        stage,
+                        stage_feature_gates(*stage)
+                    );
+                }
                 continue;
             }
 
@@ -409,6 +503,14 @@ impl WorkerThread {
                         | PipelineStage::MLDetection
                 )
             {
+                if config.trace_packets {
+                    eprintln!(
+                        "[trace] pkt {}   {:?} [{}]: SKIPPED (model-normal fast-path)",
+                        analysis.packet.id,
+                        stage,
+                        stage_feature_gates(*stage)
+                    );
+                }
                 continue;
             }
 
@@ -432,6 +534,17 @@ impl WorkerThread {
 
             // Calculate if this stage marked the packet (added events)
             let stage_marked = analysis.event_count() > events_before;
+
+            if config.trace_packets {
+                eprintln!(
+                    "[trace] pkt {}   {:?} [{}]: +{}ev verdict={}",
+                    analysis.packet.id,
+                    stage,
+                    stage_feature_gates(*stage),
+                    analysis.event_count() - events_before,
+                    analysis.verdict
+                );
+            }
 
             // Update stage metrics
             let stage_latency_ns = stage_start.elapsed().as_nanos() as u64;
@@ -507,6 +620,16 @@ impl WorkerThread {
                     self.normal_model.write().update(&features);
                 }
             }
+        }
+
+        if config.trace_packets {
+            eprintln!(
+                "[trace] pkt {} — final verdict={} events={} fast_path_good={}\n",
+                analysis.packet.id,
+                analysis.verdict,
+                analysis.events.len(),
+                analysis.fast_path_good
+            );
         }
 
         // Return the full analysis (not just events)
