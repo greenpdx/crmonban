@@ -30,6 +30,10 @@ pub struct Detector {
     session_tracker: SessionTracker,
     /// Cross-window cumulative counter for slow brute force (mechanism #2).
     brute_tracker: super::bruteforce::BruteForceTracker,
+    /// Long-term per-source behavioral profiling (Phase C); None when disabled.
+    long_term_tracker: Option<super::longterm::LongTermTracker>,
+    /// Auth ports, shared for the per-packet long-term auth-SYN signal.
+    auth_ports: std::sync::Arc<std::collections::HashSet<u16>>,
     output: OutputHandler,
     /// Receiver for real-time signature updates
     update_rx: Option<mpsc::Receiver<SignatureUpdate>>,
@@ -58,6 +62,27 @@ impl Detector {
         if self.config.scan_detection {
             if let Some(event) = detect_invalid_flags(&analysis.packet) {
                 analysis.add_event(event);
+            }
+        }
+
+        // Long-term behavioral profiling (Phase C): O(1) per-packet feed; a hit
+        // is returned on an epoch rollover that finds the source anomalous.
+        if let Some(ref mut lt) = self.long_term_tracker {
+            let pkt = &analysis.packet;
+            let is_syn = pkt.tcp().map(|t| t.flags.syn && !t.flags.ack).unwrap_or(false);
+            let dst_port = pkt.dst_port();
+            let is_auth = self.auth_ports.contains(&dst_port);
+            let hit = lt.record(
+                pkt.src_ip(),
+                pkt.timestamp_ns(),
+                pkt.raw_len,
+                is_syn,
+                dst_port,
+                pkt.dst_ip(),
+                is_auth,
+            );
+            if let Some(hit) = hit {
+                analysis.add_event(longterm_event(&hit));
             }
         }
 
@@ -614,7 +639,11 @@ impl DetectorBuilder {
             baseline_store,
             aggregator,
             session_tracker: SessionTracker::new(self.max_sessions),
-            brute_tracker: super::bruteforce::BruteForceTracker::with_defaults(auth_ports_set),
+            brute_tracker: super::bruteforce::BruteForceTracker::with_defaults(auth_ports_set.clone()),
+            // Enabled per-config by build_with_config; the bare builder path
+            // leaves long-term profiling off.
+            long_term_tracker: None,
+            auth_ports: auth_ports_set,
             output: OutputHandler::default(),
             update_rx: None,
             weights: self.weights.clone(),
@@ -682,7 +711,9 @@ impl DetectorBuilder {
             baseline_store,
             aggregator,
             session_tracker: SessionTracker::new(self.max_sessions),
-            brute_tracker: super::bruteforce::BruteForceTracker::with_defaults(auth_ports_set),
+            brute_tracker: super::bruteforce::BruteForceTracker::with_defaults(auth_ports_set.clone()),
+            long_term_tracker: None,
+            auth_ports: auth_ports_set,
             output: OutputHandler::default(),
             update_rx: Some(rx),
             weights: self.weights.clone(),
@@ -760,8 +791,51 @@ impl DetectorBuilder {
             }
         }
 
+        // Enable long-term behavioral profiling per config.
+        if config.long_term.enable {
+            let lt = &config.long_term;
+            let lt_cfg = super::longterm::LongTermConfig {
+                epoch_secs: lt.epoch_secs,
+                horizon_epochs: lt.horizon_epochs,
+                max_sources: lt.max_sources,
+                min_baseline_profiles: lt.min_baseline_profiles,
+                min_history_epochs: lt.min_history_epochs,
+                population_threshold: lt.population_threshold,
+                self_drift_threshold: lt.self_drift_threshold,
+                auto_learn: lt.auto_learn,
+            };
+            detector.long_term_tracker = Some(super::longterm::LongTermTracker::new(lt_cfg)?);
+        }
+
         Ok(detector)
     }
+}
+
+/// Build a detection event from a long-term hit. Long-term detections identify a
+/// bad SOURCE over time, so the action bans it (the dst is a placeholder — the
+/// source attacked many). The kind names the dominant behavior.
+fn longterm_event(hit: &super::longterm::LongTermHit) -> DetectionEvent {
+    use super::longterm::LongTermKind::*;
+    let (dtype, severity, action) = match hit.kind {
+        Beaconing => (DetectionType::Beaconing, Severity::High, DetectionAction::Ban),
+        Exfiltration => (DetectionType::DataExfiltration, Severity::High, DetectionAction::Ban),
+        SlowBrute => (DetectionType::BruteForce, Severity::High, DetectionAction::Ban),
+        SlowScan => (DetectionType::PortScan, Severity::Medium, DetectionAction::Alert),
+        Anomaly => (DetectionType::AnomalyDetection, Severity::Medium, DetectionAction::Alert),
+    };
+    DetectionEvent::new(
+        dtype,
+        severity,
+        hit.src,
+        IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        format!(
+            "Long-term {:?} ({} signal, distance {:.2})",
+            hit.kind, hit.signal, hit.distance
+        ),
+    )
+    .with_detector("layer2detect")
+    .with_action(action)
+    .with_confidence(0.85)
 }
 
 /// Per-packet TCP flag validity. Some combinations are stealth-scan probes

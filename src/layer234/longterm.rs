@@ -43,38 +43,45 @@ impl EpochStats {
 /// clarity; `to_vector` packs them for the vector store.
 #[derive(Debug, Clone, Copy)]
 pub struct LongTermFeatures {
-    /// Cumulative bytes the source sent over the horizon.
+    /// Cumulative bytes the source sent over the window.
     pub bytes_sent: u64,
-    /// Connection opens (SYNs) over the horizon.
+    /// Connection opens (SYNs) over the window.
     pub conn_count: u64,
+    /// Cumulative SYNs to auth ports (slow brute signal).
+    pub auth_syns: u64,
     /// Coefficient of variation of connection inter-arrival times (std/mean).
     /// Low + many connections = a regular beacon; ~0 when too few to judge.
     pub interval_cv: f32,
     /// Mean connection inter-arrival (seconds), 0 if < 2 connections.
     pub interval_mean_secs: f32,
-    /// Distinct destination ports touched over the horizon.
+    /// Distinct destination ports touched over the window.
     pub distinct_dst_ports: u32,
-    /// Distinct destination IPs touched over the horizon.
+    /// Distinct destination IPs touched over the window.
     pub distinct_dst_ips: u32,
-    /// Cumulative SYNs to auth ports (slow brute signal).
-    pub auth_syns: u64,
-    /// Packets per second over the active span.
+    // Rates over the window span — used for the vector so a STEADY host has a
+    // STABLE profile regardless of how full its window is (cumulative values grow
+    // as the window fills, which would make every host look like it is drifting).
+    pub bytes_per_sec: f32,
+    pub conns_per_sec: f32,
+    pub auth_per_sec: f32,
     pub packets_per_sec: f32,
 }
 
 impl LongTermFeatures {
-    /// Pack into a fixed-size vector. Volume/count features are log-scaled so a
-    /// realistic-scale difference is a large coordinate move (the short-term path
-    /// failed precisely because it did not do this).
+    /// Pack into a fixed-size vector. Volume/rate features are log-scaled (so a
+    /// realistic-scale difference is a large coordinate move — the short-term path
+    /// failed precisely because it did not do this); distinct port/IP counts stay
+    /// cumulative because that *is* the scan/sweep signal (flat for a normal host,
+    /// growing for a scanner).
     pub fn to_vector(&self) -> [f32; LONGTERM_DIM] {
         [
-            (self.bytes_sent as f32 + 1.0).ln(),
-            (self.conn_count as f32 + 1.0).ln(),
+            (self.bytes_per_sec + 1.0).ln(),
+            (self.conns_per_sec + 1.0).ln(),
             self.interval_cv,
             (self.interval_mean_secs + 1.0).ln(),
             (self.distinct_dst_ports as f32 + 1.0).ln(),
             (self.distinct_dst_ips as f32 + 1.0).ln(),
-            (self.auth_syns as f32 + 1.0).ln(),
+            (self.auth_per_sec + 1.0).ln(),
             (self.packets_per_sec + 1.0).ln(),
         ]
     }
@@ -223,19 +230,29 @@ impl LongTermProfile {
         conn_times.sort_unstable();
         let (interval_cv, interval_mean_secs) = interval_stats(&conn_times);
 
-        let span_ns = self.last_seen_ns.saturating_sub(self.first_seen_ns);
-        let span_secs = (span_ns as f32 / 1e9).max(1e-6);
-        let packets_per_sec = packets as f32 / span_secs;
+        // Rates are computed over the WINDOW span (oldest retained epoch to last
+        // seen), not all-time, so they stabilize once the sliding window is full
+        // instead of decaying as total elapsed time grows.
+        let window_start = self
+            .epochs
+            .front()
+            .map(|e| e.start_ns)
+            .unwrap_or(self.current.start_ns);
+        let span_ns = self.last_seen_ns.saturating_sub(window_start);
+        let span_secs = (span_ns as f32 / 1e9).max(1.0);
 
         LongTermFeatures {
             bytes_sent,
             conn_count,
+            auth_syns,
             interval_cv,
             interval_mean_secs,
             distinct_dst_ports: ports.len() as u32,
             distinct_dst_ips: ips.len() as u32,
-            auth_syns,
-            packets_per_sec,
+            bytes_per_sec: bytes_sent as f32 / span_secs,
+            conns_per_sec: conn_count as f32 / span_secs,
+            auth_per_sec: auth_syns as f32 / span_secs,
+            packets_per_sec: packets as f32 / span_secs,
         }
     }
 }
@@ -283,16 +300,19 @@ pub enum LongTermKind {
     Anomaly,
 }
 
-/// Label an anomalous profile by its dominant feature. Order reflects specificity.
+/// Label an anomalous profile by its dominant feature, most-specific first. A
+/// scan (many ports) and a beacon (one port, regular) both have regular timing,
+/// so check the port fan-out before the cadence; exfil (volume) before the beacon
+/// cadence, since a bursty exfil also opens one regular connection per epoch.
 fn classify(f: &LongTermFeatures) -> LongTermKind {
-    if f.conn_count >= 8 && f.interval_cv < 0.25 {
-        LongTermKind::Beaconing
-    } else if f.auth_syns >= 10 {
-        LongTermKind::SlowBrute
-    } else if f.distinct_dst_ports >= 20 {
+    if f.distinct_dst_ports >= 15 {
         LongTermKind::SlowScan
-    } else if f.bytes_sent >= 1_000_000 {
+    } else if f.auth_syns >= 8 {
+        LongTermKind::SlowBrute
+    } else if f.bytes_per_sec >= 200.0 {
         LongTermKind::Exfiltration
+    } else if f.conn_count >= 4 && f.interval_cv < 0.3 {
+        LongTermKind::Beaconing
     } else {
         LongTermKind::Anomaly
     }
@@ -551,9 +571,8 @@ mod tests {
         }
         let f = p.features();
         assert!(f.bytes_sent >= 50 * 1400, "cumulative bytes should accumulate");
-        // log-scaled volume is a large coordinate vs a small session.
-        let v = f.to_vector();
-        assert!(v[0] > 10.0, "log(bytes) should be sizeable, got {}", v[0]);
+        // High sustained byte rate is the exfil signal (log-scaled in the vector).
+        assert!(f.bytes_per_sec > 1000.0, "byte rate should be high, got {}", f.bytes_per_sec);
     }
 
     /// Low-and-slow scan: many distinct destination ports over the horizon.
@@ -599,11 +618,14 @@ mod tests {
         LongTermFeatures {
             bytes_sent: bytes,
             conn_count: conns,
+            auth_syns: auth,
             interval_cv: cv,
             interval_mean_secs: 60.0,
             distinct_dst_ports: ports,
             distinct_dst_ips: 1,
-            auth_syns: auth,
+            bytes_per_sec: bytes as f32 / 60.0,
+            conns_per_sec: conns as f32 / 60.0,
+            auth_per_sec: auth as f32 / 60.0,
             packets_per_sec: 1.0,
         }
     }

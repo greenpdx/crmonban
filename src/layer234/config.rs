@@ -48,6 +48,10 @@ pub struct Config {
     /// Alerting configuration
     #[serde(default)]
     pub alerts: AlertsConfig,
+
+    /// Long-term behavioral profiling settings
+    #[serde(default)]
+    pub long_term: LongTermSettings,
 }
 
 impl Default for Config {
@@ -64,6 +68,49 @@ impl Default for Config {
             logging: LoggingConfig::default(),
             packet_log: PacketLogConfig::default(),
             alerts: AlertsConfig::default(),
+            long_term: LongTermSettings::default(),
+        }
+    }
+}
+
+/// Long-term behavioral profiling (per-source, long horizon). Catches slow /
+/// persistent threats the 10s window is blind to. See
+/// `docs/DESIGN-LONGTERM-VECTORDB.md`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LongTermSettings {
+    /// Enable long-term profiling.
+    pub enable: bool,
+    /// Epoch length in seconds (rollup granularity).
+    pub epoch_secs: u64,
+    /// Epochs of history retained per source (the sliding window).
+    pub horizon_epochs: usize,
+    /// Maximum sources tracked (bounded memory; idle/LRU eviction).
+    pub max_sources: usize,
+    /// Normal profiles required before population anomaly is enabled (warmup).
+    pub min_baseline_profiles: usize,
+    /// Per-source epochs of history before self-drift fires (warmup).
+    pub min_history_epochs: usize,
+    /// Euclidean distance from the normal population that flags an anomaly.
+    pub population_threshold: f32,
+    /// Euclidean distance from a source's own history that flags drift.
+    pub self_drift_threshold: f32,
+    /// Learn clean profiles into the population baseline online.
+    pub auto_learn: bool,
+}
+
+impl Default for LongTermSettings {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            epoch_secs: 60,
+            horizon_epochs: 60,
+            max_sources: 50_000,
+            min_baseline_profiles: 200,
+            min_history_epochs: 3,
+            population_threshold: 1.5,
+            self_drift_threshold: 1.5,
+            auto_learn: true,
         }
     }
 }
