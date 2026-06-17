@@ -1,0 +1,21 @@
+# Minimal config overrides for inline NFQUEUE validation.
+# Merge these sections into your crmonban config (or generate the default and edit).
+# The two queue numbers MUST match (engine binds it, firewall feeds it).
+
+[packet_engine]
+enabled = true
+capture_method = "nfqueue"
+nfqueue_num = 100
+signatures_enabled = true
+ml_detection = true
+# rules_dir = "/etc/crmonban/rules"   # signature rules, if you have them
+
+[dpi]
+# Auto-enabled when capture_method == "nfqueue", but set explicitly for clarity.
+enabled = true
+queue_num = 100          # MUST equal packet_engine.nfqueue_num
+packets_per_conn = 8     # first-N: only the first 8 inbound packets of a flow are queued
+
+# [nftables] defaults are fine (table inet crmonban, sets blocked_v4/v6, priority -100).
+# The dpi_allow_v4/v6 sets and the dpi_inspect chain are created automatically and
+# seeded with the DB whitelist + Cloudflare ranges.
