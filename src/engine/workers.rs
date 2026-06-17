@@ -203,6 +203,29 @@ fn stage_feature_gates(stage: PipelineStage) -> String {
     }
 }
 
+/// Load the signature engine from the first existing rules directory: the
+/// configured path (a deployed install), then the in-repo / common locations so
+/// the shipped rules actually load in dev and test instead of silently finding
+/// nothing at a path that doesn't exist.
+fn load_signature_engine(configured: Option<&std::path::Path>) -> Option<SignatureEngine> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(dir) = configured {
+        candidates.push(dir.to_path_buf());
+    }
+    candidates.push(std::path::PathBuf::from("rules"));
+    candidates.push(std::path::PathBuf::from("data/rules"));
+    candidates.push(std::path::PathBuf::from("/etc/crmonban/rules"));
+
+    for dir in candidates {
+        if dir.exists() {
+            if let Some(engine) = SignatureEngine::load_from_dir(&dir) {
+                return Some(engine);
+            }
+        }
+    }
+    None
+}
+
 /// Percent-decode (`%XX` and `+`) and lowercase a URI, so an encoded or
 /// mixed-case web-attack payload isn't hidden from the keyword match. Invalid
 /// `%` sequences are left as-is. Decoded bytes are mapped to chars 1:1 (Latin-1),
@@ -286,9 +309,8 @@ fn detect_web_attack(s: &str) -> Option<(DetectionType, &'static str)> {
 impl WorkerThread {
     /// Create a new worker thread
     pub fn new(config: WorkerConfig) -> Self {
-        // Stage 3: Load signature engine if rules_dir is configured
-        let signature_engine = config.rules_dir.as_ref()
-            .and_then(|dir| SignatureEngine::load_from_dir(dir));
+        // Stage 3: load signatures from the configured dir, or a known fallback.
+        let signature_engine = load_signature_engine(config.rules_dir.as_deref());
 
         // Stage 0: Create IP filter with default settings
         // Note: Threat intel IOCs and GeoIP are loaded via load_threat_intel()
@@ -1370,6 +1392,20 @@ mod tests {
         config.enable_ml = stage == PipelineStage::MLDetection;
         config.enable_correlation = stage == PipelineStage::Correlation;
         config
+    }
+
+    #[test]
+    fn signature_engine_falls_back_to_repo_rules_dir() {
+        // A configured path that doesn't exist must fall back to the in-repo
+        // ./rules so the shipped rules actually load (the default
+        // /var/lib/crmonban/data/rules does not exist in dev/test).
+        let missing = std::path::PathBuf::from("/nonexistent/crmonban/rules");
+        let engine = load_signature_engine(Some(&missing));
+        // ./rules ships dozens of rules (scan, brute, infostealer, log4shell).
+        match engine {
+            Some(e) => assert!(e.rule_count() >= 10, "loaded only {} rules", e.rule_count()),
+            None => panic!("should have fallen back to ./rules"),
+        }
     }
 
     #[test]

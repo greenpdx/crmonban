@@ -1,0 +1,17 @@
+# Local web-application exploit rules for crmonban (Suricata/Snort-compatible).
+#
+# NOTE on division of labor: classic web-app attacks (SQL injection, XSS, path
+# traversal) are classed "web-application-attack", which is in the engine's
+# default excluded_classtypes — they are handled by the ProtocolAnalysis stage
+# (the URL-decoding heuristic) and http_detect, NOT the signature engine, to
+# avoid the large/noisy community web ruleset. So those live in the protocol
+# analyzer, not here.
+#
+# Log4Shell / JNDI is an exploitation attempt (classtype attempted-admin), not a
+# generic web-app attack, so it belongs in the signature engine and loads here.
+# It also arrives in a header (User-Agent, X-Forwarded-For), which http.header
+# covers. sids in the local 90001xx range.
+
+alert http any any -> any any (msg:"LOCAL Log4Shell JNDI in header"; flow:established,to_server; http.header; content:"jndi:"; nocase; classtype:attempted-admin; sid:9000130; rev:1; priority:1;)
+alert http any any -> any any (msg:"LOCAL Log4Shell JNDI in URI"; flow:established,to_server; http.uri; content:"jndi:"; nocase; classtype:attempted-admin; sid:9000131; rev:1; priority:1;)
+alert http any any -> any any (msg:"LOCAL Log4Shell nested lookup obfuscation"; flow:established,to_server; http.header; content:"${"; content:":-"; distance:0; classtype:attempted-admin; sid:9000132; rev:1; priority:1;)
