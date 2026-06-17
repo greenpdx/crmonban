@@ -28,6 +28,8 @@ pub struct Detector {
     baseline_store: BaselineStore,
     aggregator: Aggregator,
     session_tracker: SessionTracker,
+    /// Cross-window cumulative counter for slow brute force (mechanism #2).
+    brute_tracker: super::bruteforce::BruteForceTracker,
     output: OutputHandler,
     /// Receiver for real-time signature updates
     update_rx: Option<mpsc::Receiver<SignatureUpdate>>,
@@ -49,6 +51,39 @@ impl Detector {
         let session_events = self.session_tracker.process_packet(&analysis.packet);
         for event in session_events {
             self.handle_session_event(event).await;
+        }
+
+        // Mechanism #2 — cumulative slow brute force: count connection attempts
+        // (SYNs) to an auth port per source across windows. Catches a low-and-slow
+        // campaign that never piles up enough inside a single aggregation window.
+        if self.config.bruteforce_detection {
+            let pkt = &analysis.packet;
+            let is_syn = pkt.tcp().map(|t| t.flags.syn && !t.flags.ack).unwrap_or(false);
+            if is_syn {
+                let dst_port = pkt.dst_port();
+                if let Some(hit) = self.brute_tracker.record_syn(
+                    pkt.src_ip(),
+                    dst_port,
+                    pkt.timestamp_ns(),
+                ) {
+                    let event = DetectionEvent::new(
+                        DetectionType::BruteForce,
+                        Severity::High,
+                        pkt.src_ip(),
+                        pkt.dst_ip(),
+                        format!(
+                            "Slow brute force: {} connection attempts to port {} within {}s",
+                            hit.attempts, hit.port, hit.window_secs
+                        ),
+                    )
+                    .with_detector("layer2detect")
+                    .with_subtype(DetectionSubType::None)
+                    .with_action(DetectionAction::Ban)
+                    .with_confidence(0.9)
+                    .with_ports(pkt.src_port(), dst_port);
+                    analysis.add_event(event);
+                }
+            }
         }
 
         // Aggregate for window-based analysis
@@ -525,6 +560,17 @@ impl DetectorBuilder {
             None => BaselineStore::new(self.baseline_capacity)?,
         };
 
+        // Share the auth-port set with the cumulative brute-force tracker before
+        // the list is moved into the aggregator.
+        let auth_ports_set: std::sync::Arc<std::collections::HashSet<u16>> =
+            std::sync::Arc::new(
+                self.auth_ports
+                    .clone()
+                    .unwrap_or_else(|| super::features::DEFAULT_AUTH_PORTS.to_vec())
+                    .into_iter()
+                    .collect(),
+            );
+
         let aggregator = match self.auth_ports {
             Some(ports) => Aggregator::with_auth_ports(
                 self.config.window_size_ms,
@@ -543,6 +589,7 @@ impl DetectorBuilder {
             baseline_store,
             aggregator,
             session_tracker: SessionTracker::new(self.max_sessions),
+            brute_tracker: super::bruteforce::BruteForceTracker::with_defaults(auth_ports_set),
             output: OutputHandler::default(),
             update_rx: None,
             weights: self.weights.clone(),
@@ -583,6 +630,15 @@ impl DetectorBuilder {
             None => BaselineStore::new(self.baseline_capacity)?,
         };
 
+        let auth_ports_set: std::sync::Arc<std::collections::HashSet<u16>> =
+            std::sync::Arc::new(
+                self.auth_ports
+                    .clone()
+                    .unwrap_or_else(|| super::features::DEFAULT_AUTH_PORTS.to_vec())
+                    .into_iter()
+                    .collect(),
+            );
+
         let aggregator = match self.auth_ports.clone() {
             Some(ports) => Aggregator::with_auth_ports(
                 self.config.window_size_ms,
@@ -601,6 +657,7 @@ impl DetectorBuilder {
             baseline_store,
             aggregator,
             session_tracker: SessionTracker::new(self.max_sessions),
+            brute_tracker: super::bruteforce::BruteForceTracker::with_defaults(auth_ports_set),
             output: OutputHandler::default(),
             update_rx: Some(rx),
             weights: self.weights.clone(),

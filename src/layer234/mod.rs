@@ -36,6 +36,7 @@
 //! ```
 
 pub mod aggregator;
+pub mod bruteforce;
 pub mod config;
 pub mod detector;
 pub mod error;
