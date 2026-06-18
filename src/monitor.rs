@@ -59,6 +59,17 @@ impl LogMonitor {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // Start at the END of the existing log, not byte 0. Re-reading a whole
+        // day-long log (auth.log can be many MB) on every startup emits one Attack
+        // event per historical line, and the synchronous single-Mutex SQLite
+        // pipeline drowns under that backlog — starving real-time ban processing
+        // (observed: detections logged but zero would-bans, getting worse as logs
+        // grew through the day). We only need to act on lines that arrive while we
+        // are running, so seek past the existing content.
+        let file_position = std::fs::metadata(&config.log_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
         Ok(Self {
             service,
             path: PathBuf::from(&config.log_path),
@@ -66,7 +77,7 @@ impl LogMonitor {
             max_failures: config.max_failures,
             find_time: config.find_time,
             ban_time: config.ban_time,
-            file_position: 0,
+            file_position,
         })
     }
 

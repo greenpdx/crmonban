@@ -68,6 +68,17 @@ impl Database {
         let conn = Connection::open(&path)
             .with_context(|| format!("Failed to open database: {}", path.as_ref().display()))?;
 
+        // WAL + relaxed sync: every Attack/ban/whitelist op serializes on the single
+        // connection Mutex and INSERTs synchronously. In the default rollback-journal
+        // mode each insert fsyncs, so a burst of events (e.g. a scan flood) serializes
+        // into a slow chain that starves real-time ban processing. WAL makes writes
+        // append-mostly and synchronous=NORMAL drops the per-insert fsync (still
+        // crash-safe under WAL), keeping the event loop responsive under load.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;",
+        )
+        .context("Failed to set SQLite WAL pragmas")?;
+
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
