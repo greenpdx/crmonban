@@ -935,6 +935,13 @@ pub struct DpiConfig {
     #[serde(default = "default_true")]
     pub queue_until_decided: bool,
 
+    /// L4 protocols sent to the DPI queue. Defaults to tcp+udp+icmp+icmpv6 so the
+    /// engine sees UDP (incl. QUIC/HTTP-3 on 443/udp), ICMP (ping sweeps), and not
+    /// just TCP — needed for non-TCP scan/DoS detection. Narrow it (e.g. ["tcp"])
+    /// if non-TCP volume (DNS/QUIC replies) overloads the queue.
+    #[serde(default = "default_queue_l4protos")]
+    pub queue_l4protos: Vec<String>,
+
     /// Maximum payload bytes to inspect per packet
     #[serde(default = "default_dpi_max_payload")]
     pub max_payload_bytes: usize,
@@ -1016,6 +1023,15 @@ fn default_dpi_max_payload() -> usize {
     4096
 }
 
+fn default_queue_l4protos() -> Vec<String> {
+    vec![
+        "tcp".to_string(),
+        "udp".to_string(),
+        "icmp".to_string(),
+        "icmpv6".to_string(),
+    ]
+}
+
 fn default_dpi_excluded_ports() -> Vec<u16> {
     vec![] // Empty by default - inspect all ports including TLS handshakes
 }
@@ -1039,6 +1055,7 @@ impl Default for DpiConfig {
             queue_num: default_dpi_queue(),
             packets_per_conn: default_dpi_packet_count(),
             queue_until_decided: true,
+            queue_l4protos: default_queue_l4protos(),
             max_payload_bytes: default_dpi_max_payload(),
             inspected_ports: vec![],
             excluded_ports: default_dpi_excluded_ports(),

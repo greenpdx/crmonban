@@ -1454,16 +1454,36 @@ impl Firewall {
         // accepted by the kernel WITHOUT re-queuing — no per-packet userspace
         // cost. (packets_per_conn == 0 disables the limit and queues all
         // new+established.)
+        // meta l4proto { tcp, udp, icmp, icmpv6 } — the L4 protocols queued for DPI
+        // (configurable via dpi.queue_l4protos; default tcp+udp+icmp+icmpv6 so UDP
+        // (incl. QUIC/HTTP-3 on 443/udp) and ICMP (ping sweeps) are inspected, not
+        // just TCP). One protocol renders as a bare string; several as an anonymous
+        // set. This is a meta expression, NOT a payload field:
+        // `{"payload":{"protocol":"meta",...}}` makes nft reject the whole ruleset
+        // with "Unknown payload protocol 'meta'". It must be `{"meta":{"key":"l4proto"}}`.
+        let protos: Vec<String> = if config.queue_l4protos.is_empty() {
+            vec!["tcp".to_string()]
+        } else {
+            config.queue_l4protos.clone()
+        };
+        let l4proto_right = if protos.len() == 1 {
+            Expression::String(Cow::Owned(protos[0].clone()))
+        } else {
+            Expression::Named(NamedExpression::Set(
+                protos
+                    .iter()
+                    .map(|p| {
+                        nftables::expr::SetItem::Element(Expression::String(Cow::Owned(p.clone())))
+                    })
+                    .collect(),
+            ))
+        };
         let mut dpi_expr = vec![
-            // meta l4proto tcp. This is a meta expression, NOT a payload field:
-            // `{"payload":{"protocol":"meta",...}}` makes nft reject the whole
-            // ruleset with "Unknown payload protocol 'meta'". It must be
-            // `{"meta":{"key":"l4proto"}}`.
             Statement::Match(Match {
                 left: Expression::Named(NamedExpression::Meta(nftables::expr::Meta {
                     key: nftables::expr::MetaKey::L4proto,
                 })),
-                right: Expression::String(Cow::Borrowed("tcp")),
+                right: l4proto_right,
                 op: Operator::EQ,
             }),
             // ct state { new, established } as an anonymous SET. The comma-string
@@ -1533,7 +1553,7 @@ impl Firewall {
             chain: Cow::Owned(chain_name.to_string()),
             handle: None,
             index: None,
-            comment: Some(Cow::Borrowed("Queue undecided TCP packets for DPI")),
+            comment: Some(Cow::Borrowed("Queue undecided packets (tcp/udp/icmp/...) for DPI")),
             expr: Cow::Owned(dpi_expr),
         }));
 
