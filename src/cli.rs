@@ -373,58 +373,101 @@ async fn cmd_stop(config: Config) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_status(config: Config) -> Result<()> {
-    // Try D-Bus first for richer status information
-    #[cfg(feature = "dbus")]
-    if config.dbus.enabled {
-        if let Ok(client) = DbusClient::connect().await {
-            if client.is_daemon_available().await {
-                match client.status().await {
-                    Ok(status) => {
-                        println!("{}", "Daemon Status: RUNNING".green().bold());
-                        println!("PID:              {}", status.pid);
-                        println!("Uptime:           {}s", status.uptime_secs);
-                        println!("Active bans:      {}", status.active_bans);
-                        println!("Events processed: {}", status.events_processed);
-                        if !status.monitored_services.is_empty() {
-                            println!(
-                                "Monitoring:       {}",
-                                status.monitored_services.join(", ")
-                            );
-                        }
-                        println!("{}", "(via D-Bus)".dimmed());
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        eprintln!("{}", format!("D-Bus error: {}", e).yellow());
+/// Detect the running daemon: trust the pid file if present, otherwise scan /proc
+/// for a `crmonban … start` process (systemd runs it without writing a pid file).
+fn daemon_is_running(config: &Config) -> bool {
+    if let Some(pid) = std::fs::read_to_string(config.pid_path())
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+    {
+        if std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+            return true;
+        }
+    }
+    let me = std::process::id();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            if let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() {
+                if pid == me {
+                    continue;
+                }
+                if let Ok(cmd) = std::fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
+                    let cmd = cmd.replace('\0', " ");
+                    if cmd.contains("crmonban") && cmd.contains("start") {
+                        return true;
                     }
                 }
             }
         }
     }
+    false
+}
 
-    // Fall back to PID file check
-    let pid_path = config.pid_path();
+async fn cmd_status(config: Config) -> Result<()> {
+    // Read filtering config before `config` is moved into Crmonban.
+    let enforce = config.general.enforce;
+    let capture = config.packet_engine.capture_method.clone();
+    let mode = config.deployment.mode.to_string();
+    let mut monitors: Vec<String> = config
+        .services
+        .iter()
+        .filter(|(_, s)| s.enabled)
+        .map(|(name, _)| name.clone())
+        .collect();
+    monitors.sort();
 
-    if pid_path.exists() {
-        let pid_str = std::fs::read_to_string(&pid_path)?;
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let proc_path = format!("/proc/{}", pid);
-            if std::path::Path::new(&proc_path).exists() {
-                println!("{}", "Daemon Status: RUNNING".green().bold());
-                println!("PID: {}", pid);
+    // Is the daemon process alive?
+    let running = daemon_is_running(&config);
 
-                // Show some stats
-                let crmonban = Crmonban::new(config)?;
-                let bans = crmonban.list_bans()?;
-                println!("Active bans: {}", bans.len());
+    let crmonban = Crmonban::new(config)?;
+    let bans = crmonban.list_bans().unwrap_or_default();
+    let whitelist = crmonban.whitelist_list().map(|w| w.len()).unwrap_or(0);
 
-                return Ok(());
-            }
+    println!("{}", "crmonban status".bold());
+    println!(
+        "  Daemon:    {}",
+        if running {
+            "RUNNING".green().to_string()
+        } else {
+            "STOPPED".red().to_string()
         }
+    );
+    println!(
+        "  Filtering: {}  |  capture={}  |  mode={}",
+        if enforce {
+            "ENFORCE (blocking)".green().to_string()
+        } else {
+            "OBSERVE (log-only)".yellow().to_string()
+        },
+        capture,
+        mode
+    );
+    println!(
+        "  Monitors:  {}",
+        if monitors.is_empty() {
+            "(none)".to_string()
+        } else {
+            monitors.join(", ")
+        }
+    );
+    println!("  Whitelist: {} IP(s)", whitelist);
+    println!(
+        "  Blocked:   {}",
+        format!("{} IP(s)", bans.len()).bold()
+    );
+    for ban in &bans {
+        let expires = ban
+            .expires_at
+            .map(|e| e.format("%Y-%m-%d %H:%M UTC").to_string())
+            .unwrap_or_else(|| "never".to_string());
+        println!(
+            "    {:<18} {:<10} {}  ({})",
+            ban.ip.to_string(),
+            ban.source.to_string(),
+            expires,
+            ban.reason
+        );
     }
-
-    println!("{}", "Daemon Status: STOPPED".red().bold());
     Ok(())
 }
 
