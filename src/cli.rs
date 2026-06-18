@@ -109,6 +109,12 @@ pub enum Commands {
         action: WhitelistAction,
     },
 
+    /// Cloudflare-edge enforcement (mirror active bans to a CF IP list)
+    Cloudflare {
+        #[command(subcommand)]
+        action: CloudflareAction,
+    },
+
     /// Show recent activity logs
     Logs {
         /// Number of entries to show
@@ -214,6 +220,12 @@ pub enum WhitelistAction {
     List,
 }
 
+#[derive(Subcommand)]
+pub enum CloudflareAction {
+    /// Run one reconcile pass now: active bans -> the CF IP list
+    Sync,
+}
+
 /// Table row for ban list
 #[derive(Tabled)]
 struct BanRow {
@@ -278,6 +290,7 @@ pub async fn run_command(cli: Cli) -> Result<()> {
         Commands::List { format } => cmd_list(config, format).await,
         Commands::Intel { ip, refresh, json } => cmd_intel(config, ip, refresh, json).await,
         Commands::Whitelist { action } => cmd_whitelist(config, action).await,
+        Commands::Cloudflare { action } => cmd_cloudflare(config, action).await,
         Commands::Logs { limit } => cmd_logs(config, limit).await,
         Commands::Stats => cmd_stats(config).await,
         Commands::Init => cmd_init(config).await,
@@ -467,6 +480,40 @@ async fn cmd_status(config: Config) -> Result<()> {
             expires,
             ban.reason
         );
+    }
+    Ok(())
+}
+
+async fn cmd_cloudflare(config: Config, action: CloudflareAction) -> Result<()> {
+    match action {
+        CloudflareAction::Sync => {
+            if !config.cloudflare.enabled {
+                println!(
+                    "{}",
+                    "Cloudflare enforcement is disabled — set [cloudflare] enabled = true".yellow()
+                );
+                return Ok(());
+            }
+            let cf = config.cloudflare.clone();
+            let crmonban = Crmonban::new(config)?;
+            let active: Vec<IpAddr> = crmonban.list_bans()?.iter().map(|b| b.ip).collect();
+            println!(
+                "Reconciling {} active ban(s) -> Cloudflare list '{}'...",
+                active.len(),
+                cf.list_name
+            );
+            match crmonban::cloudflare_api::reconcile_once(&cf, &active).await? {
+                Some(r) => println!(
+                    "{} list {} now {} IP(s)  (+{} -{})",
+                    "OK".green().bold(),
+                    r.list_id,
+                    r.edge_total,
+                    r.added,
+                    r.removed
+                ),
+                None => println!("(disabled)"),
+            }
+        }
     }
     Ok(())
 }

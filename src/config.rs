@@ -71,8 +71,68 @@ pub struct Config {
     #[serde(default)]
     pub packet_engine: PacketEngineConfig,
 
+    /// Cloudflare-edge enforcement: mirror active bans to a CF account IP list so
+    /// CF-proxied attacks (whose real IP only shows at the edge) are blocked too.
+    #[serde(default)]
+    pub cloudflare: CloudflareConfig,
+
     #[serde(default)]
     pub services: HashMap<String, ServiceConfig>,
+}
+
+/// Cloudflare-edge enforcement plane (M1: reconcile active bans -> a CF IP list).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CloudflareConfig {
+    /// Master switch. Off = crmonban never touches your Cloudflare account.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to a file containing the scoped API token (preferred; store mode 600).
+    #[serde(default)]
+    pub api_token_file: String,
+
+    /// Inline API token (used only if api_token_file is empty). Avoid in shared configs.
+    #[serde(default)]
+    pub api_token: String,
+
+    /// Cloudflare account ID that owns the IP list.
+    #[serde(default)]
+    pub account_id: String,
+
+    /// Existing list ID. If empty, the list is created/looked-up by name on first run
+    /// (the resolved ID is logged so you can pin it here).
+    #[serde(default)]
+    pub list_id: String,
+
+    /// Name used to create/find the IP list.
+    #[serde(default = "default_cf_list_name")]
+    pub list_name: String,
+
+    /// How often the reconciler makes the CF list equal the active-ban set (seconds).
+    #[serde(default = "default_cf_reconcile_secs")]
+    pub reconcile_interval_secs: u64,
+}
+
+fn default_cf_list_name() -> String {
+    "crmonban_blocklist".to_string()
+}
+
+fn default_cf_reconcile_secs() -> u64 {
+    60
+}
+
+impl Default for CloudflareConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_token_file: String::new(),
+            api_token: String::new(),
+            account_id: String::new(),
+            list_id: String::new(),
+            list_name: default_cf_list_name(),
+            reconcile_interval_secs: default_cf_reconcile_secs(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -147,6 +207,7 @@ impl Default for Config {
             dns_monitor: DnsMonitorConfig::default(),
             port_hopping: PortHoppingConfig::default(),
             packet_engine: PacketEngineConfig::default(),
+            cloudflare: CloudflareConfig::default(),
             services,
         }
     }

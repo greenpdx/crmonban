@@ -3,6 +3,7 @@ pub mod types;
 pub use types::*;
 
 pub mod cloudflare;
+pub mod cloudflare_api;
 pub mod config;
 pub mod database;
 pub mod feedback;
@@ -786,6 +787,50 @@ impl Daemon {
                 }
             }
         });
+
+        // Spawn Cloudflare-edge reconciler (M1): periodically make the CF IP list
+        // equal the active-ban set. Observe-safe — it only pushes when enforce=true.
+        {
+            let cf_enabled = self.crmonban.read().await.config.cloudflare.enabled;
+            if cf_enabled {
+                let cf_crmonban = self.crmonban.clone();
+                tokio::spawn(async move {
+                    let secs = cf_crmonban
+                        .read()
+                        .await
+                        .config
+                        .cloudflare
+                        .reconcile_interval_secs
+                        .max(10);
+                    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
+                    loop {
+                        interval.tick().await;
+                        // Snapshot config + active bans under the lock, then release it
+                        // BEFORE the network round-trip (never hold the lock across I/O).
+                        let snapshot = {
+                            let c = cf_crmonban.read().await;
+                            if !c.config.general.enforce {
+                                None // observe-only: never touch the CF account
+                            } else {
+                                let active = c
+                                    .db
+                                    .get_active_bans()
+                                    .map(|b| b.iter().map(|x| x.ip).collect::<Vec<_>>())
+                                    .unwrap_or_default();
+                                Some((c.config.cloudflare.clone(), active))
+                            }
+                        };
+                        if let Some((cfg, active)) = snapshot {
+                            if let Err(e) = crate::cloudflare_api::reconcile_once(&cfg, &active).await
+                            {
+                                warn!("cloudflare reconcile error: {}", e);
+                            }
+                        }
+                    }
+                });
+                info!("Cloudflare-edge reconciler started");
+            }
+        }
 
         info!("Daemon started, monitoring logs...");
 
