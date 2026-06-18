@@ -152,12 +152,33 @@ pub enum MonitorEvent {
     Error(String),
 }
 
+/// True for internal/non-routable sources that should never be banned by a log
+/// monitor: RFC1918 private ranges (incl. docker bridges like 172.18.0.1), loopback,
+/// link-local, unspecified, and IPv6 ULA/link-local. They are our own infrastructure.
+fn is_internal_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
+}
+
 /// Log file monitor manager
 pub struct LogMonitorManager {
     monitors: HashMap<String, LogMonitor>,
     event_counts: HashMap<(IpAddr, String), Vec<chrono::DateTime<Utc>>>,
     cloudflare_checker: CloudflareChecker,
     skip_cloudflare_ips: bool,
+    /// Skip internal/private IPs (docker bridges, LAN, loopback) in ban analysis:
+    /// they're logged but never counted/banned — our own infrastructure, not an
+    /// external attacker (e.g. the 172.18.0.1 docker gateway). On by default.
+    skip_internal_ips: bool,
 }
 
 impl LogMonitorManager {
@@ -168,6 +189,7 @@ impl LogMonitorManager {
             event_counts: HashMap::new(),
             cloudflare_checker: CloudflareChecker::new(),
             skip_cloudflare_ips: true, // Don't ban Cloudflare proxy IPs by default
+            skip_internal_ips: true,   // Don't ban our own internal/docker IPs
         }
     }
 
@@ -178,6 +200,7 @@ impl LogMonitorManager {
             event_counts: HashMap::new(),
             cloudflare_checker: CloudflareChecker::new(),
             skip_cloudflare_ips: skip_cloudflare,
+            skip_internal_ips: true,
         }
     }
 
@@ -221,6 +244,19 @@ impl LogMonitorManager {
                                 ip, service
                             );
                             // Still record the attack event, but don't trigger ban
+                            output_events.push(MonitorEvent::Attack(event));
+                            continue;
+                        }
+
+                        // Skip internal/private IPs (docker bridges, LAN, loopback):
+                        // record the hit but never analyze/ban — they're our own
+                        // infrastructure (e.g. the 172.18.0.1 docker gateway), not an
+                        // external attacker. Mirrors the Cloudflare skip above.
+                        if self.skip_internal_ips && is_internal_ip(ip) {
+                            debug!(
+                                "Skipping internal IP {} for service {} (logged, not analyzed)",
+                                ip, service
+                            );
                             output_events.push(MonitorEvent::Attack(event));
                             continue;
                         }
