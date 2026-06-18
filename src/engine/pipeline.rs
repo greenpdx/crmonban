@@ -26,7 +26,7 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::core::{DetectionAction, DetectionEvent, FlowKey, IpProtocol, Packet};
 use crate::database::{BatchedWriterHandle, IntervalStats};
@@ -69,6 +69,21 @@ pub struct PipelineConfig {
     /// Trace each packet's journey through the stages to stderr (debugging).
     #[serde(default)]
     pub trace_packets: bool,
+
+    /// Mark proven-good flows so the kernel bypasses the rest in-kernel (the
+    /// queue-until-decided model). When false, good flows are re-inspected every
+    /// packet (legacy / first-N relies on the nft count cutoff instead).
+    #[serde(default)]
+    pub bypass_good_flows: bool,
+
+    /// Clean (accepted) packets a flow must accumulate before it is marked good
+    /// for bypass. Bounds the "judged good too early" window.
+    #[serde(default = "default_bypass_after_packets")]
+    pub bypass_after_packets: u32,
+}
+
+fn default_bypass_after_packets() -> u32 {
+    4
 }
 
 /// Default stage order per v4 spec (with Layer234Detect replacing individual stages)
@@ -100,6 +115,8 @@ impl Default for PipelineConfig {
             stats_interval_secs: 1,
             stage_order: default_stage_order(),
             trace_packets: false,
+            bypass_good_flows: false,
+            bypass_after_packets: default_bypass_after_packets(),
         }
     }
 }
@@ -146,13 +163,18 @@ impl Pipeline {
         packet_rx: Receiver<Packet>,
         event_tx: mpsc::Sender<DetectionEvent>,
     ) -> Self {
+        let flow_cache = FlowVerdictCache::new(FlowVerdictCacheConfig {
+            bypass_good: config.bypass_good_flows,
+            bypass_after_packets: config.bypass_after_packets,
+            ..FlowVerdictCacheConfig::default()
+        });
         Self {
             config,
             packet_rx,
             event_tx,
             db_writer: None,
             verdict_tx: None,
-            flow_cache: FlowVerdictCache::new(FlowVerdictCacheConfig::default()),
+            flow_cache,
         }
     }
 
@@ -186,6 +208,16 @@ impl Pipeline {
         let mut events_this_interval = 0u64;
         let mut latency_sum_us = 0u64;
         let mut latency_max_us = 0u64;
+
+        // 60s perf-snapshot accumulators: throughput + per-packet PROCESSING
+        // latency (inspection cost; passive capture adds no wire latency) + kernel
+        // drops (keep-up). Emitted to the log so a long observe run is evaluable.
+        let mut last_perf = Instant::now();
+        let mut perf_pkts = 0u64;
+        let mut perf_bytes = 0u64;
+        let mut perf_lat_sum = 0u64;
+        let mut perf_lat_max = 0u64;
+        let mut perf_events = 0u64;
 
         loop {
             // Try to receive a packet with timeout
@@ -338,6 +370,41 @@ impl Pipeline {
                 s.packets_per_second = packets_this_interval as f64 / elapsed;
                 s.events_per_second = events_this_interval as f64 / elapsed;
                 s.worker_utilization = worker_pool.utilization();
+
+                // Accumulate the 60s perf window and emit a PERF snapshot line so
+                // throughput + processing-latency + keep-up are visible for the run.
+                perf_pkts += packets_this_interval;
+                perf_bytes += bytes_this_interval;
+                perf_lat_sum += latency_sum_us;
+                perf_events += events_this_interval;
+                if latency_max_us > perf_lat_max {
+                    perf_lat_max = latency_max_us;
+                }
+                if last_perf.elapsed().as_secs() >= 60 {
+                    let psecs = last_perf.elapsed().as_secs_f64();
+                    let lat_avg = if perf_pkts > 0 {
+                        perf_lat_sum as f64 / perf_pkts as f64
+                    } else {
+                        0.0
+                    };
+                    info!(
+                        "PERF window={:.0}s pps={:.0} bps={:.0} lat_avg_us={:.1} lat_max_us={} eps={:.2} drops={} util={:.2}",
+                        psecs,
+                        perf_pkts as f64 / psecs,
+                        perf_bytes as f64 / psecs,
+                        lat_avg,
+                        perf_lat_max,
+                        perf_events as f64 / psecs,
+                        s.packets_dropped,
+                        s.worker_utilization
+                    );
+                    perf_pkts = 0;
+                    perf_bytes = 0;
+                    perf_lat_sum = 0;
+                    perf_lat_max = 0;
+                    perf_events = 0;
+                    last_perf = Instant::now();
+                }
 
                 // Record interval stats to database
                 if let Some(ref writer) = self.db_writer {

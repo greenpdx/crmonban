@@ -1484,11 +1484,27 @@ impl Firewall {
                 op: Operator::EQ,
             }),
         ];
-        if config.packets_per_conn > 0 {
-            // ct packets (ORIGINAL direction = inbound for a server connection)
-            // <= N: only the first N inbound packets of the connection. Counting
-            // the original direction is more predictable than the bidirectional
-            // total (it excludes the server's reply packets).
+        if config.queue_until_decided {
+            // Queue-until-decided: inspect every packet of a flow whose verdict is
+            // not yet decided — i.e. its conntrack mark is still unset (0). Once
+            // the engine marks the flow GOOD the bypass rule above accepts the
+            // rest in-kernel; a flow that stays undecided keeps being inspected,
+            // and a BAD flow keeps being dropped for its whole life. Unlike
+            // first-N, the cutoff is the VERDICT, not a fixed packet count — so a
+            // bad flow's later packets are never let through.
+            dpi_expr.push(Statement::Match(Match {
+                left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
+                    key: Cow::Borrowed("mark"),
+                    family: None,
+                    dir: None,
+                })),
+                right: Expression::Number(0),
+                op: Operator::EQ,
+            }));
+        } else if config.packets_per_conn > 0 {
+            // Legacy first-N: ct packets (ORIGINAL direction = inbound for a server
+            // connection) <= N — only the first N inbound packets. Stops at a fixed
+            // count regardless of verdict.
             dpi_expr.push(Statement::Match(Match {
                 left: Expression::Named(NamedExpression::CT(nftables::expr::CT {
                     key: Cow::Borrowed("packets"),
@@ -1517,18 +1533,37 @@ impl Firewall {
             chain: Cow::Owned(chain_name.to_string()),
             handle: None,
             index: None,
-            comment: Some(Cow::Borrowed("Queue first-N TCP packets for DPI")),
+            comment: Some(Cow::Borrowed("Queue undecided TCP packets for DPI")),
             expr: Cow::Owned(dpi_expr),
         }));
 
-        // Persist the engine's good verdict to conntrack: when an accepted packet
-        // returns from the queue carrying the good packet-mark, copy it to the
-        // connection's ct mark so the bypass rule above short-circuits every later
-        // packet of the flow in-kernel.
+        // Persist the engine's good verdict to conntrack. CRITICAL: this lives in a
+        // SEPARATE base chain AFTER dpi_inspect, not as a later rule inside it. When
+        // the engine returns NF_ACCEPT for a queued packet, the packet does NOT
+        // resume at the next rule in the queuing chain — it proceeds to the next
+        // base chain on the hook. A persist rule placed after the `queue` rule in
+        // the same chain therefore never runs (verified on a live kernel: the GOOD
+        // skb-mark was present in a later base chain, but a same-chain persist rule
+        // counted 0). A dedicated base chain at priority+6 runs on the accepted
+        // packet and copies its good packet-mark to the connection's ct mark, so the
+        // bypass rule in dpi_inspect short-circuits every later packet of the flow.
+        let persist_chain = format!("{}_persist", chain_name);
+        batch.add(NfListObject::Chain(Chain {
+            family: NfFamily::INet,
+            table: Cow::Owned(self.config.table_name.clone()),
+            name: Cow::Owned(persist_chain.clone()),
+            newname: None,
+            handle: None,
+            _type: Some(NfChainType::Filter),
+            hook: Some(hook),
+            prio: Some(self.config.priority + 6),
+            dev: None,
+            policy: Some(NfChainPolicy::Accept),
+        }));
         batch.add(NfListObject::Rule(Rule {
             family: NfFamily::INet,
             table: Cow::Owned(self.config.table_name.clone()),
-            chain: Cow::Owned(chain_name.to_string()),
+            chain: Cow::Owned(persist_chain),
             handle: None,
             index: None,
             comment: Some(Cow::Borrowed("Persist good packet-mark to ct mark")),

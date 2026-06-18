@@ -180,6 +180,7 @@ impl Crmonban {
             d.enabled = true;
             if nfqueue_mode {
                 d.queue_num = config.packet_engine.nfqueue_num;
+                d.queue_until_decided = config.packet_engine.queue_until_decided;
             }
             Some(d)
         } else {
@@ -232,6 +233,7 @@ impl Crmonban {
             d.enabled = true;
             if nfqueue_mode {
                 d.queue_num = config.packet_engine.nfqueue_num;
+                d.queue_until_decided = config.packet_engine.queue_until_decided;
             }
             Some(d)
         } else {
@@ -300,6 +302,18 @@ impl Crmonban {
 
     /// Sync database bans to nftables
     pub fn sync_bans(&self) -> Result<()> {
+        // Observe-only: never push DB bans to the firewall. Record what we WOULD
+        // sync and return, so the eval stays truly non-enforcing even across a
+        // restart (the startup sync is the one ban path that doesn't funnel
+        // through ban()/the enforce guard).
+        if !self.config.general.enforce {
+            let n = self.db.get_active_bans().map(|b| b.len()).unwrap_or(0);
+            info!(
+                "Observe-only: skipping firewall sync of {} active DB ban(s)",
+                n
+            );
+            return Ok(());
+        }
         let bans = self.db.get_active_bans()?;
 
         let ban_data: Vec<(IpAddr, Option<u64>)> = bans
@@ -334,6 +348,23 @@ impl Crmonban {
             return Ok(());
         }
 
+        let source_str = format!("{:?}", source);
+
+        // OBSERVE-ONLY (general.enforce = false): record exactly what we WOULD
+        // have banned — with full context — but never touch the firewall or the
+        // ban table. This is the evaluation instrument: it yields the real
+        // false-positive rate on live traffic without affecting a single user.
+        if !self.config.general.enforce {
+            self.log_event_json("would_ban", &ip, &reason, &source_str, duration_secs);
+            self.db.log_activity(
+                ActivityAction::Ban,
+                Some(&ip),
+                &format!("WOULD_BAN (observe-only): {}", reason),
+            )?;
+            info!("WOULD_BAN (observe-only) {} (reason: {})", ip, reason);
+            return Ok(());
+        }
+
         // Add to database
         let ban = Ban::new(ip, reason.clone(), source, duration_secs);
         self.db.add_ban(&ban)?;
@@ -345,8 +376,44 @@ impl Crmonban {
         self.db
             .log_activity(ActivityAction::Ban, Some(&ip), &reason)?;
 
+        self.log_event_json("ban", &ip, &reason, &source_str, duration_secs);
         info!("Banned IP: {} (reason: {})", ip, reason);
         Ok(())
+    }
+
+    /// Append one JSON line to the configured events log (the observe/eval
+    /// record). No-op when general.events_log is unset. Best-effort: a write
+    /// failure is logged, never fatal.
+    fn log_event_json(
+        &self,
+        kind: &str,
+        ip: &IpAddr,
+        reason: &str,
+        source: &str,
+        duration_secs: Option<i64>,
+    ) {
+        let Some(ref path) = self.config.general.events_log else {
+            return;
+        };
+        let line = serde_json::json!({
+            "ts": Utc::now().to_rfc3339(),
+            "type": kind,
+            "ip": ip.to_string(),
+            "source": source,
+            "duration_secs": duration_secs,
+            "enforced": self.config.general.enforce,
+            "reason": reason,
+        })
+        .to_string();
+        use std::io::Write;
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            Ok(mut f) => {
+                if let Err(e) = writeln!(f, "{}", line) {
+                    warn!("events_log write to {} failed: {}", path, e);
+                }
+            }
+            Err(e) => warn!("events_log open {} failed: {}", path, e),
+        }
     }
 
     /// Ban with automatic intel gathering
@@ -1338,6 +1405,11 @@ async fn start_packet_engine(
         "pcap" => CaptureMethod::Pcap,
         _ => CaptureMethod::AfPacket,
     };
+    // Good-flow bypass (queue-until-decided) only applies inline: it stops queueing
+    // a proven-good flow. In passive modes (af_packet/pcap) there is no queue and
+    // no kernel bypass, so enabling it would only make the monitor skip a "good"
+    // flow's later packets — blinding it. Force full inspection off-queue.
+    let is_nfqueue = matches!(capture_method, CaptureMethod::Nfqueue);
 
     // Map the daemon's packet-engine config onto the engine's config.
     let engine_config = EngineConfig {
@@ -1363,6 +1435,11 @@ async fn start_packet_engine(
             enable_signatures: config.signatures_enabled,
             enable_ml: config.ml_detection,
             enable_correlation: false,
+            // Queue-until-decided: mark proven-good flows so the kernel bypasses
+            // them in-kernel and keep inspecting undecided ones (paired with the
+            // nft ct-mark queue rule). Gated to nfqueue inline mode (see
+            // is_nfqueue above) so af_packet/observe stays full-inspection.
+            bypass_good_flows: config.queue_until_decided && is_nfqueue,
             // Per-packet, per-stage instrumentation toggle. Off by default (one
             // line per stage per packet is far too chatty for production); set
             // CRMONBAN_TRACE_PACKETS=1 to emit the `[trace] pkt N STAGE [gates]:

@@ -222,6 +222,19 @@ pub struct GeneralConfig {
     /// Default ban duration in seconds (0 = permanent)
     #[serde(default = "default_ban_duration")]
     pub default_ban_duration: i64,
+
+    /// Enforcement switch. true (default) = normal IPS (bans/drops are applied).
+    /// false = OBSERVE-ONLY: every ban decision is logged and audited as a
+    /// WOULD_BAN with full context, but the source is NOT banned and traffic is
+    /// NOT dropped. For evaluating detection quality + false-positive rate against
+    /// real traffic without affecting any user.
+    #[serde(default = "default_true")]
+    pub enforce: bool,
+
+    /// Optional path to a structured JSON event log (one JSON object per line:
+    /// detections and would-bans, with timing/context). None = disabled.
+    #[serde(default)]
+    pub events_log: Option<String>,
 }
 
 impl Default for GeneralConfig {
@@ -232,6 +245,8 @@ impl Default for GeneralConfig {
             log_level: default_log_level(),
             auto_intel: true,
             default_ban_duration: default_ban_duration(),
+            enforce: true,
+            events_log: None,
         }
     }
 }
@@ -907,9 +922,18 @@ pub struct DpiConfig {
     #[serde(default = "default_dpi_queue")]
     pub queue_num: u16,
 
-    /// Number of initial packets to inspect per connection
+    /// Number of initial packets to inspect per connection (legacy first-N mode;
+    /// used only when queue_until_decided is false)
     #[serde(default = "default_dpi_packet_count")]
     pub packets_per_conn: u8,
+
+    /// Inline DPI: queue a flow until the engine DECIDES it (good/bad) instead of
+    /// a fixed first-N count. The kernel queues while the conntrack mark is unset;
+    /// once the flow is marked good it bypasses in-kernel, and a bad flow keeps
+    /// being dropped for its whole life (first-N would leak a bad flow's later
+    /// packets once the count was exceeded). Set from packet_engine.
+    #[serde(default = "default_true")]
+    pub queue_until_decided: bool,
 
     /// Maximum payload bytes to inspect per packet
     #[serde(default = "default_dpi_max_payload")]
@@ -1014,6 +1038,7 @@ impl Default for DpiConfig {
             enabled: false,
             queue_num: default_dpi_queue(),
             packets_per_conn: default_dpi_packet_count(),
+            queue_until_decided: true,
             max_payload_bytes: default_dpi_max_payload(),
             inspected_ports: vec![],
             excluded_ports: default_dpi_excluded_ports(),
@@ -1604,6 +1629,11 @@ pub struct PacketEngineConfig {
     pub interface: Option<String>,
     /// NFQUEUE number (for nfqueue mode)
     pub nfqueue_num: u16,
+    /// Inline DPI: queue each flow until the engine decides it (good/bad) rather
+    /// than inspecting only the first-N packets. Drives both the nft queue rule
+    /// (queue while the conntrack mark is unset) and the engine's good-flow bypass.
+    #[serde(default = "default_true")]
+    pub queue_until_decided: bool,
     /// Enable promiscuous mode
     pub promiscuous: bool,
     /// Snapshot length (max bytes per packet)
@@ -1635,6 +1665,7 @@ impl Default for PacketEngineConfig {
             capture_method: "af_packet".to_string(),
             interface: None,
             nfqueue_num: 100,
+            queue_until_decided: true,
             promiscuous: true,
             snaplen: 65535,
             timeout_ms: 100,

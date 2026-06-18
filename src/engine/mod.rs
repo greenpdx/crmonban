@@ -282,7 +282,18 @@ impl PacketEngine {
 
                         match capture.next_packet(0) {
                             Ok(Some(packet)) => {
-                                capture_stats.write().packets_captured += 1;
+                                {
+                                    let mut cs = capture_stats.write();
+                                    cs.packets_captured += 1;
+                                    // Refresh the kernel drop counter periodically (it
+                                    // is the keep-up signal: drops > 0 means the engine
+                                    // can't inspect everything the wire carries). Cheap
+                                    // but not free, so poll every 1024 packets.
+                                    if cs.packets_captured % 1024 == 0 {
+                                        let cap = capture.stats();
+                                        cs.packets_dropped = cap.dropped + cap.if_dropped;
+                                    }
+                                }
 
                                 if capture_packet_tx.send(packet).is_err() {
                                     // Channel closed
