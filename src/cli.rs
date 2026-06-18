@@ -64,6 +64,24 @@ pub enum Commands {
         ip: IpAddr,
     },
 
+    /// Ingest a detection event from an external sensor (e.g. Caddy's exec on a
+    /// bad URL) and apply the ban policy. Honors observe-only (general.enforce).
+    ///   caddy:  exec crmonban event --ip {client_ip} --kind hack --url {uri}
+    Event {
+        /// Real client IP (CF-Connecting-IP for proxied, packet src for direct)
+        #[arg(long)]
+        ip: IpAddr,
+        /// Event kind: block/hack/attack = one-strike ban now (v1 policy)
+        #[arg(long, default_value = "block")]
+        kind: String,
+        /// The request URL/URI that triggered it (audit trail)
+        #[arg(long, default_value = "")]
+        url: String,
+        /// Ban duration in seconds (0 = permanent)
+        #[arg(long, default_value = "86400")]
+        duration: i64,
+    },
+
     /// List active bans
     List {
         /// Output format (table, json, simple)
@@ -251,6 +269,12 @@ pub async fn run_command(cli: Cli) -> Result<()> {
             reason,
         } => cmd_ban(config, ip, duration, reason).await,
         Commands::Unban { ip } => cmd_unban(config, ip).await,
+        Commands::Event {
+            ip,
+            kind,
+            url,
+            duration,
+        } => cmd_event(config, ip, kind, url, duration).await,
         Commands::List { format } => cmd_list(config, format).await,
         Commands::Intel { ip, refresh, json } => cmd_intel(config, ip, refresh, json).await,
         Commands::Whitelist { action } => cmd_whitelist(config, action).await,
@@ -401,6 +425,29 @@ async fn cmd_status(config: Config) -> Result<()> {
     }
 
     println!("{}", "Daemon Status: STOPPED".red().bold());
+    Ok(())
+}
+
+async fn cmd_event(
+    config: Config,
+    ip: IpAddr,
+    kind: String,
+    url: String,
+    duration: i64,
+) -> Result<()> {
+    let crmonban = Crmonban::new(config)?;
+    let duration_opt = if duration == 0 { None } else { Some(duration) };
+    let reason = if url.is_empty() {
+        format!("caddy event [{}]", kind)
+    } else {
+        format!("caddy event [{}] {}", kind, url)
+    };
+    // v1 policy: an event = a one-strike ban (honors observe-only via ban()).
+    // The per-source counting policy ("N events in M seconds -> ban") is the
+    // daemon-side follow-up; see docs/PLAN-CLOUDFLARE-ENFORCEMENT and the
+    // threshold engine.
+    crmonban.ban(ip, reason.clone(), BanSource::Monitor("caddy".into()), duration_opt)?;
+    println!("{} {} ({})", "event -> ban:".green().bold(), ip, reason);
     Ok(())
 }
 
