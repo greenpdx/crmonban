@@ -40,7 +40,7 @@ impl ProtocolParser for DhcpParser {
                 if let Some(s) = pstate.get_inner_mut::<DhcpState>() { s.msg_type = Some(msg_type); }
                 pstate.set_buffer("dhcp.type", vec![msg_type]);
             }
-            if opt == 12 && len > 0 {
+            if opt == 12 && len > 0 && offset + 2 + len <= payload.len() {
                 if let Ok(name) = std::str::from_utf8(&payload[offset + 2..offset + 2 + len]) {
                     pstate.set_buffer("dhcp.hostname", name.as_bytes().to_vec());
                 }

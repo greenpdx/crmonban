@@ -44,7 +44,7 @@ impl ProtocolParser for FtpParser {
             if line.is_empty() { return ParseResult::Incomplete; }
 
             // Response
-            if line.len() >= 3 && line[..3].chars().all(|c| c.is_ascii_digit()) {
+            if line.len() >= 3 && line.is_char_boundary(3) && line[..3].chars().all(|c| c.is_ascii_digit()) {
                 let code: u16 = line[..3].parse().unwrap_or(0);
                 if code == 230 { if let Some(s) = pstate.get_inner_mut::<FtpState>() { s.authenticated = true; } }
                 if code == 530 { if let Some(s) = pstate.get_inner_mut::<FtpState>() { s.auth_failures += 1; } }

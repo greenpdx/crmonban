@@ -77,6 +77,7 @@ impl TlsParser {
 
         if offset + cipher_suites_len > data.len() { return Some(handshake); }
         for i in (0..cipher_suites_len).step_by(2) {
+            if offset + i + 1 >= data.len() { break; }
             let suite = u16::from_be_bytes([data[offset + i], data[offset + i + 1]]);
             if !Self::is_grease(suite) { handshake.cipher_suites.push(suite); }
         }

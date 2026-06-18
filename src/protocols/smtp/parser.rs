@@ -192,27 +192,27 @@ impl SmtpParser {
         // Parse command
         let upper = line.to_uppercase();
         let cmd = if upper.starts_with("EHLO ") {
-            let hostname = line[5..].trim().to_string();
+            let hostname = line.get(5..).unwrap_or("").trim().to_string();
             Some(SmtpCommand::Ehlo(hostname))
         } else if upper.starts_with("HELO ") {
-            let hostname = line[5..].trim().to_string();
+            let hostname = line.get(5..).unwrap_or("").trim().to_string();
             Some(SmtpCommand::Helo(hostname))
         } else if upper.starts_with("AUTH ") {
-            self.parse_auth_command(&line[5..])
+            self.parse_auth_command(line.get(5..).unwrap_or(""))
         } else if upper == "STARTTLS" {
             Some(SmtpCommand::StartTls)
         } else if upper.starts_with("MAIL FROM:") {
-            self.parse_mail_from(&line[10..])
+            self.parse_mail_from(line.get(10..).unwrap_or(""))
         } else if upper.starts_with("RCPT TO:") {
-            self.parse_rcpt_to(&line[8..])
+            self.parse_rcpt_to(line.get(8..).unwrap_or(""))
         } else if upper == "DATA" {
             Some(SmtpCommand::Data)
         } else if upper == "RSET" {
             Some(SmtpCommand::Rset)
         } else if upper.starts_with("VRFY ") {
-            Some(SmtpCommand::Vrfy(line[5..].trim().to_string()))
+            Some(SmtpCommand::Vrfy(line.get(5..).unwrap_or("").trim().to_string()))
         } else if upper.starts_with("EXPN ") {
-            Some(SmtpCommand::Expn(line[5..].trim().to_string()))
+            Some(SmtpCommand::Expn(line.get(5..).unwrap_or("").trim().to_string()))
         } else if upper == "NOOP" {
             Some(SmtpCommand::Noop)
         } else if upper == "QUIT" {
@@ -447,12 +447,15 @@ impl SmtpParser {
         let lower = value.to_lowercase();
 
         // Extract SPF result
+        // `spf_start` indexes into `lower`, whose byte length can differ from `value`
+        // for non-ASCII input; use `.get()` to avoid OOB / non-char-boundary panics.
         if let Some(spf_start) = lower.find("spf=") {
-            let spf_part = &value[spf_start + 4..];
-            if let Some(end) = spf_part.find(|c: char| c.is_whitespace() || c == ';') {
-                headers.spf_result = Some(spf_part[..end].to_string());
-            } else {
-                headers.spf_result = Some(spf_part.to_string());
+            if let Some(spf_part) = value.get(spf_start + 4..) {
+                if let Some(end) = spf_part.find(|c: char| c.is_whitespace() || c == ';') {
+                    headers.spf_result = Some(spf_part[..end].to_string());
+                } else {
+                    headers.spf_result = Some(spf_part.to_string());
+                }
             }
         }
 
@@ -462,12 +465,14 @@ impl SmtpParser {
         }
 
         // Extract DMARC result
+        // `dmarc_start` indexes into `lower`; guard against length mismatch vs `value`.
         if let Some(dmarc_start) = lower.find("dmarc=") {
-            let dmarc_part = &value[dmarc_start + 6..];
-            if let Some(end) = dmarc_part.find(|c: char| c.is_whitespace() || c == ';') {
-                headers.dmarc_result = Some(dmarc_part[..end].to_string());
-            } else {
-                headers.dmarc_result = Some(dmarc_part.to_string());
+            if let Some(dmarc_part) = value.get(dmarc_start + 6..) {
+                if let Some(end) = dmarc_part.find(|c: char| c.is_whitespace() || c == ';') {
+                    headers.dmarc_result = Some(dmarc_part[..end].to_string());
+                } else {
+                    headers.dmarc_result = Some(dmarc_part.to_string());
+                }
             }
         }
     }
@@ -505,13 +510,18 @@ impl SmtpParser {
 
                 for line in part_headers.lines() {
                     let lower = line.to_lowercase();
+                    // `lower`-derived indices may not map cleanly onto `line` for
+                    // non-ASCII input; use `.get()` to avoid OOB / boundary panics.
                     if lower.starts_with("content-type:") {
-                        content_type = Some(line[13..].trim().to_string());
+                        if let Some(v) = line.get(13..) {
+                            content_type = Some(v.trim().to_string());
+                        }
                     } else if lower.starts_with("content-disposition:") {
                         // Look for filename
                         if let Some(fname_start) = lower.find("filename=") {
-                            let fname_part = &line[fname_start + 9..];
-                            filename = self.extract_quoted_value(fname_part);
+                            if let Some(fname_part) = line.get(fname_start + 9..) {
+                                filename = self.extract_quoted_value(fname_part);
+                            }
                         }
                     }
                 }
@@ -542,10 +552,19 @@ impl SmtpParser {
         let lower = content.to_lowercase();
         if let Some(ct_start) = lower.find("content-type:") {
             let ct_line_end = lower[ct_start..].find('\n').unwrap_or(lower.len() - ct_start);
-            let ct_value = &content[ct_start..ct_start + ct_line_end];
+            // `ct_start`/`ct_line_end` are indices into `lower`, whose byte length can
+            // differ from `content` for non-ASCII input; use `.get()` to avoid OOB /
+            // non-char-boundary panics on adversarial content.
+            let ct_value = match content.get(ct_start..ct_start + ct_line_end) {
+                Some(v) => v,
+                None => return None,
+            };
 
             if let Some(boundary_start) = ct_value.to_lowercase().find("boundary=") {
-                let boundary_part = &ct_value[ct_start + boundary_start + 9 - ct_start..];
+                let boundary_part = match ct_value.get(boundary_start + 9..) {
+                    Some(v) => v,
+                    None => return None,
+                };
                 return self.extract_quoted_value(boundary_part);
             }
         }
@@ -574,14 +593,14 @@ impl SmtpParser {
         let line = std::str::from_utf8(payload).ok()?;
 
         // Response format: code[ -]text
-        if line.len() < 3 {
+        if line.len() < 3 || !line.is_char_boundary(3) {
             return None;
         }
 
         let code: u16 = line[..3].parse().ok()?;
         let is_multiline = line.len() > 3 && line.as_bytes()[3] == b'-';
 
-        let message = if line.len() > 4 {
+        let message = if line.len() > 4 && line.is_char_boundary(4) {
             line[4..].trim().to_string()
         } else {
             String::new()

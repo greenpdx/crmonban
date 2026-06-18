@@ -32,7 +32,10 @@ impl DceRpcMatcher {
             match opt {
                 RuleOption::Raw { keyword, value } if keyword == "dcerpc.iface" || keyword == "dce_iface" => {
                     let iface = state.get_buffer("dcerpc.iface")?;
-                    if let Some(p) = value { if !iface.windows(p.len()).any(|w| w == p.as_bytes()) { return None; } }
+                    if let Some(p) = value {
+                        if !p.is_empty() && iface.len() < p.len() { return None; }
+                        if !p.is_empty() && !iface.windows(p.len()).any(|w| w == p.as_bytes()) { return None; }
+                    }
                 }
                 RuleOption::Content(cm) => { if !self.check_content(state, cm) { return None; } }
                 _ => {}
@@ -42,9 +45,11 @@ impl DceRpcMatcher {
     }
 
     fn check_content(&self, state: &ProtocolState, cm: &ContentMatch) -> bool {
+        if cm.pattern.is_empty() { return !cm.negated; }
         for buf in ["dcerpc.iface", "dcerpc.stub_data"] {
             if let Some(data) = state.get_buffer(buf) {
-                if data.windows(cm.pattern.len()).any(|w| w == cm.pattern.as_slice()) { return !cm.negated; }
+                if data.len() >= cm.pattern.len()
+                    && data.windows(cm.pattern.len()).any(|w| w == cm.pattern.as_slice()) { return !cm.negated; }
             }
         }
         cm.negated

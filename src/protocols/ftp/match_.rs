@@ -27,7 +27,10 @@ impl FtpMatcher {
             if let RuleOption::Raw { keyword, value } = opt {
                 if keyword == "ftp.command" {
                     let cmd = state.get_buffer("ftp.command")?;
-                    if let Some(p) = value { if !cmd.windows(p.len()).any(|w| w.eq_ignore_ascii_case(p.as_bytes())) { return None; } }
+                    if let Some(p) = value {
+                        if !p.is_empty() && cmd.len() < p.len() { return None; }
+                        if !p.is_empty() && !cmd.windows(p.len()).any(|w| w.eq_ignore_ascii_case(p.as_bytes())) { return None; }
+                    }
                 }
             }
         }

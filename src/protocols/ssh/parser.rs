@@ -172,7 +172,13 @@ impl SshParser {
         let payload_offset = 5;
         let payload_length = packet_length.saturating_sub(padding_length).saturating_sub(1);
 
-        if payload.len() < payload_offset + payload_length {
+        // payload_length counts the message-type byte, so it must be >= 1, and the
+        // buffer must actually contain the whole payload. A crafted or truncated
+        // SSH packet (constant on port-22 scans) can drive payload_length to 0 —
+        // then `payload[payload_offset]` is out of bounds and the slice below
+        // becomes `[6..5]` (start > end), both of which PANIC. Guard before
+        // indexing.
+        if payload_length == 0 || payload.len() < payload_offset + payload_length {
             return None;
         }
 
