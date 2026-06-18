@@ -1449,6 +1449,7 @@ async fn start_packet_engine(
         },
         worker: WorkerConfig {
             rules_dir: config.rules_dir.clone().map(std::path::PathBuf::from),
+            ssl_log: config.ssl_log.clone().map(std::path::PathBuf::from),
             ..Default::default()
         },
         action: Default::default(),

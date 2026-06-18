@@ -1646,6 +1646,10 @@ pub struct PacketEngineConfig {
     pub signatures_enabled: bool,
     /// Path to rules directory
     pub rules_dir: Option<String>,
+    /// Path to the SSL/TLS connection log (one JSON record per TLS ClientHello:
+    /// src/dst IP, SNI, JA3, cipher/version — no decryption). None = disabled.
+    #[serde(default)]
+    pub ssl_log: Option<String>,
     /// Enable flow tracking
     pub flow_tracking: bool,
     /// Enable ML anomaly detection
@@ -1672,6 +1676,7 @@ impl Default for PacketEngineConfig {
             workers: 0,
             signatures_enabled: true,
             rules_dir: Some("/var/lib/crmonban/data/rules".to_string()),
+            ssl_log: None,
             flow_tracking: true,
             ml_detection: false,
             threat_intel: false,

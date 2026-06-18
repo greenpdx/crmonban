@@ -34,7 +34,7 @@ use crate::ml::{MLEngine, MLConfig, AnomalyCategory};
 use crate::ml::baseline::Baseline;
 use crate::ml::features::FeatureExtractor;
 use parking_lot::RwLock;
-use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent};
+use crate::protocols::{ProtocolDetector, ProtocolConfig, ProtocolEvent, TlsEvent};
 use crate::signatures::SignatureEngine;
 use crate::signatures::matcher::{ProtocolContext, HttpContext, FlowState};
 use crate::wasm::{WasmEngine, StageContext};
@@ -61,6 +61,10 @@ pub struct WorkerConfig {
     /// Rules directory for signature matching
     #[serde(default)]
     pub rules_dir: Option<std::path::PathBuf>,
+    /// Path to the SSL/TLS connection log (one JSON record per ClientHello:
+    /// src/dst IP, SNI, JA3, cipher/version — no decryption). None = disabled.
+    #[serde(default)]
+    pub ssl_log: Option<std::path::PathBuf>,
 }
 
 impl Default for WorkerConfig {
@@ -70,6 +74,7 @@ impl Default for WorkerConfig {
             queue_depth: 1000,
             cpu_affinity: false,
             rules_dir: Some("/var/lib/crmonban/data/rules".into()),
+            ssl_log: None,
         }
     }
 }
@@ -234,6 +239,36 @@ fn build_sig_http_context(payload: &[u8]) -> ProtocolContext {
         host: header_value(headers, b"host:"),
         user_agent: header_value(headers, b"user-agent:"),
     })
+}
+
+/// Append one SSL/TLS connection record (a JSON line) to the ssl log. This is the
+/// cleartext handshake fingerprint only — NO decryption, no URL/body. One record
+/// per ClientHello (i.e. per connection). Best-effort: a write error is ignored so
+/// recording never affects packet processing. dst_ip distinguishes a local web
+/// server from one on another host; the record shape is identical for both.
+fn record_ssl_connection(
+    path: &std::path::Path,
+    packet: &Packet,
+    sni: Option<&str>,
+    ja3: &str,
+    versions: &[u16],
+    cipher_suites: &[u16],
+) {
+    let rec = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "src_ip": packet.src_ip().to_string(),
+        "dst_ip": packet.dst_ip().to_string(),
+        "dst_port": packet.dst_port(),
+        "sni": sni,
+        "ja3": ja3,
+        "tls_versions": versions,
+        "cipher_suites": cipher_suites,
+    })
+    .to_string();
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{}", rec);
+    }
 }
 
 fn trim_cr(line: &[u8]) -> &[u8] {
@@ -993,8 +1028,28 @@ impl WorkerThread {
                                     }
                                 }
                             }
-                            ProtocolEvent::Tls(tls_event) => {
-                                debug!("TLS event: {:?}", tls_event);
+                            ProtocolEvent::Tls(TlsEvent::ClientHello {
+                                sni,
+                                ja3,
+                                versions,
+                                cipher_suites,
+                            }) => {
+                                // SSL/IP connection recorder: log the cleartext TLS
+                                // handshake fingerprint (src/dst IP, SNI, JA3, version,
+                                // ciphers) with NO decryption (no URL/body). The dst IP
+                                // is the only thing that differs between a web server on
+                                // THIS host and one on another host — the record is the
+                                // same either way, and dst_ip tells you which server.
+                                if let Some(path) = self.config.ssl_log.as_ref() {
+                                    record_ssl_connection(
+                                        path,
+                                        &analysis.packet,
+                                        sni.as_deref(),
+                                        &ja3.hash,
+                                        versions,
+                                        cipher_suites,
+                                    );
+                                }
                             }
                             _ => {}
                         }
