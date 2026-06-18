@@ -263,6 +263,11 @@ fn record_ssl_connection(
         "ja3": ja3,
         "tls_versions": versions,
         "cipher_suites": cipher_suites,
+        // NFQUEUE stream origin (null for passive af_packet): which hook/queue and
+        // the per-chain mark — so multiplexed streams are distinguishable.
+        "nf_hook": packet.nf_hook(),
+        "queue": packet.queue_num(),
+        "nfmark": packet.nfmark(),
     })
     .to_string();
     use std::io::Write;

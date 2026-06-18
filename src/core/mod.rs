@@ -16,7 +16,7 @@ pub use crate::types::{
     Ipv4Info, Ipv6Info,
     TcpInfo, UdpInfo, IcmpInfo, Icmpv6Info,
     // Packet
-    Packet, TcpFlags, IpProtocol, Direction, TlsInfo,
+    Packet, NfqMeta, TcpFlags, IpProtocol, Direction, TlsInfo,
     // Flow
     Flow, FlowState, FlowKey, FlowStats, StreamingStats,
     // Event

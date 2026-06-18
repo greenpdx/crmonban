@@ -31,7 +31,7 @@ pub mod protocols;
 pub mod pipeline;
 
 // Re-export all public types at crate root
-pub use packet::{Packet, IpProtocol, TcpFlags, TlsInfo, Direction};
+pub use packet::{Packet, NfqMeta, IpProtocol, TcpFlags, TlsInfo, Direction};
 pub use layers::{
     Layer3, Layer4, EthernetInfo,
     Ipv4Info, Ipv6Info,

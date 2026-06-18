@@ -201,11 +201,24 @@ impl PacketCapture for NfqueueCapture {
 
         let packet_id = msg.get_packet_id() as u64;
 
+        // Capture the kernel's stream metadata before parking the message: which
+        // queue/hook/mark/interface delivered this packet. This is what lets the
+        // engine tell apart streams multiplexed onto one queue (e.g. input vs
+        // forward, or a per-chain `meta mark`).
+        let nfq_meta = crate::core::NfqMeta {
+            queue_num: msg.get_queue_num(),
+            hook: msg.get_hook(),
+            mark: msg.get_nfmark(),
+            indev: msg.get_indev(),
+            outdev: msg.get_outdev(),
+        };
+
         // NFQUEUE delivers IP-layer payloads (no Ethernet header), so parse from IP.
         let parsed = parse_ip_packet(msg.get_payload(), packet_id, String::new());
 
         match parsed {
-            Some(packet) => {
+            Some(mut packet) => {
+                packet.nfq = Some(nfq_meta);
                 // Park the message until the engine issues a verdict for this id.
                 self.pending.insert(packet_id, msg);
                 Ok(Some(packet))

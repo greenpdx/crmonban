@@ -175,6 +175,7 @@ fn parse_sliced_packet(
         direction: Direction::Unknown,
         interface: String::new(),
         raw_len: raw_len as u32,
+        nfq: None,
     })
 }
 

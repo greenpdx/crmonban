@@ -223,6 +223,28 @@ pub struct Packet {
     pub interface: String,
     /// Raw packet length (including headers)
     pub raw_len: u32,
+    /// NFQUEUE metadata (which queue/hook/mark/interface delivered the packet) —
+    /// lets the engine tell apart streams multiplexed onto one queue. None for
+    /// passive captures (af_packet/pcap).
+    pub nfq: Option<NfqMeta>,
+}
+
+/// Kernel metadata attached when a packet arrives via NFQUEUE. Use it to separate
+/// streams that share one queue: `hook` (1=input, 2=forward, …), `mark` (a
+/// per-chain tag the ruleset sets before `queue`), `queue_num`, and the in/out
+/// interface indices.
+#[derive(Debug, Clone, Default)]
+pub struct NfqMeta {
+    /// NFQUEUE number the packet was delivered on.
+    pub queue_num: u16,
+    /// Netfilter hook: 0=prerouting, 1=input, 2=forward, 3=output, 4=postrouting.
+    pub hook: u8,
+    /// nft packet mark (a stream tag the ruleset can set before `queue`).
+    pub mark: u32,
+    /// Input interface index (0 if none).
+    pub indev: u32,
+    /// Output interface index (0 if none).
+    pub outdev: u32,
 }
 
 impl Packet {
@@ -241,6 +263,7 @@ impl Packet {
             direction: Direction::Unknown,
             interface,
             raw_len: 0,
+            nfq: None,
         }
     }
 
@@ -266,6 +289,7 @@ impl Packet {
             direction: Direction::Unknown,
             interface: interface.to_string(),
             raw_len: data.len() as u32,
+            nfq: None,
         })
     }
 
@@ -400,7 +424,25 @@ impl Packet {
             direction: Direction::Unknown,
             interface: interface.to_string(),
             raw_len: 0,
+            nfq: None,
         }
+    }
+
+    // =========================================================================
+    // NFQUEUE stream metadata (None for passive captures)
+    // =========================================================================
+
+    /// nft packet mark (a per-chain stream tag), or 0 if not from NFQUEUE.
+    pub fn nfmark(&self) -> u32 {
+        self.nfq.as_ref().map(|m| m.mark).unwrap_or(0)
+    }
+    /// NFQUEUE number the packet was delivered on, if any.
+    pub fn queue_num(&self) -> Option<u16> {
+        self.nfq.as_ref().map(|m| m.queue_num)
+    }
+    /// Netfilter hook the packet was queued from (1=input, 2=forward, …), if any.
+    pub fn nf_hook(&self) -> Option<u8> {
+        self.nfq.as_ref().map(|m| m.hook)
     }
 
     // =========================================================================
@@ -660,6 +702,7 @@ impl Default for Packet {
             direction: Direction::Unknown,
             interface: String::new(),
             raw_len: 0,
+            nfq: None,
         }
     }
 }
