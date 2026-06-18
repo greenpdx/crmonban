@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
@@ -358,28 +357,12 @@ pub async fn start_monitoring(
         return Ok(());
     }
 
-    // Create file watcher
-    let (watcher_tx, mut watcher_rx) = mpsc::channel::<Result<Event, notify::Error>>(100);
-
-    let mut watcher = RecommendedWatcher::new(
-        move |res| {
-            let _ = watcher_tx.blocking_send(res);
-        },
-        Config::default(),
-    )?;
-
-    // Watch parent directories of log files
-    let mut watched_dirs = std::collections::HashSet::new();
-    for path in &paths {
-        if let Some(parent) = path.parent() {
-            if watched_dirs.insert(parent.to_path_buf()) {
-                if parent.exists() {
-                    watcher.watch(parent, RecursiveMode::NonRecursive)?;
-                    info!("Watching directory: {}", parent.display());
-                }
-            }
-        }
-    }
+    // NOTE: we deliberately do NOT use an inotify watcher. Watching a busy directory
+    // like /var/log (churned constantly by journald/rsyslog) delivers tens of thousands
+    // of events per second — it burns a CPU core, and under a tight tokio worker budget
+    // (e.g. a cgroup CPUQuota that drops available_parallelism to 1 worker) the flood
+    // saturates the runtime and starves the event loop, so NO detection happens at all.
+    // A fixed-schedule poll is simpler, costs nothing when idle, and is plenty responsive.
 
     // Also do an initial poll
     for event in manager.poll() {
@@ -388,50 +371,16 @@ pub async fn start_monitoring(
 
     info!("Log monitoring started for {} services", manager.monitors.len());
 
-    // Guaranteed periodic poll. MUST be a fixed-schedule interval, not a per-loop
-    // `sleep(..)`: when a monitored file lives in a busy directory (e.g. /var/log,
-    // constantly churned by journald/rsyslog), the inotify branch fires many times a
-    // second, and a freshly-created `sleep` future would be cancelled and restarted on
-    // every iteration — so it would never elapse and the fallback poll would never run.
-    // An `interval` ticks on its own schedule regardless of how often the loop spins,
-    // bounding detection latency even if the watcher is overwhelmed or stops delivering.
+    // Fixed-schedule poll: tick every 2s and read whatever is new in each log.
     let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
     poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    poll_interval.tick().await; // consume the immediate first tick
 
     // Main monitoring loop
     loop {
-        tokio::select! {
-            Some(res) = watcher_rx.recv() => {
-                match res {
-                    Ok(event) => {
-                        // Check if any of our monitored files changed
-                        let dominated = event.paths.iter().any(|p| {
-                            paths.iter().any(|mp| p.ends_with(mp.file_name().unwrap_or_default()))
-                        });
-
-                        if dominated {
-                            for monitor_event in manager.poll() {
-                                if event_tx.send(monitor_event).await.is_err() {
-                                    return Ok(());
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("File watcher error: {}", e);
-                    }
-                }
-            }
-
-            // Guaranteed periodic poll (fires on schedule even if the watcher is
-            // overwhelmed by a busy directory or stops delivering events entirely).
-            _ = poll_interval.tick() => {
-                for monitor_event in manager.poll() {
-                    if event_tx.send(monitor_event).await.is_err() {
-                        return Ok(());
-                    }
-                }
+        poll_interval.tick().await;
+        for monitor_event in manager.poll() {
+            if event_tx.send(monitor_event).await.is_err() {
+                return Ok(());
             }
         }
     }
