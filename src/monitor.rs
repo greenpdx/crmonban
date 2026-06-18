@@ -388,6 +388,17 @@ pub async fn start_monitoring(
 
     info!("Log monitoring started for {} services", manager.monitors.len());
 
+    // Guaranteed periodic poll. MUST be a fixed-schedule interval, not a per-loop
+    // `sleep(..)`: when a monitored file lives in a busy directory (e.g. /var/log,
+    // constantly churned by journald/rsyslog), the inotify branch fires many times a
+    // second, and a freshly-created `sleep` future would be cancelled and restarted on
+    // every iteration — so it would never elapse and the fallback poll would never run.
+    // An `interval` ticks on its own schedule regardless of how often the loop spins,
+    // bounding detection latency even if the watcher is overwhelmed or stops delivering.
+    let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+    poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    poll_interval.tick().await; // consume the immediate first tick
+
     // Main monitoring loop
     loop {
         tokio::select! {
@@ -413,8 +424,9 @@ pub async fn start_monitoring(
                 }
             }
 
-            // Also poll periodically in case we miss file events
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+            // Guaranteed periodic poll (fires on schedule even if the watcher is
+            // overwhelmed by a busy directory or stops delivering events entirely).
+            _ = poll_interval.tick() => {
                 for monitor_event in manager.poll() {
                     if event_tx.send(monitor_event).await.is_err() {
                         return Ok(());
