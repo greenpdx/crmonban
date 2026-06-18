@@ -497,11 +497,12 @@ async fn cmd_cloudflare(config: Config, action: CloudflareAction) -> Result<()> 
             let cf = config.cloudflare.clone();
             let crmonban = Crmonban::new(config)?;
             let active: Vec<IpAddr> = crmonban.list_bans()?.iter().map(|b| b.ip).collect();
-            println!(
-                "Reconciling {} active ban(s) -> Cloudflare list '{}'...",
-                active.len(),
-                cf.list_name
-            );
+            let target = if cf.mode == "access_rules" {
+                "Cloudflare zone access-rules".to_string()
+            } else {
+                format!("Cloudflare list '{}'", cf.list_name)
+            };
+            println!("Reconciling {} active ban(s) -> {}...", active.len(), target);
             match crmonban::cloudflare_api::reconcile_once(&cf, &active).await? {
                 Some(r) => println!(
                     "{} list {} now {} IP(s)  (+{} -{})",

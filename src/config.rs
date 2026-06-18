@@ -99,6 +99,17 @@ pub struct CloudflareConfig {
     #[serde(default)]
     pub account_id: String,
 
+    /// Enforcement mode: "list" (account IP List + WAF rule — needs Account Filter
+    /// Lists perm) or "access_rules" (per-zone IP Access Rules — needs zone Firewall
+    /// Services perm). Access-rules is simpler and needs no WAF rule.
+    #[serde(default = "default_cf_mode")]
+    pub mode: String,
+
+    /// access_rules mode only: zone IDs to apply blocks to. Empty = every zone the
+    /// token can manage.
+    #[serde(default)]
+    pub zones: Vec<String>,
+
     /// Existing list ID. If empty, the list is created/looked-up by name on first run
     /// (the resolved ID is logged so you can pin it here).
     #[serde(default)]
@@ -117,6 +128,10 @@ fn default_cf_list_name() -> String {
     "crmonban_blocklist".to_string()
 }
 
+fn default_cf_mode() -> String {
+    "list".to_string()
+}
+
 fn default_cf_reconcile_secs() -> u64 {
     60
 }
@@ -128,6 +143,8 @@ impl Default for CloudflareConfig {
             api_token_file: String::new(),
             api_token: String::new(),
             account_id: String::new(),
+            mode: default_cf_mode(),
+            zones: Vec::new(),
             list_id: String::new(),
             list_name: default_cf_list_name(),
             reconcile_interval_secs: default_cf_reconcile_secs(),

@@ -81,6 +81,27 @@ struct ListItem {
     ip: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct Zone {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct AccessRule {
+    id: String,
+    configuration: AccessRuleConfig,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AccessRuleConfig {
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    value: String,
+}
+
 /// What one reconcile pass did.
 #[derive(Debug, Default)]
 pub struct ReconcileReport {
@@ -300,6 +321,168 @@ impl CloudflareApi {
         }
         Ok(report)
     }
+
+    // ---- Zone-level IP Access Rules mode (needs zone Firewall Services perm) ----
+
+    /// Zone IDs the token can manage.
+    pub async fn list_zone_ids(&self) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        let mut page = 1u32;
+        loop {
+            let url = format!("{}/zones?per_page=50&page={}", API_BASE, page);
+            let env: Envelope<Vec<Zone>> = self
+                .client
+                .get(&url)
+                .bearer_auth(&self.token)
+                .send()
+                .await?
+                .json()
+                .await
+                .context("parse zones")?;
+            if !env.success {
+                return Err(anyhow!("CF zones failed: {}", Self::err_str(&env.errors)));
+            }
+            let batch = env.result.unwrap_or_default();
+            let n = batch.len();
+            out.extend(batch.into_iter().map(|z| z.id));
+            if n < 50 || page > 50 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
+    /// Our managed block rules in a zone (notes contain "crmonban"): ip -> rule_id.
+    async fn zone_block_rules(&self, zone_id: &str) -> Result<HashMap<String, String>> {
+        let mut out = HashMap::new();
+        let mut page = 1u32;
+        loop {
+            let url = format!(
+                "{}/zones/{}/firewall/access_rules/rules?per_page=100&page={}&mode=block",
+                API_BASE, zone_id, page
+            );
+            let env: Envelope<Vec<AccessRule>> = self
+                .client
+                .get(&url)
+                .bearer_auth(&self.token)
+                .send()
+                .await?
+                .json()
+                .await
+                .context("parse access rules")?;
+            if !env.success {
+                return Err(anyhow!(
+                    "CF access-rules list failed: {}",
+                    Self::err_str(&env.errors)
+                ));
+            }
+            let batch = env.result.unwrap_or_default();
+            let n = batch.len();
+            for r in batch {
+                let ours = r
+                    .notes
+                    .as_deref()
+                    .map(|s| s.contains("crmonban"))
+                    .unwrap_or(false);
+                if ours && r.configuration.target == "ip" {
+                    out.insert(r.configuration.value, r.id);
+                }
+            }
+            if n < 100 || page > 100 {
+                break;
+            }
+            page += 1;
+        }
+        Ok(out)
+    }
+
+    async fn add_zone_block(&self, zone_id: &str, ip: IpAddr) -> Result<()> {
+        let body = serde_json::json!({
+            "mode": "block",
+            "configuration": { "target": "ip", "value": ip.to_string() },
+            "notes": "crmonban"
+        });
+        let url = format!(
+            "{}/zones/{}/firewall/access_rules/rules",
+            API_BASE, zone_id
+        );
+        let env: Envelope<serde_json::Value> = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await?
+            .json()
+            .await
+            .context("parse add access rule")?;
+        if !env.success {
+            let msg = Self::err_str(&env.errors);
+            // a rule for this IP already existing is fine (idempotent)
+            if msg.contains("already") || msg.contains("duplicate") || msg.contains("identical") {
+                return Ok(());
+            }
+            return Err(anyhow!("CF add access-rule failed: {}", msg));
+        }
+        Ok(())
+    }
+
+    async fn remove_zone_rule(&self, zone_id: &str, rule_id: &str) -> Result<()> {
+        let url = format!(
+            "{}/zones/{}/firewall/access_rules/rules/{}",
+            API_BASE, zone_id, rule_id
+        );
+        let env: Envelope<serde_json::Value> = self
+            .client
+            .delete(&url)
+            .bearer_auth(&self.token)
+            .send()
+            .await?
+            .json()
+            .await
+            .context("parse delete access rule")?;
+        if !env.success {
+            return Err(anyhow!(
+                "CF delete access-rule failed: {}",
+                Self::err_str(&env.errors)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Make each zone's crmonban-managed block rules equal `active`. Zones empty =
+    /// every zone the token can manage.
+    pub async fn reconcile_access_rules(
+        &self,
+        zones: &[String],
+        active: &[IpAddr],
+    ) -> Result<ReconcileReport> {
+        let zone_ids = if zones.is_empty() {
+            self.list_zone_ids().await?
+        } else {
+            zones.to_vec()
+        };
+        let active_set: std::collections::HashSet<String> =
+            active.iter().map(|ip| ip.to_string()).collect();
+        let mut report = ReconcileReport {
+            list_id: format!("{} zone(s)", zone_ids.len()),
+            ..Default::default()
+        };
+        for zid in &zone_ids {
+            let existing = self.zone_block_rules(zid).await?;
+            report.edge_total += existing.len();
+            for ip in active.iter().filter(|ip| !existing.contains_key(&ip.to_string())) {
+                self.add_zone_block(zid, *ip).await?;
+                report.added += 1;
+            }
+            for (_, rid) in existing.iter().filter(|(ip, _)| !active_set.contains(*ip)) {
+                self.remove_zone_rule(zid, rid).await?;
+                report.removed += 1;
+            }
+        }
+        Ok(report)
+    }
 }
 
 /// Run a single reconcile pass from config + the active-ban IP list. Returns Ok(None)
@@ -311,14 +494,16 @@ pub async fn reconcile_once(
     if !cfg.enabled {
         return Ok(None);
     }
-    if cfg.account_id.is_empty() {
-        return Err(anyhow!("cloudflare.enabled but account_id is empty"));
+    if cfg.mode != "access_rules" && cfg.account_id.is_empty() {
+        return Err(anyhow!("cloudflare.enabled (list mode) but account_id is empty"));
     }
     let token = load_token(cfg)?;
     let api = CloudflareApi::new(token, cfg.account_id.clone());
-    let report = api
-        .reconcile(&cfg.list_id, &cfg.list_name, active)
-        .await?;
+    let report = if cfg.mode == "access_rules" {
+        api.reconcile_access_rules(&cfg.zones, active).await?
+    } else {
+        api.reconcile(&cfg.list_id, &cfg.list_name, active).await?
+    };
     if report.added > 0 || report.removed > 0 {
         info!(
             "cloudflare reconcile: list {} now {} IPs (+{} -{})",
