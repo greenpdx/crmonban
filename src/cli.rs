@@ -428,6 +428,7 @@ async fn cmd_status(config: Config) -> Result<()> {
         .map(|(name, _)| name.clone())
         .collect();
     monitors.sort();
+    let cf = config.cloudflare.clone();
 
     // Is the daemon process alive?
     let running = daemon_is_running(&config);
@@ -436,7 +437,14 @@ async fn cmd_status(config: Config) -> Result<()> {
     let bans = crmonban.list_bans().unwrap_or_default();
     let whitelist = crmonban.whitelist_list().map(|w| w.len()).unwrap_or(0);
 
+    // Live edge state (network query; only when enabled)
+    let cf_status = crmonban::cloudflare_api::edge_status(&cf).await;
+
     println!("{}", "crmonban status".bold());
+    println!(
+        "  Time:      {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    );
     println!(
         "  Daemon:    {}",
         if running {
@@ -464,19 +472,40 @@ async fn cmd_status(config: Config) -> Result<()> {
         }
     );
     println!("  Whitelist: {} IP(s)", whitelist);
+
+    // Cloudflare edge plane
+    let cf_line = if !cf.enabled {
+        "off".to_string()
+    } else {
+        match &cf_status {
+            Ok(Some((ips, zones))) => format!(
+                "{} ({}) — {} IP(s) at edge across {} zone(s)",
+                "ENFORCING".green(),
+                cf.mode,
+                ips,
+                zones
+            ),
+            Ok(None) => format!("enabled ({})", cf.mode),
+            Err(e) => format!("enabled ({}) — edge query failed: {}", cf.mode, e),
+        }
+    };
+    println!("  Cloudflare: {}", cf_line);
+
     println!(
-        "  Blocked:   {}",
+        "  Blocked:   {}  (nft @blocked, drops direct hits)",
         format!("{} IP(s)", bans.len()).bold()
     );
     for ban in &bans {
+        let banned = ban.created_at.format("%m-%d %H:%M").to_string();
         let expires = ban
             .expires_at
-            .map(|e| e.format("%Y-%m-%d %H:%M UTC").to_string())
+            .map(|e| e.format("%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "never".to_string());
         println!(
-            "    {:<18} {:<10} {}  ({})",
+            "    {:<18} {:<10} banned {} -> exp {}  ({})",
             ban.ip.to_string(),
             ban.source.to_string(),
+            banned,
             expires,
             ban.reason
         );

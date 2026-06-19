@@ -485,6 +485,33 @@ impl CloudflareApi {
     }
 }
 
+/// Read-only edge state for `status`: (IPs blocked at the edge, zones covered).
+/// For access_rules it counts a representative zone (the reconciler keeps every zone
+/// equal); for list mode it counts the list. Returns Ok(None) when disabled.
+pub async fn edge_status(cfg: &CloudflareConfig) -> Result<Option<(usize, usize)>> {
+    if !cfg.enabled {
+        return Ok(None);
+    }
+    let token = load_token(cfg)?;
+    let api = CloudflareApi::new(token, cfg.account_id.clone());
+    if cfg.mode == "access_rules" {
+        let zones = if cfg.zones.is_empty() {
+            api.list_zone_ids().await?
+        } else {
+            cfg.zones.clone()
+        };
+        let ips = match zones.first() {
+            Some(z) => api.zone_block_rules(z).await?.len(),
+            None => 0,
+        };
+        Ok(Some((ips, zones.len())))
+    } else {
+        let list_id = api.ensure_list(&cfg.list_id, &cfg.list_name).await?;
+        let ips = api.list_items(&list_id).await?.len();
+        Ok(Some((ips, 1)))
+    }
+}
+
 /// Run a single reconcile pass from config + the active-ban IP list. Returns Ok(None)
 /// when Cloudflare enforcement is disabled (so callers can no-op cleanly).
 pub async fn reconcile_once(
