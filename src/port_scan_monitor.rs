@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs::File;
@@ -110,11 +109,14 @@ impl PortScanMonitor {
     /// Create a new port scan monitor
     pub fn new(config: PortScanConfig) -> Result<Self> {
         let patterns = PortScanPatterns::new()?;
+        let log_path = PathBuf::from(&config.log_path);
+        // Start at end-of-file so a restart doesn't re-count historical scan log lines.
+        let file_position = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
 
         Ok(Self {
-            log_path: PathBuf::from(&config.log_path),
+            log_path,
             config,
-            file_position: 0,
+            file_position,
             ip_port_access: HashMap::new(),
             patterns,
         })
@@ -324,23 +326,10 @@ pub async fn start_port_scan_monitoring(
         );
     }
 
-    // Create file watcher
-    let (watcher_tx, mut watcher_rx) = mpsc::channel::<Result<Event, notify::Error>>(100);
-
-    let mut watcher = RecommendedWatcher::new(
-        move |res| {
-            let _ = watcher_tx.blocking_send(res);
-        },
-        Config::default(),
-    )?;
-
-    // Watch the parent directory
-    if let Some(parent) = log_path.parent() {
-        if parent.exists() {
-            watcher.watch(parent, RecursiveMode::NonRecursive)?;
-            info!("Watching directory for port scan logs: {}", parent.display());
-        }
-    }
+    // Poll-only (no inotify watcher): kern.log lives in the busy /var/log dir, where
+    // an inotify watcher delivers tens of thousands of events/sec and — under a tight
+    // tokio worker budget — starves the event loop. A fixed 2s poll is cheap and
+    // sufficient. (Same fix as the main log monitor.)
 
     // Initial poll
     for event in monitor.process_new_lines()? {
@@ -352,51 +341,22 @@ pub async fn start_port_scan_monitoring(
         config.threshold, config.window_secs
     );
 
+    let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
+    poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     // Main monitoring loop
     loop {
-        tokio::select! {
-            Some(res) = watcher_rx.recv() => {
-                match res {
-                    Ok(event) => {
-                        let dominated = event.paths.iter().any(|p| {
-                            p.ends_with(log_path.file_name().unwrap_or_default())
-                        });
-
-                        if dominated {
-                            match monitor.process_new_lines() {
-                                Ok(events) => {
-                                    for event in events {
-                                        if event_tx.send(event).await.is_err() {
-                                            return Ok(());
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Error processing port scan log: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Port scan file watcher error: {}", e);
+        poll_interval.tick().await;
+        match monitor.process_new_lines() {
+            Ok(events) => {
+                for event in events {
+                    if event_tx.send(event).await.is_err() {
+                        return Ok(());
                     }
                 }
             }
-
-            // Poll periodically
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(2)) => {
-                match monitor.process_new_lines() {
-                    Ok(events) => {
-                        for event in events {
-                            if event_tx.send(event).await.is_err() {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Error processing port scan log: {}", e);
-                    }
-                }
+            Err(e) => {
+                error!("Error processing port scan log: {}", e);
             }
         }
     }

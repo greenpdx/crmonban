@@ -7,7 +7,7 @@ use nftables::{
         Chain, Element, FlushObject, NfCmd, NfListObject, NfObject, Rule, Set, SetFlag,
         SetType, SetTypeValue, Table,
     },
-    stmt::{Counter, Log, LogLevel, Match, Operator, Queue, QueueFlag, Statement},
+    stmt::{Counter, Limit, Log, LogLevel, Match, Operator, Queue, QueueFlag, Statement},
     types::{NfChainPolicy, NfChainType, NfFamily, NfHook},
 };
 use std::borrow::Cow;
@@ -1097,32 +1097,12 @@ impl Firewall {
             policy: Some(NfChainPolicy::Accept),
         }));
 
-        // TCP SYN scan detection (new connections only)
-        if config.detect_syn_scan {
-            self.add_syn_scan_rule(batch, config);
-        }
-
-        // TCP NULL scan detection (no flags set)
-        if config.detect_null_scan {
-            self.add_null_scan_rule(batch);
-        }
-
-        // TCP XMAS scan detection (FIN+PSH+URG)
-        if config.detect_xmas_scan {
-            self.add_xmas_scan_rule(batch);
-        }
-
-        // TCP FIN scan detection (only FIN flag)
-        if config.detect_fin_scan {
-            self.add_fin_scan_rule(batch);
-        }
-
-        // UDP scan detection
-        if config.detect_udp_scan {
-            self.add_udp_scan_rule(batch, config);
-        }
-
-        // Generic TCP connection logging for port tracking
+        // NOTE: the per-flag rules (SYN/NULL/XMAS/FIN/UDP) were removed. As written
+        // they matched only `meta l4proto tcp|udp` with NO flag/state filter, so each
+        // logged EVERY packet — a kern.log/disk flood (the original crmonban incident).
+        // Scan detection works off the single rate-limited new-connection rule below:
+        // it logs each new connection's dest port, and the monitor bans an IP that
+        // touches more than `threshold` distinct ports within the window.
         self.add_generic_port_log_rule(batch, config);
 
         info!("Port scan detection rules added");
@@ -1289,6 +1269,18 @@ impl Firewall {
                     })),
                     right: Expression::String(Cow::Borrowed("new")),
                     op: Operator::EQ,
+                }),
+                // Hard rate cap BEFORE the log: this rule can never write more than
+                // ~50 lines/sec to kern.log regardless of traffic, so it cannot fill
+                // the disk. A real scanner trips the per-IP port threshold long before
+                // this cap matters; legit traffic stays far under it.
+                Statement::Limit(Limit {
+                    rate: 50,
+                    rate_unit: None,
+                    per: Some(Cow::Borrowed("second")),
+                    burst: Some(100),
+                    burst_unit: None,
+                    inv: None,
                 }),
                 Statement::Log(Some(Log {
                     prefix: Some(Cow::Borrowed("[crmonban-portscan] ")),
