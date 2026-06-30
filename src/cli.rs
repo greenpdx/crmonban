@@ -224,6 +224,8 @@ pub enum WhitelistAction {
 pub enum CloudflareAction {
     /// Run one reconcile pass now: active bans -> the CF IP list
     Sync,
+    /// List the IPs currently blocked at the Cloudflare edge
+    List,
 }
 
 /// Table row for ban list
@@ -542,6 +544,57 @@ async fn cmd_cloudflare(config: Config, action: CloudflareAction) -> Result<()> 
                     r.removed
                 ),
                 None => println!("(disabled)"),
+            }
+        }
+        CloudflareAction::List => {
+            if !config.cloudflare.enabled {
+                println!(
+                    "{}",
+                    "Cloudflare enforcement is disabled — set [cloudflare] enabled = true".yellow()
+                );
+                return Ok(());
+            }
+            let cf = config.cloudflare.clone();
+            let groups = crmonban::cloudflare_api::edge_list(&cf).await?;
+            if cf.mode == "access_rules" {
+                // Same ban set is mirrored to every zone, so collapse to unique
+                // IPs and show how many zones each is blocked in (a count below
+                // the zone total flags a partially-reconciled / diverged IP).
+                use std::collections::BTreeMap;
+                let zone_n = groups.len();
+                let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+                for (_zone, ips) in &groups {
+                    for ip in ips {
+                        *counts.entry(ip.clone()).or_default() += 1;
+                    }
+                }
+                println!(
+                    "Cloudflare blocked IPs (access_rules mode, {} zone(s)):",
+                    zone_n
+                );
+                if counts.is_empty() {
+                    println!("  (none)");
+                } else {
+                    let mut rows: Vec<(String, usize)> = counts.into_iter().collect();
+                    rows.sort_by_key(|(ip, _)| ip.parse::<IpAddr>().ok());
+                    for (ip, n) in &rows {
+                        let tag = format!("{}/{} zones", n, zone_n);
+                        let tag = if *n == zone_n { tag.dimmed().to_string() } else { tag.yellow().to_string() };
+                        println!("  {:<18} {}", ip, tag);
+                    }
+                    println!(
+                        "\nTotal: {} unique IP(s) across {} zone(s)",
+                        rows.len(),
+                        zone_n
+                    );
+                }
+            } else {
+                for (list_name, ips) in &groups {
+                    println!("Cloudflare list '{}' ({} IP(s)):", list_name, ips.len());
+                    for ip in ips {
+                        println!("  {}", ip);
+                    }
+                }
             }
         }
     }

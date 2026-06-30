@@ -84,6 +84,8 @@ struct ListItem {
 #[derive(Deserialize)]
 struct Zone {
     id: String,
+    #[serde(default)]
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -330,6 +332,11 @@ impl CloudflareApi {
 
     /// Zone IDs the token can manage.
     pub async fn list_zone_ids(&self) -> Result<Vec<String>> {
+        Ok(self.list_zones().await?.into_iter().map(|(id, _)| id).collect())
+    }
+
+    /// Zone (id, name) pairs accessible to the token.
+    pub async fn list_zones(&self) -> Result<Vec<(String, String)>> {
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
@@ -348,7 +355,7 @@ impl CloudflareApi {
             }
             let batch = env.result.unwrap_or_default();
             let n = batch.len();
-            out.extend(batch.into_iter().map(|z| z.id));
+            out.extend(batch.into_iter().map(|z| (z.id, z.name)));
             if n < 50 || page > 50 {
                 break;
             }
@@ -358,7 +365,7 @@ impl CloudflareApi {
     }
 
     /// Our managed block rules in a zone (notes contain "crmonban"): ip -> rule_id.
-    async fn zone_block_rules(&self, zone_id: &str) -> Result<HashMap<String, String>> {
+    pub async fn zone_block_rules(&self, zone_id: &str) -> Result<HashMap<String, String>> {
         let mut out = HashMap::new();
         let mut page = 1u32;
         loop {
@@ -518,6 +525,40 @@ pub async fn edge_status(cfg: &CloudflareConfig) -> Result<Option<(usize, usize)
         let ips = api.list_items(&list_id).await?.len();
         Ok(Some((ips, 1)))
     }
+}
+
+/// List the IPs currently blocked at the Cloudflare edge.
+///
+/// access_rules mode: one `(zone_label, sorted_ips)` entry per zone (zone name
+/// when known, else id). list mode: a single `(list_name, sorted_ips)` entry.
+/// Only crmonban-managed block rules are returned (notes contain "crmonban").
+pub async fn edge_list(cfg: &CloudflareConfig) -> Result<Vec<(String, Vec<String>)>> {
+    if !cfg.enabled {
+        return Ok(Vec::new());
+    }
+    let token = load_token(cfg)?;
+    let api = CloudflareApi::new(token, cfg.account_id.clone());
+    let mut out = Vec::new();
+    if cfg.mode == "access_rules" {
+        // Prefer (id, name) pairs; fall back to configured ids (label == id).
+        let zones: Vec<(String, String)> = if cfg.zones.is_empty() {
+            api.list_zones().await?
+        } else {
+            cfg.zones.iter().map(|z| (z.clone(), z.clone())).collect()
+        };
+        for (zid, zname) in zones {
+            let mut ips: Vec<String> = api.zone_block_rules(&zid).await?.into_keys().collect();
+            ips.sort_by_key(|s| s.parse::<IpAddr>().ok());
+            let label = if zname.is_empty() { zid } else { zname };
+            out.push((label, ips));
+        }
+    } else {
+        let list_id = api.ensure_list(&cfg.list_id, &cfg.list_name).await?;
+        let mut ips: Vec<String> = api.list_items(&list_id).await?.into_keys().collect();
+        ips.sort_by_key(|s| s.parse::<IpAddr>().ok());
+        out.push((cfg.list_name.clone(), ips));
+    }
+    Ok(out)
 }
 
 /// Run a single reconcile pass from config + the active-ban IP list. Returns Ok(None)
