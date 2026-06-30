@@ -1566,6 +1566,8 @@ async fn start_packet_engine(
             // CRMONBAN_TRACE_PACKETS=1 to emit the `[trace] pkt N STAGE [gates]:
             // +Nev verdict=X` lines to stderr for live pipeline debugging.
             trace_packets: std::env::var("CRMONBAN_TRACE_PACKETS").is_ok(),
+            // How often the engine emits its PERF keep-up line (default 60s).
+            perf_interval_secs: config.perf_interval_secs,
             ..Default::default()
         },
         worker: WorkerConfig {

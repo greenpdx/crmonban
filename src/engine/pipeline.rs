@@ -80,10 +80,20 @@ pub struct PipelineConfig {
     /// for bypass. Bounds the "judged good too early" window.
     #[serde(default = "default_bypass_after_packets")]
     pub bypass_after_packets: u32,
+
+    /// Interval (seconds) between PERF log lines (throughput, latency, drops,
+    /// captured vs processed keep-up). Default 60; lower it for live debugging,
+    /// raise it (or set the log level above INFO) to quiet it down.
+    #[serde(default = "default_perf_interval_secs")]
+    pub perf_interval_secs: u64,
 }
 
 fn default_bypass_after_packets() -> u32 {
     4
+}
+
+fn default_perf_interval_secs() -> u64 {
+    60
 }
 
 /// Default stage order per v4 spec (with Layer234Detect replacing individual stages)
@@ -117,6 +127,7 @@ impl Default for PipelineConfig {
             trace_packets: false,
             bypass_good_flows: false,
             bypass_after_packets: default_bypass_after_packets(),
+            perf_interval_secs: default_perf_interval_secs(),
         }
     }
 }
@@ -371,8 +382,9 @@ impl Pipeline {
                 s.events_per_second = events_this_interval as f64 / elapsed;
                 s.worker_utilization = worker_pool.utilization();
 
-                // Accumulate the 60s perf window and emit a PERF snapshot line so
-                // throughput + processing-latency + keep-up are visible for the run.
+                // Accumulate the perf window and emit a PERF snapshot line (every
+                // perf_interval_secs) so throughput + processing-latency + keep-up
+                // are visible for the run.
                 perf_pkts += packets_this_interval;
                 perf_bytes += bytes_this_interval;
                 perf_lat_sum += latency_sum_us;
@@ -380,7 +392,7 @@ impl Pipeline {
                 if latency_max_us > perf_lat_max {
                     perf_lat_max = latency_max_us;
                 }
-                if last_perf.elapsed().as_secs() >= 60 {
+                if last_perf.elapsed().as_secs() >= self.config.perf_interval_secs {
                     let psecs = last_perf.elapsed().as_secs_f64();
                     let lat_avg = if perf_pkts > 0 {
                         perf_lat_sum as f64 / perf_pkts as f64
@@ -388,7 +400,7 @@ impl Pipeline {
                         0.0
                     };
                     info!(
-                        "PERF window={:.0}s pps={:.0} bps={:.0} lat_avg_us={:.1} lat_max_us={} eps={:.2} drops={} util={:.2}",
+                        "PERF window={:.0}s pps={:.0} bps={:.0} lat_avg_us={:.1} lat_max_us={} eps={:.2} drops={} util={:.2} captured={} processed_total={}",
                         psecs,
                         perf_pkts as f64 / psecs,
                         perf_bytes as f64 / psecs,
@@ -396,7 +408,9 @@ impl Pipeline {
                         perf_lat_max,
                         perf_events as f64 / psecs,
                         s.packets_dropped,
-                        s.worker_utilization
+                        s.worker_utilization,
+                        s.packets_captured,
+                        s.packets_processed
                     );
                     perf_pkts = 0;
                     perf_bytes = 0;

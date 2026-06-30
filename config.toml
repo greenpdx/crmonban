@@ -717,6 +717,10 @@ timeout_ms = 100
 # Number of worker threads (0 = auto-detect)
 workers = 0
 
+# Seconds between engine PERF log lines (throughput / latency / drops /
+# captured-vs-processed keep-up). Default 60; lower for live debugging.
+perf_interval_secs = 60
+
 # Enable signature matching
 signatures_enabled = true
 

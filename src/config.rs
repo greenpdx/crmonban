@@ -1769,6 +1769,15 @@ pub struct PacketEngineConfig {
     /// Defaults to on; set false to disable the inline L2 plane.
     #[serde(default = "default_true")]
     pub l2_detection: bool,
+
+    /// Seconds between engine PERF log lines (throughput / latency / drops /
+    /// captured-vs-processed keep-up). Default 60; lower for live debugging.
+    #[serde(default = "default_perf_interval_secs")]
+    pub perf_interval_secs: u64,
+}
+
+fn default_perf_interval_secs() -> u64 {
+    60
 }
 
 impl Default for PacketEngineConfig {
@@ -1793,6 +1802,7 @@ impl Default for PacketEngineConfig {
             auto_ban: false,
             l2_af_packet_interface: None,
             l2_detection: true,
+            perf_interval_secs: 60,
         }
     }
 }
