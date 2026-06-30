@@ -731,8 +731,41 @@ impl Firewall {
         let ruleset = batch.to_nftables();
         apply_ruleset(&ruleset).with_context(|| format!("Failed to ban IP: {}", ip))?;
 
+        // Sever this IP's LIVE connections. The @blocked drop only stops *new*
+        // packets — without this, an attacker's already-open keep-alive connection
+        // keeps being served until it closes on its own (the long tail of 200s
+        // after a ban). Best-effort: never fail the ban if the tool is missing.
+        Self::flush_conntrack(ip);
+
         info!("Banned IP: {} (timeout: {:?}s)", ip, timeout_secs);
         Ok(())
+    }
+
+    /// Destroy conntrack entries for connections sourced from `ip`, so a ban takes
+    /// effect immediately on in-flight flows, not just new ones. Best-effort: any
+    /// failure (tool absent, zero matching flows) is logged at debug and ignored.
+    fn flush_conntrack(ip: &IpAddr) {
+        let ip_str = ip.to_string();
+        match std::process::Command::new("conntrack")
+            .args(["-D", "-s", &ip_str])
+            .output()
+        {
+            Ok(out) => {
+                // `conntrack -D` exits non-zero when it deletes 0 flows — that is
+                // not an error for us (the IP simply had no live connection).
+                if out.status.success() {
+                    debug!("conntrack: flushed live connections for {}", ip_str);
+                } else {
+                    let msg = String::from_utf8_lossy(&out.stderr);
+                    if !msg.contains("0 flow entries") {
+                        debug!("conntrack flush for {}: {}", ip_str, msg.trim());
+                    }
+                }
+            }
+            // conntrack-tools not installed / not on PATH: bans still work, they
+            // just won't tear down established connections.
+            Err(e) => debug!("conntrack flush skipped for {} ({})", ip_str, e),
+        }
     }
 
     /// Unban an IP address
