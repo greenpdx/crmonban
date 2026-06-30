@@ -33,3 +33,6 @@ package-lock.json
 # Third-party rule sets (large; install at runtime, not committed)
 rules/emerging-all.rules
 rules/emerging-*.rules
+
+# Claude Code local settings / session data
+.claude/
