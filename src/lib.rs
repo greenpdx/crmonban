@@ -847,13 +847,21 @@ impl Daemon {
             }
         });
 
-        // Spawn Cloudflare-edge reconciler (M1): periodically make the CF IP list
-        // equal the active-ban set. Observe-safe — it only pushes when enforce=true.
+        // CF push-on-ban kick: the ban hotpath signals here so a freshly-banned IP
+        // is mirrored to the Cloudflare edge within ~1s, instead of riding the
+        // periodic reconcile lag — which is the ONLY thing that blocks CF-proxied
+        // attacks (the origin never sees their real client IP, so nft/conntrack are
+        // both inert there).
+        let (cf_kick_tx, cf_kick_rx) = tokio::sync::mpsc::channel::<()>(64);
+        // Spawn Cloudflare-edge reconciler (M1): make the CF IP list equal the
+        // active-ban set — on a ban-kick (debounced) AND a periodic backstop sweep.
+        // Observe-safe — it only pushes when enforce=true.
         {
             let cf_enabled = self.crmonban.read().await.config.cloudflare.enabled;
             if cf_enabled {
                 let cf_crmonban = self.crmonban.clone();
                 tokio::spawn(async move {
+                    let mut cf_kick_rx = cf_kick_rx;
                     let secs = cf_crmonban
                         .read()
                         .await
@@ -863,7 +871,15 @@ impl Daemon {
                         .max(10);
                     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
                     loop {
-                        interval.tick().await;
+                        // Reconcile on the periodic tick OR the moment a ban kicks us
+                        // (debounced ~750ms to coalesce a ban burst into one push).
+                        tokio::select! {
+                            _ = interval.tick() => {}
+                            _ = cf_kick_rx.recv() => {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(750)).await;
+                                while cf_kick_rx.try_recv().is_ok() {}
+                            }
+                        }
                         // Snapshot config + active bans under the lock, then release it
                         // BEFORE the network round-trip (never hold the lock across I/O).
                         let snapshot = {
@@ -887,7 +903,7 @@ impl Daemon {
                         }
                     }
                 });
-                info!("Cloudflare-edge reconciler started");
+                info!("Cloudflare-edge reconciler started (push-on-ban + periodic backstop)");
             }
         }
 
@@ -969,6 +985,12 @@ impl Daemon {
                             ) {
                                 error!("Failed to ban {}: {}", ip, e);
                             } else {
+                                // push-on-ban: nudge the CF reconciler to mirror this
+                                // ban to the edge now (the only block that stops a
+                                // CF-proxied attacker). Best-effort; the periodic
+                                // sweep is the backstop.
+                                let _ = cf_kick_tx.try_send(());
+
                                 // Emit D-Bus signal
                                 #[cfg(feature = "dbus")]
                                 if let Some(ref dbus) = self.dbus_server {
