@@ -210,7 +210,16 @@ event_type = "exploit"
 
 [[services.nginx_access.patterns]]
 name = "path_traversal"
-regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(\.\.\/|\.\.%2f|\.\.%252f)'
+# dot-dot traversal AND direct LFI targets / file:// scheme (the packet engine
+# catches these on direct traffic, but it's blind to CF-proxied HTTPS, so the
+# log path must carry them too). %2f=/ %3a=:
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(?i)(\.\.\/|\.\.%2f|\.\.%252f|\.\.\\|/etc/passwd|%2fetc%2fpasswd|/etc/shadow|file://|file%3a%2f%2f|/proc/self|%2fproc%2fself|boot\.ini|/windows/win)'
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "recon_probe"
+# scanner reconnaissance endpoints (status pages, info leaks, framework probes)
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(?i)(/server-status|/phpinfo\.php|/info\.php|/actuator|/\.aws/|/\.ssh/|/config\.php|/\.well-known/[^ ]*\.php|/server-info|/\.vscode/|/\.idea/)'
 event_type = "exploit"
 
 [[services.nginx_access.patterns]]
@@ -250,6 +259,27 @@ event_type = "exploit"
 name = "admin_bruteforce"
 regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*POST.*(\/admin|\/login|\/wp-login).* 401'
 event_type = "brute_force"
+
+# Per-IP request-RATE trigger (volumetric). Reads the same access log but with a
+# catch-all line->IP pattern and a high threshold, so it bans floods that carry
+# NO attack signature (param fuzzing, recon sweeps) which the signature patterns
+# above can't see. This is the only thing that catches a high-volume scan whose
+# individual requests look benign. Cloudflare/internal IPs are skipped by the
+# monitor before any ban, and the real client IP (CF-Connecting-IP) is what's
+# counted. Tune max_failures to your legit per-IP ceiling (CF caches assets, so
+# the origin sees fewer requests than the client makes).
+[services.http_flood]
+enabled = true
+log_path = "/var/log/nginx/access.log"
+max_failures = 400
+find_time = 60
+ban_time = 7200
+
+[[services.http_flood.patterns]]
+name = "request_flood"
+# matches every access-log line, capturing the leading client IP (CLF format)
+regex = '^(?P<ip>\d+\.\d+\.\d+\.\d+) '
+event_type = "rate_limit"
 
 [services.apache]
 enabled = false

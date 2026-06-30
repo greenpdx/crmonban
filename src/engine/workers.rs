@@ -389,11 +389,12 @@ fn detect_web_attack(s: &str) -> Option<(DetectionType, &'static str)> {
         || s.contains("..%5c")
         || s.contains("/etc/passwd")
         || s.contains("/etc/shadow")
-        || s.contains("/proc/self/environ")
+        || s.contains("/proc/self/")
         || s.contains("/windows/win.ini")
         || s.contains("boot.ini")
+        || s.contains("file://")
     {
-        return Some((DetectionType::PathTraversal, "Path traversal"));
+        return Some((DetectionType::PathTraversal, "Path traversal / LFI"));
     }
     // XSS — input is already decoded + lowercased, so match decoded lowercase.
     // Covers injected tags, event handlers (the `<img ... onerror=>` /
@@ -1565,6 +1566,8 @@ mod tests {
         assert!(matches!(hit("/?x=%24%28id%29"), Some((DetectionType::CommandInjection, _))));  // $(id)
         assert!(matches!(hit("/static/..%2f..%2fetc/passwd"), Some((DetectionType::PathTraversal, _))));
         assert!(matches!(hit("/?file=../../etc/shadow"), Some((DetectionType::PathTraversal, _))));
+        // The real 192.42.116.92 LFI: file=file:///etc/passwd
+        assert!(matches!(hit("/?id=1&file=file%3A%2F%2F%2Fetc%2Fpasswd&q=1"), Some((DetectionType::PathTraversal, _))));
     }
 
     #[test]
