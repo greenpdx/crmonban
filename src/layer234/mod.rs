@@ -41,6 +41,7 @@ pub mod config;
 pub mod detector;
 pub mod error;
 pub mod features;
+pub mod inline_l2;
 pub mod longterm;
 pub mod l2_state;
 pub mod output;
@@ -119,6 +120,10 @@ pub use self::protocols::{
     Icmpv6Ra, Ipv6Prefix, VlanTag, IcmpTunnelMetrics,
     detect_vlan_hopping, calculate_entropy,
 };
+
+// Re-export inline L2 detection (folds the L2 trackers into the engine's
+// af_packet capture seam, emitting engine-native DetectionEvents)
+pub use self::inline_l2::{L2Inspector, L2InspectConfig};
 
 // Re-export Layer 2-3 state trackers
 pub use self::l2_state::{

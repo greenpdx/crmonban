@@ -13,9 +13,11 @@ use std::time::Duration;
 use nfq::{Message, Queue, Verdict};
 use pcap::{Capture, Active, Offline};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::core::{Packet, IpProtocol, parse_ethernet_packet, parse_ip_packet};
+use crate::core::{DetectionEvent, Packet, IpProtocol, parse_ethernet_packet, parse_ip_packet};
+use crate::layer234::{L2Inspector, L2InspectConfig};
 
 /// Capture method
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +58,13 @@ pub struct CaptureConfig {
     pub buffer_size: usize,
     /// Enable promiscuous mode (af_packet)
     pub promiscuous: bool,
+    /// Inline Layer-2 detection on the raw-frame capture. Only the af_packet
+    /// path sees full Ethernet frames, so this is honoured there (NFQUEUE/IP
+    /// captures never carry L2 and ignore it). `Some(cfg)` taps ARP/DHCP/RA off
+    /// each frame and emits detections through the engine's event channel; the
+    /// thresholds come from `cfg`. `None` = no L2 inspection.
+    #[serde(default)]
+    pub l2_detection: Option<L2InspectConfig>,
 }
 
 impl Default for CaptureConfig {
@@ -69,6 +78,7 @@ impl Default for CaptureConfig {
             timeout_ms: 100,
             buffer_size: 4096,
             promiscuous: true,
+            l2_detection: None,
         }
     }
 }
@@ -91,6 +101,20 @@ pub trait PacketCapture: Send {
         _mark_good: bool,
     ) -> anyhow::Result<()> {
         self.set_verdict(packet_id, accept)
+    }
+
+    /// Enable inline Layer-2 detection on this capture.
+    ///
+    /// Only captures that deliver full Ethernet frames (af_packet) can inspect
+    /// L2; the default is a no-op so NFQUEUE/IP-only and file captures simply
+    /// ignore the request. `tx` is the engine's DetectionEvent channel — L2
+    /// findings are emitted there so they ride the same event bridge (record +
+    /// alert + shared ban path) as every other engine detection.
+    fn enable_l2_detection(
+        &mut self,
+        _tx: mpsc::Sender<DetectionEvent>,
+        _cfg: L2InspectConfig,
+    ) {
     }
 
     /// Get capture statistics
@@ -117,6 +141,23 @@ pub struct CaptureStats {
     pub dropped: u64,
     /// Interface drops
     pub if_dropped: u64,
+}
+
+/// Run the inline L2 inspector (when enabled) over one raw Ethernet frame and
+/// emit any findings on the engine's DetectionEvent channel.
+///
+/// Shared by the two captures that deliver full frames (af_packet live capture
+/// and pcap replay). Best-effort: `try_send` so a full/closed channel drops the
+/// event rather than stalling the capture loop — the engine's drop-under-load
+/// contract. NFQUEUE/IP captures never carry L2 and never call this.
+fn tap_l2(l2: &mut Option<(L2Inspector, mpsc::Sender<DetectionEvent>)>, frame: &[u8]) {
+    if let Some((insp, tx)) = l2.as_mut() {
+        for ev in insp.inspect(frame) {
+            if let Err(e) = tx.try_send(ev) {
+                debug!("inline L2 event dropped: {}", e);
+            }
+        }
+    }
 }
 
 /// Create a capture based on configuration
@@ -306,6 +347,11 @@ pub struct AfPacketCapture {
     interface: String,
     stats: CaptureStats,
     packet_id: u64,
+    /// Inline L2 inspector + the engine event channel to emit findings on.
+    /// `Some` once `enable_l2_detection` has been called; `None` = L2 off.
+    /// af_packet is the only capture that sees full frames, so this is the one
+    /// place ARP/DHCP/RA can be detected through the engine.
+    l2: Option<(L2Inspector, mpsc::Sender<DetectionEvent>)>,
 }
 
 impl AfPacketCapture {
@@ -328,6 +374,7 @@ impl AfPacketCapture {
             interface,
             stats: CaptureStats::default(),
             packet_id: 0,
+            l2: None,
         })
     }
 }
@@ -342,6 +389,14 @@ impl PacketCapture for AfPacketCapture {
                 let interface = self.interface.clone();
                 // Copy data before the borrow ends
                 let data = packet.data.to_vec();
+
+                // Inline L2 tap: af_packet is the only live capture that carries
+                // the Ethernet frame, so ARP/DHCP/RA are inspected HERE — before
+                // the IP parse below discards the non-IP ones. The IP parse still
+                // runs so DHCP/RA (which are IP) also flow through the normal
+                // pipeline.
+                tap_l2(&mut self.l2, &data);
+
                 Ok(parse_ethernet_packet(&data, packet_id, interface))
             }
             Err(pcap::Error::TimeoutExpired) => {
@@ -353,6 +408,21 @@ impl PacketCapture for AfPacketCapture {
                 Err(e.into())
             }
         }
+    }
+
+    fn enable_l2_detection(
+        &mut self,
+        tx: mpsc::Sender<DetectionEvent>,
+        cfg: L2InspectConfig,
+    ) {
+        info!(
+            "Inline L2 detection enabled on {} (arp_change={}, dhcp_starvation={}, ra_flood={})",
+            self.interface,
+            cfg.arp_change_threshold,
+            cfg.dhcp_starvation_threshold,
+            cfg.ra_flood_threshold,
+        );
+        self.l2 = Some((L2Inspector::new(&cfg), tx));
     }
 
     fn set_verdict(&mut self, _packet_id: u64, _accept: bool) -> anyhow::Result<()> {
@@ -385,6 +455,11 @@ pub struct PcapCapture {
     file_path: String,
     stats: CaptureStats,
     packet_id: u64,
+    /// Inline L2 inspector + engine event channel. Pcap replay delivers full
+    /// Ethernet frames too, so it taps L2 exactly like the live af_packet
+    /// capture — making offline replay a first-class way to test/triage ARP/
+    /// DHCP/RA detection.
+    l2: Option<(L2Inspector, mpsc::Sender<DetectionEvent>)>,
 }
 
 impl PcapCapture {
@@ -400,6 +475,7 @@ impl PcapCapture {
             file_path,
             stats: CaptureStats::default(),
             packet_id: 0,
+            l2: None,
         })
     }
 }
@@ -413,6 +489,8 @@ impl PacketCapture for PcapCapture {
                 let packet_id = self.packet_id;
                 // Copy data before the borrow ends
                 let data = pkt.data.to_vec();
+                // Same inline L2 tap as the live af_packet capture.
+                tap_l2(&mut self.l2, &data);
                 Ok(parse_ethernet_packet(&data, packet_id, self.file_path.clone()))
             }
             Err(pcap::Error::NoMorePackets) => {
@@ -420,6 +498,15 @@ impl PacketCapture for PcapCapture {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn enable_l2_detection(
+        &mut self,
+        tx: mpsc::Sender<DetectionEvent>,
+        cfg: L2InspectConfig,
+    ) {
+        info!("Inline L2 detection enabled on pcap replay {}", self.file_path);
+        self.l2 = Some((L2Inspector::new(&cfg), tx));
     }
 
     fn set_verdict(&mut self, _packet_id: u64, _accept: bool) -> anyhow::Result<()> {
@@ -522,5 +609,112 @@ mod tests {
 
         let capture = create_capture(&config);
         assert!(capture.is_ok());
+    }
+
+    // ---- Inline L2 detection through the real capture path -----------------
+
+    use tokio::sync::mpsc;
+
+    const TEST_ETHERTYPE_ARP: u16 = 0x0806;
+
+    /// Minimal Ethernet+ARP reply asserting `sender_ip` is at `sender_mac`.
+    fn arp_reply_frame(sender_mac: [u8; 6], sender_ip: [u8; 4]) -> Vec<u8> {
+        let mut f = Vec::with_capacity(42);
+        f.extend_from_slice(&[0xff; 6]); // dst broadcast
+        f.extend_from_slice(&sender_mac); // src
+        f.extend_from_slice(&TEST_ETHERTYPE_ARP.to_be_bytes());
+        f.extend_from_slice(&[0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x02]); // ARP reply
+        f.extend_from_slice(&sender_mac);
+        f.extend_from_slice(&sender_ip);
+        f.extend_from_slice(&[0x00; 6]);
+        f.extend_from_slice(&[0x00; 4]);
+        f
+    }
+
+    /// Serialise frames into a classic little-endian pcap (DLT_EN10MB) byte blob.
+    fn build_pcap(frames: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        // Global header.
+        out.extend_from_slice(&0xa1b2c3d4u32.to_le_bytes()); // magic
+        out.extend_from_slice(&2u16.to_le_bytes()); // version major
+        out.extend_from_slice(&4u16.to_le_bytes()); // version minor
+        out.extend_from_slice(&0i32.to_le_bytes()); // thiszone
+        out.extend_from_slice(&0u32.to_le_bytes()); // sigfigs
+        out.extend_from_slice(&65535u32.to_le_bytes()); // snaplen
+        out.extend_from_slice(&1u32.to_le_bytes()); // network = Ethernet
+        for (i, f) in frames.iter().enumerate() {
+            out.extend_from_slice(&(i as u32).to_le_bytes()); // ts_sec
+            out.extend_from_slice(&0u32.to_le_bytes()); // ts_usec
+            out.extend_from_slice(&(f.len() as u32).to_le_bytes()); // incl_len
+            out.extend_from_slice(&(f.len() as u32).to_le_bytes()); // orig_len
+            out.extend_from_slice(f);
+        }
+        out
+    }
+
+    /// End-to-end: a pcap of ARP frames that rebind one IP across several MACs,
+    /// replayed through the engine's PcapCapture with inline L2 detection on,
+    /// must surface an `arp_spoofing` DetectionEvent on the engine channel —
+    /// exercising create_capture → enable_l2_detection → tap_l2 → event_tx, the
+    /// same seam the live af_packet capture uses.
+    #[test]
+    fn inline_l2_arp_spoof_through_pcap_capture() {
+        let ip = [192, 168, 1, 50];
+        let frames = vec![
+            arp_reply_frame([0x00, 0x11, 0x22, 0x33, 0x44, 0x01], ip),
+            arp_reply_frame([0x00, 0x11, 0x22, 0x33, 0x44, 0x02], ip),
+            arp_reply_frame([0x00, 0x11, 0x22, 0x33, 0x44, 0x03], ip),
+            arp_reply_frame([0x00, 0x11, 0x22, 0x33, 0x44, 0x04], ip),
+        ];
+        let pcap_bytes = build_pcap(&frames);
+
+        let path = std::env::temp_dir().join(format!(
+            "crmonban_inline_l2_test_{}.pcap",
+            std::process::id()
+        ));
+        std::fs::write(&path, &pcap_bytes).expect("write temp pcap");
+
+        let config = CaptureConfig {
+            method: CaptureMethod::Pcap,
+            pcap_file: Some(path.to_string_lossy().into_owned()),
+            l2_detection: Some(L2InspectConfig {
+                arp_change_threshold: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut capture = create_capture(&config).expect("create pcap capture");
+        let (tx, mut rx) = mpsc::channel::<DetectionEvent>(64);
+        capture.enable_l2_detection(tx, config.l2_detection.clone().unwrap());
+
+        // Pump one pcap record per call. next_packet returns Ok(None) for an ARP
+        // frame (it doesn't parse to an IP Packet) AND at EOF — same as the live
+        // capture — so we can't treat None as end-of-stream. tap_l2 runs on every
+        // record before the IP parse, so pumping frames.len()+slack calls feeds
+        // all ARP frames through the inspector.
+        for _ in 0..(frames.len() + 2) {
+            let _ = capture.next_packet(0);
+        }
+        let _ = std::fs::remove_file(&path);
+
+        let mut events = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.event_type,
+                crate::core::DetectionType::Custom(k) if k == "arp_spoofing"
+            )),
+            "expected an arp_spoofing detection from the inline L2 tap, got {:?}",
+            events.iter().map(|e| &e.event_type).collect::<Vec<_>>()
+        );
+        // L2 findings are alerts, not auto-bans.
+        assert!(events.iter().all(|e| matches!(
+            e.action,
+            crate::core::DetectionAction::Alert
+        )));
     }
 }

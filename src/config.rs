@@ -1755,6 +1755,20 @@ pub struct PacketEngineConfig {
     pub ban_duration: i64,
     /// Auto-ban on signature match
     pub auto_ban: bool,
+    /// Optional second capture: run a passive af_packet engine on this interface
+    /// for Layer-2 detection (ARP/DHCP/RA spoofing) that the inline nfqueue plane
+    /// cannot see — NFQUEUE delivers IP-layer payloads with no Ethernet frame.
+    /// The two captures share the event sink + ban store. None = single capture.
+    #[serde(default)]
+    pub l2_af_packet_interface: Option<String>,
+
+    /// Inline Layer-2 detection: when the engine captures full Ethernet frames
+    /// (capture_method = "af_packet"), tap ARP/DHCP/RA off the engine's own
+    /// capture and emit findings through its event bridge — no separate socket.
+    /// Honoured only in af_packet mode (NFQUEUE/IP captures never carry L2).
+    /// Defaults to on; set false to disable the inline L2 plane.
+    #[serde(default = "default_true")]
+    pub l2_detection: bool,
 }
 
 impl Default for PacketEngineConfig {
@@ -1777,6 +1791,8 @@ impl Default for PacketEngineConfig {
             threat_intel: false,
             ban_duration: 3600,
             auto_ban: false,
+            l2_af_packet_interface: None,
+            l2_detection: true,
         }
     }
 }

@@ -701,6 +701,13 @@ nfqueue_num = 100
 # Enable promiscuous mode
 promiscuous = true
 
+# Inline Layer-2 detection (ARP spoofing / DHCP starvation / rogue DHCP /
+# IPv6 RA spoof+flood). Only effective in af_packet mode, where the engine sees
+# full Ethernet frames: ARP/DHCP/RA are tapped off the engine's own capture and
+# emitted as packet-engine alerts — no separate sidecar socket. Ignored in
+# nfqueue mode (NFQUEUE delivers IP payloads with no Ethernet frame). Default: on.
+l2_detection = true
+
 # Snapshot length (max bytes per packet)
 snaplen = 65535
 

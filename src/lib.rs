@@ -21,6 +21,7 @@ pub mod models;
 pub mod monitor;
 pub mod journald_monitor;
 pub mod layer234;
+pub mod l2_monitor;
 #[cfg(feature = "wireless")]
 pub mod wireless;
 pub mod port_scan_monitor;
@@ -748,6 +749,43 @@ impl Daemon {
             None
         };
 
+        // Optional passive Layer-2 detection plane (ARP spoofing) on a raw-frame
+        // capture — the inline nfqueue/IP path can't see ARP (NFQUEUE delivers IP
+        // payloads with no Ethernet frame, and the core parser drops non-IP
+        // frames). Runs as a dedicated monitor feeding the same event sink, so it
+        // converges on the shared ban/alert store, not at the wire.
+        //
+        // The inline path now supersedes this: when the engine itself captures
+        // full frames (af_packet) with L2 detection on, it taps ARP/DHCP/RA off
+        // its own capture and the sidecar would only duplicate alerts on the same
+        // wire. So run the standalone sidecar ONLY when the engine can't see L2
+        // (non-af_packet mode) or it is pointed at a different interface.
+        #[cfg(feature = "packet-engine")]
+        let engine_inline_l2 = packet_engine_config.enabled
+            && packet_engine_config.l2_detection
+            && matches!(
+                packet_engine_config.capture_method.as_str(),
+                "af_packet" | "afpacket"
+            );
+        #[cfg(feature = "packet-engine")]
+        let l2_iface: Option<String> = if packet_engine_config.enabled {
+            match packet_engine_config.l2_af_packet_interface.clone() {
+                Some(iface)
+                    if engine_inline_l2
+                        && packet_engine_config.interface.as_deref() == Some(iface.as_str()) =>
+                {
+                    info!(
+                        "L2 sidecar on {} skipped: inline engine L2 detection already covers it",
+                        iface
+                    );
+                    None
+                }
+                other => other,
+            }
+        } else {
+            None
+        };
+
         // Spawn packet engine task if enabled
         #[cfg(feature = "packet-engine")]
         let (packet_engine_handle, engine_shutdown_tx) = if packet_engine_config.enabled {
@@ -774,6 +812,27 @@ impl Daemon {
             }
             (None, None)
         };
+
+        // Spawn the L2 monitor (if configured) — passive raw-frame ARP detection,
+        // same event sink as every other detector.
+        #[cfg(feature = "packet-engine")]
+        let l2_monitor_handle: Option<tokio::task::JoinHandle<()>> = if let Some(iface) = l2_iface {
+            let event_tx_l2 = event_tx.clone();
+            let handle = tokio::spawn(async move {
+                let cfg = l2_monitor::L2MonitorConfig {
+                    interface: iface,
+                    ..Default::default()
+                };
+                if let Err(e) = l2_monitor::start_l2_monitor(cfg, event_tx_l2).await {
+                    error!("L2 monitor error: {}", e);
+                }
+            });
+            Some(handle)
+        } else {
+            None
+        };
+        #[cfg(not(feature = "packet-engine"))]
+        let l2_monitor_handle: Option<tokio::task::JoinHandle<()>> = None;
 
         // Spawn cleanup task (runs every minute)
         let cleanup_crmonban = self.crmonban.clone();
@@ -990,6 +1049,11 @@ impl Daemon {
         }
         if let Some(tx) = engine_shutdown_tx {
             let _ = tx.send(());
+        }
+        if let Some(handle) = l2_monitor_handle {
+            // The L2 monitor blocks in libpcap; abort the task (the blocking
+            // thread is reclaimed on process exit).
+            handle.abort();
         }
         if let Some(handle) = packet_engine_handle {
             // Let the engine stop gracefully (drain in-flight verdicts + unbind
@@ -1456,6 +1520,17 @@ async fn start_packet_engine(
     // flow's later packets — blinding it. Force full inspection off-queue.
     let is_nfqueue = matches!(capture_method, CaptureMethod::Nfqueue);
 
+    // Inline Layer-2 detection: only af_packet captures see full Ethernet frames,
+    // so ARP/DHCP/RA can ride the engine's own capture seam there. In nfqueue/IP
+    // mode the frame is gone before userspace, so L2 stays the standalone
+    // sidecar's job. Gate on the config toggle (default on).
+    let l2_inline_cfg = if matches!(capture_method, CaptureMethod::AfPacket) && config.l2_detection {
+        info!("Inline L2 detection (ARP/DHCP/RA) active on the af_packet engine capture");
+        Some(crate::layer234::L2InspectConfig::default())
+    } else {
+        None
+    };
+
     // Map the daemon's packet-engine config onto the engine's config.
     let engine_config = EngineConfig {
         enabled: true,
@@ -1468,6 +1543,7 @@ async fn start_packet_engine(
             timeout_ms: config.timeout_ms,
             buffer_size: 65536,
             promiscuous: config.promiscuous,
+            l2_detection: l2_inline_cfg,
         },
         pipeline: PipelineConfig {
             enable_flows: true,
@@ -1493,6 +1569,11 @@ async fn start_packet_engine(
             ..Default::default()
         },
         worker: WorkerConfig {
+            // Wire the configured worker count through. 0 = auto-detect
+            // (num_cpus); any positive value pins the pool size. Previously this
+            // field was dropped on the floor (always auto), so config.workers was
+            // a no-op — honour it now.
+            num_workers: config.workers,
             rules_dir: config.rules_dir.clone().map(std::path::PathBuf::from),
             ssl_log: config.ssl_log.clone().map(std::path::PathBuf::from),
             ..Default::default()

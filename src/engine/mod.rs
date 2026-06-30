@@ -259,11 +259,22 @@ impl PacketEngine {
         let capture_packet_tx = packet_tx.clone();
         let capture_state = state.clone();
         let capture_stats = stats.clone();
+        // The engine's DetectionEvent channel, for the capture's inline L2 tap
+        // (af_packet only). Clone here so the blocking capture thread can emit
+        // ARP/DHCP/RA findings onto the same bridge as every other detection.
+        let capture_l2_event_tx = event_tx.clone();
 
         self.capture_handle = Some(std::thread::spawn(move || {
             match capture::create_capture(&capture_config) {
                 Ok(mut capture) => {
                     info!("Capture started: {:?}", capture_config.method);
+
+                    // Fold inline L2 detection into the capture when configured
+                    // (the capture itself ignores this unless it sees full
+                    // Ethernet frames — i.e. af_packet).
+                    if let Some(l2_cfg) = capture_config.l2_detection.clone() {
+                        capture.enable_l2_detection(capture_l2_event_tx, l2_cfg);
+                    }
 
                     loop {
                         // Check if should stop
