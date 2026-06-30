@@ -308,7 +308,11 @@ impl CloudflareApi {
 
         let report = ReconcileReport {
             list_id: list_id.clone(),
-            edge_total: edge.len(),
+            // Post-reconcile total: what's on the edge now, plus what we're about
+            // to add, minus what we're about to remove. (to_remove ⊆ edge, so the
+            // subtraction can't underflow.) Reporting edge.len() alone logged the
+            // PRE-reconcile count.
+            edge_total: edge.len() + to_add.len() - to_remove.len(),
             added: to_add.len(),
             removed: to_remove.len(),
         };
@@ -481,6 +485,10 @@ impl CloudflareApi {
                 report.removed += 1;
             }
         }
+        // edge_total accumulated the PRE-reconcile rule count across all zones; fold
+        // in the deltas so it reports the POST-reconcile total. (removed ⊆ existing,
+        // so this can't underflow.)
+        report.edge_total = report.edge_total + report.added - report.removed;
         Ok(report)
     }
 }
