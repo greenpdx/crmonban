@@ -381,13 +381,37 @@ fn hex_val(b: u8) -> Option<u8> {
 /// Classify a web attack in an already-decoded, lowercased request target.
 /// Returns the detection type and a human label, or None.
 fn detect_web_attack(s: &str) -> Option<(DetectionType, &'static str)> {
-    if s.contains("../") || s.contains("..\\") || s.contains("/etc/passwd") {
+    // Path traversal + sensitive-file access. `..%2f` / `..%5c` catch a
+    // double-encoded sequence that single-pass decoding leaves as %2f / %5c.
+    if s.contains("../")
+        || s.contains("..\\")
+        || s.contains("..%2f")
+        || s.contains("..%5c")
+        || s.contains("/etc/passwd")
+        || s.contains("/etc/shadow")
+        || s.contains("/proc/self/environ")
+        || s.contains("/windows/win.ini")
+        || s.contains("boot.ini")
+    {
         return Some((DetectionType::PathTraversal, "Path traversal"));
     }
+    // XSS — input is already decoded + lowercased, so match decoded lowercase.
+    // Covers injected tags, event handlers (the `<img ... onerror=>` /
+    // `<svg onload=>` vectors a `<script`-only check misses), and script sinks.
     if s.contains("<script")
         || s.contains("javascript:")
+        || s.contains("<img")
+        || s.contains("<svg")
+        || s.contains("<iframe")
         || s.contains("onerror=")
         || s.contains("onload=")
+        || s.contains("onmouseover=")
+        || s.contains("onfocus=")
+        || s.contains("onclick=")
+        || s.contains("ontoggle=")
+        || s.contains("onanimationstart=")
+        || s.contains("document.cookie")
+        || s.contains("data:text/html")
     {
         return Some((DetectionType::Xss, "Cross-site scripting"));
     }
@@ -400,6 +424,26 @@ fn detect_web_attack(s: &str) -> Option<(DetectionType, &'static str)> {
     {
         return Some((DetectionType::ExploitAttempt, "Log4Shell/JNDI"));
     }
+    // Command injection — high-signal shell metacharacter + command combinations
+    // only (bare `$(` / `curl http` are skipped: too common in benign JS bodies).
+    if s.contains(";cat /")
+        || s.contains("|cat /")
+        || s.contains("&&cat /")
+        || s.contains("`id`")
+        || s.contains("$(id")
+        || s.contains("$(whoami")
+        || s.contains(";uname")
+        || s.contains("|uname")
+        || s.contains("/bin/sh")
+        || s.contains("/bin/bash")
+        || s.contains("nc -e")
+        || s.contains("bash -i")
+        || s.contains(";wget http")
+        || s.contains(";curl http")
+    {
+        return Some((DetectionType::CommandInjection, "Command injection"));
+    }
+    // SQL injection — boolean / union / error-based / time-based + schema probing.
     let sqli = (s.contains("union") && s.contains("select"))
         || (s.contains("select") && s.contains(" from "))
         || s.contains("' or ")
@@ -408,8 +452,20 @@ fn detect_web_attack(s: &str) -> Option<(DetectionType, &'static str)> {
         || s.contains("'='")
         || s.contains("' and ")
         || s.contains("'--")
+        || s.contains("'#")
         || s.contains("; drop ")
-        || s.contains("xp_cmdshell");
+        || s.contains("; exec")
+        || s.contains("xp_cmdshell")
+        || s.contains("sleep(")
+        || s.contains("benchmark(")
+        || s.contains("pg_sleep")
+        || s.contains("waitfor delay")
+        || s.contains("information_schema")
+        || s.contains("extractvalue(")
+        || s.contains("updatexml(")
+        || s.contains("load_file(")
+        || s.contains("into outfile")
+        || s.contains("into dumpfile");
     if sqli {
         return Some((DetectionType::SqlInjection, "SQL injection"));
     }
@@ -1466,6 +1522,64 @@ mod tests {
     use super::*;
     use crate::core::{IpProtocol, TcpFlags, DetectionType};
     use std::net::IpAddr;
+
+    // Detection runs over normalize_uri() output, so test the way the engine sees
+    // it: feed the RAW (percent-encoded) request target through normalize_uri.
+    fn hit(raw: &str) -> Option<(DetectionType, &'static str)> {
+        detect_web_attack(&normalize_uri(raw))
+    }
+
+    #[test]
+    fn web_attack_xss_vectors() {
+        // The real 185.220.101.2 payload: "><img src=x onerror=alert(...)>
+        let real = "/?file=%22%3E%3Cimg+src%3Dx+onerror%3Dalert%28crrx9z1k%29%3E";
+        assert!(matches!(hit(real), Some((DetectionType::Xss, _))),
+            "must catch the <img onerror> payload that the narrow <script> check missed");
+        for v in [
+            "/?x=%3Cscript%3Ealert(1)%3C/script%3E",   // <script>
+            "/?x=%3Csvg+onload%3Dalert(1)%3E",          // <svg onload=>
+            "/?x=javascript:alert(1)",                  // javascript:
+            "/?x=%3Ciframe+src%3Djavascript:1%3E",      // <iframe>
+            "/?x=%3Cimg%20onmouseover%3Dalert(1)%3E",   // event handler
+        ] {
+            assert!(matches!(hit(v), Some((DetectionType::Xss, _))), "XSS miss: {v}");
+        }
+    }
+
+    #[test]
+    fn web_attack_sqli_vectors() {
+        for v in [
+            "/?id=1+UNION+SELECT+1,2,3",
+            "/?id=1%27+OR+1=1--",
+            "/?id=1+AND+SLEEP%285%29",          // time-based
+            "/?id=1+AND+extractvalue%281%29",   // error-based
+            "/?id=1+UNION+SELECT+*+FROM+information_schema.tables",
+        ] {
+            assert!(matches!(hit(v), Some((DetectionType::SqlInjection, _))), "SQLi miss: {v}");
+        }
+    }
+
+    #[test]
+    fn web_attack_cmdi_and_traversal() {
+        assert!(matches!(hit("/?x=%3Bcat%20/etc/passwd"), Some((DetectionType::CommandInjection, _)) | Some((DetectionType::PathTraversal, _))));
+        assert!(matches!(hit("/?x=%24%28id%29"), Some((DetectionType::CommandInjection, _))));  // $(id)
+        assert!(matches!(hit("/static/..%2f..%2fetc/passwd"), Some((DetectionType::PathTraversal, _))));
+        assert!(matches!(hit("/?file=../../etc/shadow"), Some((DetectionType::PathTraversal, _))));
+    }
+
+    #[test]
+    fn web_attack_benign_no_false_positive() {
+        for v in [
+            "/",
+            "/index.html",
+            "/api/budget?year=2027&id=42",
+            "/assets/app.min.js?v=1.2.3",
+            "/search?q=union+square+hotel",   // 'union' without 'select' must not fire
+            "/profile?name=Jonathan",          // contains 'on' but no handler '='
+        ] {
+            assert!(hit(v).is_none(), "false positive on benign: {v} -> {:?}", hit(v));
+        }
+    }
 
     fn make_packet() -> Packet {
         let src_ip = "192.168.1.100".parse().unwrap();

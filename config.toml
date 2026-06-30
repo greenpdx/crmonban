@@ -193,12 +193,19 @@ ban_time = 3600
 
 [[services.nginx_access.patterns]]
 name = "sql_injection_union"
-regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(?i)(union\+select|union%20select)'
+# union select with any separator: '+', %20, whitespace, or /**/ comment evasion
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(?i)(union(\s|\+|%20|/\*\*/)*select|union%20select|union\+select)'
 event_type = "exploit"
 
 [[services.nginx_access.patterns]]
 name = "sql_injection_or"
-regex = "(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+).*(?i)(or%201%3D1|or%20'1'%3D'1'|' or ''=')"
+regex = "(?P<ip>\\d+\\.\\d+\\.\\d+\\.\\d+).*(?i)(or%201%3D1|or%201=1|or%20'1'%3D'1'|' or ''=|' or 1=1|'%20or%20|'\\+or\\+)"
+event_type = "exploit"
+
+[[services.nginx_access.patterns]]
+name = "sql_injection_keywords"
+# time-based / error-based / stacked SQLi and schema probing
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(?i)(sleep\(|sleep%28|benchmark\(|pg_sleep|waitfor(\s|\+|%20)+delay|information_schema|extractvalue\(|updatexml\(|load_file\(|into(\s|\+|%20)+outfile|select.+from)'
 event_type = "exploit"
 
 [[services.nginx_access.patterns]]
@@ -207,18 +214,21 @@ regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(\.\.\/|\.\.%2f|\.\.%252f)'
 event_type = "exploit"
 
 [[services.nginx_access.patterns]]
-name = "xss_script"
-regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(<script|%3Cscript|javascript:)'
+name = "xss"
+# matches raw (url-encoded) access-log lines: tags, event handlers, sinks.
+# %3c=< %28=( . `onerror` etc. without `=` still match the encoded `onerror%3d`.
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(?i)(<script|%3cscript|javascript:|<img|%3cimg|<svg|%3csvg|<iframe|%3ciframe|onerror|onload|onmouseover|onfocus|onclick|ontoggle|alert\(|alert%28|prompt\(|prompt%28|document\.cookie|document%2ecookie|data:text/html)'
 event_type = "exploit"
 
 [[services.nginx_access.patterns]]
 name = "cmd_injection"
-regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(;cat%20|%7Ccat|%60id%60|\$\()'
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(?i)(;cat%20|%3bcat|%7ccat|%60id%60|\$\(|%24%28|/bin/sh|%2fbin%2fsh|/bin/bash|nc%20-e|bash%20-i|;uname|%3buname|;wget%20http|;curl%20http)'
 event_type = "exploit"
 
 [[services.nginx_access.patterns]]
 name = "wordpress_attack"
-regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(wp-login\.php|xmlrpc\.php|wp-admin).* 404'
+# probing WP on a non-WP host is hostile regardless of status (dropped the 404 req)
+regex = '(?P<ip>\d+\.\d+\.\d+\.\d+).*(wp-login\.php|xmlrpc\.php|wp-admin|wp-content|wp-includes)'
 event_type = "exploit"
 
 [[services.nginx_access.patterns]]
