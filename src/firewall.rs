@@ -320,8 +320,13 @@ impl Firewall {
             }));
         }
 
-        // Create FORWARD chain for network filtering (Gateway mode)
-        if self.deployment.has_forward_protection() {
+        // FORWARD-hook @blocked drop. Added for Gateway mode (network filtering)
+        // AND whenever forward_block is set — the latter covers a host whose local
+        // services run in containers: web traffic is DNAT'd to the container on the
+        // FORWARD path, so an INPUT-only @blocked drop is bypassed and bans never
+        // take effect. The chain is policy-accept with only an @blocked drop, so it
+        // never touches legitimate forwarded traffic.
+        if self.deployment.has_forward_protection() || self.deployment.forward_block {
             let forward_chain_name = format!("{}_forward", self.config.chain_name);
 
             batch.add(NfListObject::Chain(Chain {

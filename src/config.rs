@@ -376,6 +376,14 @@ pub struct DeploymentConfig {
     #[serde(default = "default_true")]
     pub protect_self: bool,
 
+    /// Drop banned IPs (@blocked) on the FORWARD hook too, not just INPUT. Required
+    /// when local services run in containers behind Docker DNAT: web traffic is
+    /// DNAT'd to the container on the FORWARD path, so an INPUT-only @blocked drop is
+    /// bypassed and bans never take effect. Cheap and safe when there is no
+    /// forwarding (the rule simply never matches). Default on.
+    #[serde(default = "default_true")]
+    pub forward_block: bool,
+
     /// External/WAN interface(s) - traffic from these is untrusted
     #[serde(default)]
     pub external_interfaces: Vec<String>,
@@ -426,6 +434,7 @@ impl Default for DeploymentConfig {
         Self {
             mode: DeploymentMode::Host,
             protect_self: true,
+            forward_block: true,
             external_interfaces: Vec::new(),
             internal_interfaces: Vec::new(),
             stateful: true,
