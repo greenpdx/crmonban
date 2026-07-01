@@ -870,6 +870,12 @@ impl Daemon {
                         .reconcile_interval_secs
                         .max(10);
                     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(secs));
+                    // A push-on-ban kick can land between ticks; without this the
+                    // next periodic tick fires immediately to "catch up" (tokio's
+                    // default Burst), doubling the reconcile. Skip missed ticks so
+                    // the periodic sweep stays exactly one-per-interval regardless
+                    // of kicks.
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
                         // Reconcile on the periodic tick OR the moment a ban kicks us
                         // (debounced ~750ms to coalesce a ban burst into one push).
