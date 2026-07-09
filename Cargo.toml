@@ -77,7 +77,7 @@ serde_json = "*"
 toml = "*"
 
 # HTTP client for intel gathering
-reqwest = { version = "*", features = ["json"] }
+reqwest = { version = "*", features = ["json", "query"] }
 
 # Date/time
 chrono = { version = "*", features = ["serde"] }

@@ -10,6 +10,16 @@ use trust_dns_resolver::TokioAsyncResolver;
 use crate::config::IntelConfig;
 use crate::models::AttackerIntel;
 
+/// Replace any occurrence of `key` in a message with a redaction marker, so a
+/// leaked API key never reaches the logs even if an upstream error string
+/// embeds the full request URL.
+fn sanitize_key(msg: &str, key: &str) -> String {
+    if key.is_empty() {
+        return msg.to_string();
+    }
+    msg.replace(key, "<redacted>")
+}
+
 /// Intelligence gatherer for collecting information about attackers
 pub struct IntelGatherer {
     config: IntelConfig,
@@ -22,6 +32,11 @@ impl IntelGatherer {
         let client = Client::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .user_agent("crmonban/0.1")
+            // Do not follow redirects: a malicious/compromised intel endpoint
+            // could 302 the request to an internal host (SSRF) and reqwest would
+            // otherwise carry the custom `Key:` auth header across the redirect
+            // to a different origin, leaking the credential. (Security audit §4.)
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
         Ok(Self { config, client })
@@ -219,9 +234,23 @@ impl IntelGatherer {
 
     /// Lookup Shodan information
     async fn lookup_shodan(&self, ip: &str, api_key: &str) -> Result<ShodanResponse> {
-        let url = format!("https://api.shodan.io/shodan/host/{}?key={}", ip, api_key);
+        // Pass the key as a query parameter via reqwest (not interpolated into
+        // the URL string) so it never lands in a `reqwest::Error`'s Display —
+        // which includes the URL and would otherwise leak the secret to logs.
+        let url = format!("https://api.shodan.io/shodan/host/{}", ip);
 
-        let resp: ShodanApiResponse = self.client.get(&url).send().await?.json().await?;
+        // Sanitize errors: a reqwest error's Display embeds the full request URL
+        // (including the `key` query parameter), so never surface it verbatim.
+        let resp: ShodanApiResponse = self
+            .client
+            .get(&url)
+            .query(&[("key", api_key)])
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Shodan request failed: {}", sanitize_key(&e.to_string(), api_key)))?
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("Shodan decode failed: {}", sanitize_key(&e.to_string(), api_key)))?;
 
         Ok(ShodanResponse {
             ports: resp.ports,

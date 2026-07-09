@@ -94,7 +94,12 @@ fn default_ssh_patterns() -> Vec<JournalPatternConfig> {
         },
         JournalPatternConfig {
             name: "pam_auth_failure".to_string(),
-            regex: r"pam_unix\(sshd:auth\): authentication failure.*rhost=(?P<ip>\d+\.\d+\.\d+\.\d+)".to_string(),
+            // Lazy `.*?` + a bounded IP token anchored to a word boundary and a
+            // trailing whitespace/end-of-line captures the FIRST (genuine)
+            // `rhost=` the daemon logged, not an attacker-injected second
+            // `rhost=<victim>` smuggled through the logged `user=` field. See
+            // security audit finding A1 (log-injection ban forgery).
+            regex: r"pam_unix\(sshd:auth\): authentication failure.*?\brhost=(?P<ip>\d{1,3}(?:\.\d{1,3}){3})(?:\s|$)".to_string(),
             event_type: "failed_auth".to_string(),
         },
     ]
@@ -403,5 +408,28 @@ mod tests {
         let event = monitor.match_line(line, "sshd").unwrap();
 
         assert_eq!(event.ip.to_string(), "192.168.1.100");
+    }
+
+    /// Regression for security audit A1: a PAM auth-failure line where the
+    /// attacker smuggled a second `rhost=<victim>` through the logged username
+    /// must still resolve to the GENUINE first rhost (the real client), not the
+    /// attacker-chosen victim IP — otherwise 5 crafted logins forge a ban.
+    #[test]
+    fn test_pam_rhost_injection_resolves_genuine_ip() {
+        let config = JournalConfig::default();
+        let monitor = JournaldMonitor::new(config).unwrap();
+
+        // OpenSSH logs the username verbatim; here it is `root rhost=8.8.8.8`.
+        let line = "pam_unix(sshd:auth): authentication failure; logname= uid=0 \
+                    euid=0 tty=ssh ruser= rhost=203.0.113.9  user=root rhost=8.8.8.8";
+        let event = monitor
+            .match_line(line, "sshd")
+            .expect("genuine rhost should match");
+
+        assert_eq!(
+            event.ip.to_string(),
+            "203.0.113.9",
+            "must ban the real client, not the injected victim"
+        );
     }
 }

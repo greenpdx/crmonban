@@ -261,10 +261,34 @@ impl Config {
         Ok(Self::default())
     }
 
-    /// Save configuration to file
+    /// Save configuration to file.
+    ///
+    /// The serialized config can contain inline secrets (Cloudflare token,
+    /// Shodan/AbuseIPDB/LLM keys), so it is written atomically via a temp file
+    /// created with mode 0o600 and renamed into place — never world-readable,
+    /// and no partially-written file is ever observable. (Security audit A10.)
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        use std::io::Write;
+        let path = path.as_ref();
         let content = toml::to_string_pretty(self)?;
-        std::fs::write(&path, content)?;
+
+        let tmp = path.with_extension("toml.tmp");
+        {
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts
+                .open(&tmp)
+                .with_context(|| format!("Failed to create temp config {}", tmp.display()))?;
+            f.write_all(content.as_bytes())?;
+            f.flush()?;
+        }
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("Failed to persist config to {}", path.display()))?;
         Ok(())
     }
 
@@ -1738,6 +1762,17 @@ pub struct PacketEngineConfig {
     /// (queue while the conntrack mark is unset) and the engine's good-flow bypass.
     #[serde(default = "default_true")]
     pub queue_until_decided: bool,
+    /// Opt-in in-kernel bypass of flows judged "good". When true, a flow that
+    /// stays clean for `bypass_after_packets` is marked in conntrack so the
+    /// kernel accepts the rest of it WITHOUT inspection. This is a throughput
+    /// optimization with a real security cost: the clean-packet counter is
+    /// direction-blind and per-flow, so a keep-alive / HTTP-2 / persistent-TLS
+    /// connection can be marked "good" after a few benign packets and then carry
+    /// an exploit on the SAME connection, uninspected. Left OFF by default so the
+    /// default inline deployment inspects every packet; only enable for
+    /// latency-critical, non-multiplexed workloads. (Security audit B1.)
+    #[serde(default)]
+    pub bypass_good_flows: bool,
     /// Enable promiscuous mode
     pub promiscuous: bool,
     /// Snapshot length (max bytes per packet)
@@ -1797,6 +1832,7 @@ impl Default for PacketEngineConfig {
             interface: None,
             nfqueue_num: 100,
             queue_until_decided: true,
+            bypass_good_flows: false,
             promiscuous: true,
             snaplen: 65535,
             timeout_ms: 100,

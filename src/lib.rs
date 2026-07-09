@@ -344,6 +344,20 @@ impl Crmonban {
         source: BanSource,
         duration_secs: Option<i64>,
     ) -> Result<()> {
+        // Single infrastructure guard for EVERY ban producer (journald, DPI,
+        // TLS proxy, port scanner, IPC, D-Bus). Refuse to ban our own
+        // infrastructure / reserved ranges (RFC1918, loopback, link-local,
+        // multicast, broadcast, unspecified). Centralizing it here means no
+        // producer can bypass it, and a forged/log-injected reserved IP can
+        // never be pushed into the firewall. (Security audit A2/A16.)
+        if crate::monitor::is_internal_ip(ip) {
+            warn!(
+                "Refusing to ban internal/reserved IP {} (infrastructure guard)",
+                ip
+            );
+            return Ok(());
+        }
+
         // Check whitelist
         if self.db.is_whitelisted(&ip)? {
             warn!("IP {} is whitelisted, not banning", ip);
@@ -1588,7 +1602,12 @@ async fn start_packet_engine(
             // them in-kernel and keep inspecting undecided ones (paired with the
             // nft ct-mark queue rule). Gated to nfqueue inline mode (see
             // is_nfqueue above) so af_packet/observe stays full-inspection.
-            bypass_good_flows: config.queue_until_decided && is_nfqueue,
+            // Gated on the explicit opt-in flag (default false). The in-kernel
+            // good-flow bypass is direction-blind and lets a keep-alive/HTTP-2/
+            // persistent-TLS connection carry an exploit uninspected once marked
+            // good, so the default inline deployment now keeps inspecting every
+            // packet. (Security audit B1.)
+            bypass_good_flows: config.bypass_good_flows && config.queue_until_decided && is_nfqueue,
             // Per-packet, per-stage instrumentation toggle. Off by default (one
             // line per stage per packet is far too chatty for production); set
             // CRMONBAN_TRACE_PACKETS=1 to emit the `[trace] pkt N STAGE [gates]:

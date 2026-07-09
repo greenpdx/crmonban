@@ -149,12 +149,16 @@ impl SmbParser {
         }
 
         let dialect_count = u16::from_le_bytes([data[2], data[3]]) as usize;
-        let mut dialects = Vec::with_capacity(dialect_count);
 
+        // Validate the buffer covers the claimed dialect array BEFORE allocating,
+        // so an attacker-supplied count can't drive a speculative allocation on a
+        // short packet. (Security audit §4.)
         let dialect_offset = 36; // Fixed offset in negotiate request
         if data.len() < dialect_offset + dialect_count * 2 {
-            return Some(dialects);
+            return Some(Vec::new());
         }
+
+        let mut dialects = Vec::with_capacity(dialect_count);
 
         for i in 0..dialect_count {
             let offset = dialect_offset + i * 2;

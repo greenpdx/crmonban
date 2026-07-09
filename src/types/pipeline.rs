@@ -232,9 +232,18 @@ impl AlertAnalyzer {
         let mut has_blocking_action = false;
 
         for event in &analysis.events {
-            // Track highest severity
+            // Track highest severity across all events (drives alert visibility
+            // and the severity policy below).
             if event.severity > highest_severity {
                 highest_severity = event.severity;
+            }
+
+            // A low-confidence event may still alert, but must never drive an
+            // inline block. Skip it before it can set a blocking action —
+            // previously this check sat AFTER the action match (as the loop's
+            // last statement) and gated nothing. (Security audit B2.)
+            if event.confidence < self.config.confidence_threshold {
+                continue;
             }
 
             // Check if event's action suggests blocking
@@ -252,12 +261,6 @@ impl AlertAnalyzer {
                     has_blocking_action = true;
                 }
                 _ => {}
-            }
-
-            // Check confidence threshold
-            if event.confidence < self.config.confidence_threshold {
-                // Low confidence - don't let this event trigger blocking
-                continue;
             }
         }
 

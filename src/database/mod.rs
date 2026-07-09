@@ -68,6 +68,19 @@ impl Database {
         let conn = Connection::open(&path)
             .with_context(|| format!("Failed to open database: {}", path.as_ref().display()))?;
 
+        // The DB holds every observed IP, gathered intel, usernames scraped from
+        // logs, and the whitelist — not world-readable data. Tighten the file to
+        // 0o640 (owner rw, group r). (Security audit §4.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&path) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o640);
+                let _ = std::fs::set_permissions(&path, perms);
+            }
+        }
+
         // WAL + relaxed sync: every Attack/ban/whitelist op serializes on the single
         // connection Mutex and INSERTs synchronously. In the default rollback-journal
         // mode each insert fsyncs, so a burst of events (e.g. a scan flood) serializes
