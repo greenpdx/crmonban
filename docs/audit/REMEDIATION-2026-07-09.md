@@ -140,6 +140,20 @@ cites the finding ID, the change, and the file(s) touched. Both crates
   (reason, service, event_type, details) so they can't inject forged attributes or
   split records. `src/siem.rs`.
 
+### A4 (High) — IPC per-command authorization
+- The Unix socket now captures the peer UID via `SO_PEERCRED`; mutating actions
+  (Ban/Unban/Whitelist/UnWhitelist/RefreshIntel) require the caller to be root or the
+  daemon's own UID. Reads are unaffected, so the dashboard still works. The TCP
+  listener now refuses to start unless `require_client_cert = true` (mTLS), so a TCP
+  caller is always authenticated. `src/ipc/server.rs`, `src/lib.rs`.
+
+### A17 (Medium, partial) — Hyperscan is now opt-in
+- `hyperscan` removed from the default `nids` feature (it wraps the discontinued
+  Intel Hyperscan C lib and blocked builds without `libhs`). The signature matcher
+  falls back to the pure-Rust `regex` engine; opt back in with `--features hyperscan`
+  or the new `nids-hyperscan` feature. `Cargo.toml`. (trust-dns/dirs migration still
+  open.)
+
 ---
 
 ## Open / deferred (recommend follow-up)

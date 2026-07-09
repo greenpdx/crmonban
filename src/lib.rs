@@ -1173,7 +1173,7 @@ async fn handle_ipc_requests(
                 handle_get_status(&crmonban, &events_processed, start_time).await
             }
             IpcMessage::GetConfig => handle_get_config(&crmonban).await,
-            IpcMessage::Action(req) => handle_action(&crmonban, req).await,
+            IpcMessage::Action(req) => handle_action(&crmonban, req, request.peer_uid).await,
             _ => IpcMessage::Error(ErrorResponse {
                 request_id: None,
                 code: "INVALID_REQUEST".to_string(),
@@ -1485,10 +1485,44 @@ async fn handle_get_config(crmonban: &Arc<RwLock<Crmonban>>) -> IpcMessage {
     })
 }
 
+/// Authorize a mutating IPC action.
+///
+/// Mutating actions (Ban/Unban/Whitelist/UnWhitelist/RefreshIntel) are
+/// privileged: on the local Unix socket they require the caller to be root or
+/// the daemon's own effective UID (SO_PEERCRED); TCP callers (`peer_uid = None`)
+/// are already authenticated by mTLS because the TCP listener refuses to start
+/// without `require_client_cert`. This stops any local group member (the socket
+/// is group-readable, 0o660) from banning infrastructure or whitelisting
+/// themselves. (Security audit A4.)
+fn action_authorized(peer_uid: Option<u32>) -> bool {
+    match peer_uid {
+        // TCP client — authenticated via mTLS client certificate.
+        None => true,
+        // Local peer: allow root or a process running as the daemon's own UID.
+        Some(uid) => {
+            let self_uid = unsafe { libc::geteuid() };
+            uid == 0 || uid == self_uid
+        }
+    }
+}
+
 async fn handle_action(
     crmonban: &Arc<RwLock<Crmonban>>,
     req: ipc::ActionRequest,
+    peer_uid: Option<u32>,
 ) -> IpcMessage {
+    if !action_authorized(peer_uid) {
+        warn!(
+            "Rejected unauthorized IPC action from uid {:?} (mutating actions require root or the daemon UID)",
+            peer_uid
+        );
+        return IpcMessage::ActionResponse(ActionResponse {
+            request_id: req.request_id,
+            success: false,
+            message: "Not authorized: mutating actions require root or mTLS".to_string(),
+        });
+    }
+
     let result = match req.action {
         ActionType::Ban {
             ip,
