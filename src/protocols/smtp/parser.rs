@@ -344,8 +344,17 @@ impl SmtpParser {
             return None;
         }
 
-        // Accumulate data
-        self.data_buffer.extend_from_slice(payload);
+        // Accumulate data, but bound the per-transaction buffer. A client that
+        // reaches DATA and never sends a lone "." line would otherwise grow this
+        // buffer to the total bytes sent (memory exhaustion). Once the cap is
+        // reached we stop appending; the message is still parsed (truncated) on
+        // the end marker. (Security audit A15.)
+        const MAX_DATA_BUFFER_BYTES: usize = 32 * 1024 * 1024; // 32 MiB
+        if self.data_buffer.len() < MAX_DATA_BUFFER_BYTES {
+            let remaining = MAX_DATA_BUFFER_BYTES - self.data_buffer.len();
+            let take = remaining.min(payload.len());
+            self.data_buffer.extend_from_slice(&payload[..take]);
+        }
         None
     }
 

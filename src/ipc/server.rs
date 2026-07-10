@@ -45,6 +45,10 @@ pub struct IpcRequest {
     pub message: IpcMessage,
     /// Channel to send response back
     pub response_tx: oneshot::Sender<IpcMessage>,
+    /// UID of the connecting peer for a local Unix-socket client (from
+    /// SO_PEERCRED). `None` for TCP clients, which are instead authenticated by
+    /// mTLS. Used to authorize mutating actions. (Security audit A4.)
+    pub peer_uid: Option<u32>,
 }
 
 /// TLS configuration for remote connections
@@ -218,8 +222,21 @@ impl IpcServer {
             std::fs::set_permissions(&self.socket_path, perms)?;
         }
 
-        // Optionally start TCP listener with TLS
+        // Optionally start TCP listener with TLS. Refuse to expose the control
+        // channel over TCP unless mutual-TLS client-cert verification is on —
+        // otherwise a remote client would reach the mutating actions with no
+        // authentication at all (peer_uid is None for TCP, so authz relies
+        // entirely on the client cert). (Security audit A4.)
         let tcp_listener = if let Some(addr) = self.tcp_addr {
+            match &self.tls_config {
+                Some(cfg) if cfg.require_client_cert => {}
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Refusing to start IPC TCP listener at {}: require_client_cert must be true (mTLS) to expose the control channel over TCP",
+                        addr
+                    ));
+                }
+            }
             let listener = TcpListener::bind(addr).await?;
             info!("IPC server listening on TCP: {}", addr);
             Some(listener)
@@ -373,7 +390,10 @@ async fn handle_unix_client(
     start_time: Instant,
     request_tx: mpsc::Sender<IpcRequest>,
 ) -> anyhow::Result<()> {
-    handle_client_generic(id, stream, rx, clients, start_time, request_tx, false).await
+    // Capture the peer's UID via SO_PEERCRED so the daemon can authorize
+    // mutating actions on the local socket. (Security audit A4.)
+    let peer_uid = stream.peer_cred().ok().map(|c| c.uid());
+    handle_client_generic(id, stream, rx, clients, start_time, request_tx, false, peer_uid).await
 }
 
 /// Handle a TCP+TLS client
@@ -385,7 +405,9 @@ async fn handle_tcp_client(
     start_time: Instant,
     request_tx: mpsc::Sender<IpcRequest>,
 ) -> anyhow::Result<()> {
-    handle_client_generic(id, stream, rx, clients, start_time, request_tx, true).await
+    // TCP clients are authenticated by mTLS (the listener refuses to start
+    // without require_client_cert = true), so no local UID applies.
+    handle_client_generic(id, stream, rx, clients, start_time, request_tx, true, None).await
 }
 
 /// Generic client handler for any stream type
@@ -397,6 +419,7 @@ async fn handle_client_generic<S>(
     start_time: Instant,
     request_tx: mpsc::Sender<IpcRequest>,
     is_remote: bool,
+    peer_uid: Option<u32>,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -472,6 +495,7 @@ where
                         let request = IpcRequest {
                             message: msg,
                             response_tx,
+                            peer_uid,
                         };
 
                         if request_tx.send(request).await.is_ok() {

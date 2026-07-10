@@ -482,25 +482,30 @@ impl SiemExporter {
                 let attrs = format!(
                     "src={}\treason={}\tsource={}\tduration={}\tzone={}\teventId={}",
                     ip,
-                    reason,
-                    source,
+                    self.leef_escape(reason),
+                    self.leef_escape(source),
                     duration_secs.unwrap_or(0),
-                    zone.as_deref().unwrap_or("none"),
+                    self.leef_escape(zone.as_deref().unwrap_or("none")),
                     common.event_id
                 );
                 ("BanAdded", attrs)
             }
             SiemEvent::BanRemoved { ip, reason, common } => {
-                let attrs = format!("src={}\treason={}\teventId={}", ip, reason, common.event_id);
+                let attrs = format!(
+                    "src={}\treason={}\teventId={}",
+                    ip,
+                    self.leef_escape(reason),
+                    common.event_id
+                );
                 ("BanRemoved", attrs)
             }
             SiemEvent::AttackDetected { ip, service, event_type, details, common } => {
                 let attrs = format!(
                     "src={}\tservice={}\tattackType={}\tdetails={}\teventId={}",
                     ip,
-                    service,
-                    event_type,
-                    details.as_deref().unwrap_or(""),
+                    self.leef_escape(service),
+                    self.leef_escape(event_type),
+                    self.leef_escape(details.as_deref().unwrap_or("")),
                     common.event_id
                 );
                 ("AttackDetected", attrs)
@@ -557,6 +562,17 @@ impl SiemExporter {
     fn cef_escape(&self, s: &str) -> String {
         s.replace('\\', "\\\\")
             .replace('=', "\\=")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    }
+
+    /// Escape special characters for LEEF attribute values. LEEF 2.0 delimits
+    /// attributes with tabs, so an unescaped tab/newline in an attacker-influenced
+    /// field (reason, service, event_type, details) could inject forged
+    /// attributes or split the record. (Security audit §4.)
+    fn leef_escape(&self, s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('\t', "\\t")
             .replace('\n', "\\n")
             .replace('\r', "\\r")
     }

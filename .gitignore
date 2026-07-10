@@ -22,12 +22,14 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
-Cargo.lock
+
+# NOTE: Cargo.lock is intentionally committed for this root binary crate so
+# builds are reproducible and a malicious/yanked transitive release cannot be
+# silently pulled in. (Security audit A7.) Do NOT re-add Cargo.lock here.
 
 /target/
 
 node_modules
-*.lock
 package-lock.json
 
 # Third-party rule sets (large; install at runtime, not committed)

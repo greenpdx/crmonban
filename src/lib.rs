@@ -344,6 +344,20 @@ impl Crmonban {
         source: BanSource,
         duration_secs: Option<i64>,
     ) -> Result<()> {
+        // Single infrastructure guard for EVERY ban producer (journald, DPI,
+        // TLS proxy, port scanner, IPC, D-Bus). Refuse to ban our own
+        // infrastructure / reserved ranges (RFC1918, loopback, link-local,
+        // multicast, broadcast, unspecified). Centralizing it here means no
+        // producer can bypass it, and a forged/log-injected reserved IP can
+        // never be pushed into the firewall. (Security audit A2/A16.)
+        if crate::monitor::is_internal_ip(ip) {
+            warn!(
+                "Refusing to ban internal/reserved IP {} (infrastructure guard)",
+                ip
+            );
+            return Ok(());
+        }
+
         // Check whitelist
         if self.db.is_whitelisted(&ip)? {
             warn!("IP {} is whitelisted, not banning", ip);
@@ -1159,7 +1173,7 @@ async fn handle_ipc_requests(
                 handle_get_status(&crmonban, &events_processed, start_time).await
             }
             IpcMessage::GetConfig => handle_get_config(&crmonban).await,
-            IpcMessage::Action(req) => handle_action(&crmonban, req).await,
+            IpcMessage::Action(req) => handle_action(&crmonban, req, request.peer_uid).await,
             _ => IpcMessage::Error(ErrorResponse {
                 request_id: None,
                 code: "INVALID_REQUEST".to_string(),
@@ -1471,10 +1485,44 @@ async fn handle_get_config(crmonban: &Arc<RwLock<Crmonban>>) -> IpcMessage {
     })
 }
 
+/// Authorize a mutating IPC action.
+///
+/// Mutating actions (Ban/Unban/Whitelist/UnWhitelist/RefreshIntel) are
+/// privileged: on the local Unix socket they require the caller to be root or
+/// the daemon's own effective UID (SO_PEERCRED); TCP callers (`peer_uid = None`)
+/// are already authenticated by mTLS because the TCP listener refuses to start
+/// without `require_client_cert`. This stops any local group member (the socket
+/// is group-readable, 0o660) from banning infrastructure or whitelisting
+/// themselves. (Security audit A4.)
+fn action_authorized(peer_uid: Option<u32>) -> bool {
+    match peer_uid {
+        // TCP client — authenticated via mTLS client certificate.
+        None => true,
+        // Local peer: allow root or a process running as the daemon's own UID.
+        Some(uid) => {
+            let self_uid = unsafe { libc::geteuid() };
+            uid == 0 || uid == self_uid
+        }
+    }
+}
+
 async fn handle_action(
     crmonban: &Arc<RwLock<Crmonban>>,
     req: ipc::ActionRequest,
+    peer_uid: Option<u32>,
 ) -> IpcMessage {
+    if !action_authorized(peer_uid) {
+        warn!(
+            "Rejected unauthorized IPC action from uid {:?} (mutating actions require root or the daemon UID)",
+            peer_uid
+        );
+        return IpcMessage::ActionResponse(ActionResponse {
+            request_id: req.request_id,
+            success: false,
+            message: "Not authorized: mutating actions require root or mTLS".to_string(),
+        });
+    }
+
     let result = match req.action {
         ActionType::Ban {
             ip,
@@ -1588,7 +1636,12 @@ async fn start_packet_engine(
             // them in-kernel and keep inspecting undecided ones (paired with the
             // nft ct-mark queue rule). Gated to nfqueue inline mode (see
             // is_nfqueue above) so af_packet/observe stays full-inspection.
-            bypass_good_flows: config.queue_until_decided && is_nfqueue,
+            // Gated on the explicit opt-in flag (default false). The in-kernel
+            // good-flow bypass is direction-blind and lets a keep-alive/HTTP-2/
+            // persistent-TLS connection carry an exploit uninspected once marked
+            // good, so the default inline deployment now keeps inspecting every
+            // packet. (Security audit B1.)
+            bypass_good_flows: config.bypass_good_flows && config.queue_until_decided && is_nfqueue,
             // Per-packet, per-stage instrumentation toggle. Off by default (one
             // line per stage per packet is far too chatty for production); set
             // CRMONBAN_TRACE_PACKETS=1 to emit the `[trace] pkt N STAGE [gates]:

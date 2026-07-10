@@ -139,7 +139,11 @@ pub fn parse_radiotap(data: &[u8]) -> Option<(RadiotapHeader, RadiotapInfo, usiz
     let length = u16::from_le_bytes([data[2], data[3]]);
     let present_flags = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
 
-    if data.len() < length as usize {
+    // `length` is the total radiotap header size and must cover at least the
+    // 8-byte fixed header. A crafted frame with length < 8 would make the
+    // `&data[8..length]` slice below have start > end and panic; length beyond
+    // the captured bytes would read out of bounds. Reject both.
+    if (length as usize) < 8 || data.len() < length as usize {
         return None;
     }
 

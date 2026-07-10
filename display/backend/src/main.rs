@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{routing::get, Router};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::compression::CompressionLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -26,10 +26,21 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState::new().await?);
 
+    // Restrict CORS to an explicit allowlist rather than `Any`. The dashboard
+    // exposes ban/watch state and a mutating reconnect endpoint, so a wildcard
+    // origin let any web page a browser visited read it cross-origin. Defaults
+    // to the local dev origins; override with CRMONBAN_CORS_ORIGINS (comma-
+    // separated). (Security audit A8.)
+    let cors_origins = std::env::var("CRMONBAN_CORS_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000,http://127.0.0.1:3000".into());
+    let origins: Vec<axum::http::HeaderValue> = cors_origins
+        .split(',')
+        .filter_map(|o| o.trim().parse().ok())
+        .collect();
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(origins)
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+        .allow_headers([axum::http::header::CONTENT_TYPE]);
 
     let app = Router::new()
         // Overview
@@ -93,7 +104,14 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3001);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    // Bind loopback by default — the dashboard has no auth and leaks ban/watch
+    // state. Set CRMONBAN_BIND to expose it (behind a reverse proxy with auth).
+    // (Security audit A8.)
+    let bind_ip: std::net::IpAddr = std::env::var("CRMONBAN_BIND")
+        .ok()
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(std::net::IpAddr::from([127, 0, 0, 1]));
+    let addr = SocketAddr::new(bind_ip, port);
     tracing::info!("Dashboard API listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -165,14 +165,27 @@ pub enum MonitorEvent {
 /// True for internal/non-routable sources that should never be banned by a log
 /// monitor: RFC1918 private ranges (incl. docker bridges like 172.18.0.1), loopback,
 /// link-local, unspecified, and IPv6 ULA/link-local. They are our own infrastructure.
-fn is_internal_ip(ip: IpAddr) -> bool {
+/// True for RFC1918 / loopback / link-local / unspecified addresses — our own
+/// infrastructure, never an external attacker. Also treats multicast and
+/// broadcast as internal so a forged/parsed reserved address can never be
+/// pushed into the firewall. Used as the single ban-path guard in
+/// `Daemon::ban` so every producer (journald, DPI, TLS proxy, port scanner)
+/// inherits it (security audit A2/A16).
+pub fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
+                || v6.is_multicast()
                 || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
                 || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
         }

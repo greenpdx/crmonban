@@ -312,7 +312,11 @@ impl SshdLogParser {
             },
             SshdPattern {
                 name: "pam_auth_failure",
-                regex: Regex::new(r"pam_unix\(sshd:auth\): authentication failure.*ruser=(\S*) .*rhost=(\d+\.\d+\.\d+\.\d+)").unwrap(),
+                // Lazy match + bounded IP token anchored to a word boundary and
+                // trailing whitespace/EOL grabs the genuine first `rhost=`, not
+                // an attacker-injected `rhost=<victim>` in the logged username
+                // (security audit A1).
+                regex: Regex::new(r"pam_unix\(sshd:auth\): authentication failure.*?\bruser=(\S*).*?\brhost=(\d{1,3}(?:\.\d{1,3}){3})(?:\s|$)").unwrap(),
                 event_type_fn: |caps| LogEventType::PamAuthFailure {
                     user: caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_default(),
                 },

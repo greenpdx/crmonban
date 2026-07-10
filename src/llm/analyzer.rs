@@ -126,9 +126,17 @@ impl LlmAnalyzer {
             _ => {}
         }
 
-        // Create fallback provider if configured
+        // Create fallback provider if configured.
+        //
+        // Fail closed under privacy.local_only (the default): never even
+        // CONSTRUCT a cloud fallback, so a transient local-provider outage can
+        // never ship security telemetry to OpenAI/Anthropic. Previously the
+        // fallback was built and used regardless of local_only. (Security audit
+        // A12.)
         #[cfg(feature = "llm-cloud")]
-        let fallback_provider = {
+        let fallback_provider = if config.privacy.local_only {
+            None
+        } else {
             use super::config::ProviderType;
             // Try OpenAI first, then Anthropic
             let fallback_type = if matches!(config.provider, ProviderType::Ollama | ProviderType::LlamaCpp) {

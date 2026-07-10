@@ -997,6 +997,17 @@ impl WorkerThread {
                             _ => Severity::Low,
                         };
 
+                        // A matched signature is a condemnation, not just a note.
+                        // Give Critical/High matches an authoritative Drop action
+                        // so the alert analyzer actually enforces the per-severity
+                        // block policy (Critical → block on first sight) instead
+                        // of accepting the packet because the event carried the
+                        // default `Alert` action. (Security audit B2.)
+                        let action = match severity {
+                            Severity::Critical | Severity::High => DetectionAction::Drop,
+                            _ => DetectionAction::Alert,
+                        };
+
                         analysis.add_event(
                             DetectionEvent::new(
                                 DetectionType::SignatureMatch,
@@ -1006,6 +1017,7 @@ impl WorkerThread {
                                 format!("[{}:{}] {}", m.sid, m.priority, m.msg),
                             )
                             .with_detector("signature")
+                            .with_action(action)
                             .with_ports(analysis.packet.src_port(), analysis.packet.dst_port())
                         );
                     }
@@ -1165,6 +1177,19 @@ impl WorkerThread {
                             Some(AnomalyCategory::Unknown) | None => "unknown anomaly",
                         };
 
+                        // Let a high-confidence Critical anomaly enforce a Drop
+                        // (previously ML events carried the default Alert action
+                        // and never blocked — audit B2). Lower-severity anomalies
+                        // stay advisory: ML is probabilistic and blocking on it is
+                        // FP-prone, so only the strongest signal is authoritative.
+                        // The real confidence rides on the event so the alert
+                        // analyzer's confidence gate can still veto a weak signal.
+                        let action = if severity == Severity::Critical {
+                            DetectionAction::Drop
+                        } else {
+                            DetectionAction::Alert
+                        };
+
                         analysis.add_event(
                             DetectionEvent::new(
                                 DetectionType::AnomalyDetection,
@@ -1175,6 +1200,8 @@ impl WorkerThread {
                                     category_str, anomaly_score.score, anomaly_score.confidence),
                             )
                             .with_detector("ml_engine")
+                            .with_action(action)
+                            .with_confidence(anomaly_score.confidence)
                             .with_ports(analysis.packet.src_port(), analysis.packet.dst_port())
                         );
                     }
@@ -1328,9 +1355,31 @@ impl WorkerThread {
         // Get all IP IOCs from the intel engine cache
         let ip_iocs = intel_engine.get_ip_iocs();
 
+        // Cap how many entries a single load can push into the kernel filter, so
+        // a poisoned/oversized feed can't balloon the ruleset. (Security audit A11.)
+        const MAX_THREAT_INTEL_ENTRIES: usize = 1_000_000;
+        let mut loaded = 0usize;
+        let mut skipped_reserved = 0usize;
+
         for ioc in ip_iocs {
+            if loaded >= MAX_THREAT_INTEL_ENTRIES {
+                tracing::warn!(
+                    "Threat-intel load hit the {} entry cap; remaining IOCs ignored",
+                    MAX_THREAT_INTEL_ENTRIES
+                );
+                break;
+            }
             if let Ok(ip) = ioc.value.parse::<std::net::IpAddr>() {
+                // Never blocklist our own infrastructure / reserved ranges from a
+                // downloaded feed — a poisoned or MITM'd feed listing the gateway
+                // or a resolver would otherwise blackhole the host. (Audit A11.)
+                if crate::monitor::is_internal_ip(ip) {
+                    skipped_reserved += 1;
+                    continue;
+                }
+
                 let reason = format!("threat_intel:{}:{}", ioc.source, ioc.category.as_str());
+                loaded += 1;
 
                 // Block high-severity threats, watch lower severity
                 match ioc.category {
@@ -1353,7 +1402,10 @@ impl WorkerThread {
             }
         }
 
-        tracing::info!("Loaded threat intel IOCs into IP filter");
+        tracing::info!(
+            "Loaded {} threat-intel IOCs into IP filter ({} reserved/internal skipped)",
+            loaded, skipped_reserved
+        );
     }
 
     /// Load GeoIP database for country-based filtering

@@ -716,7 +716,10 @@ impl Firewall {
         let elem_expr = if let Some(timeout) = timeout_secs {
             Expression::Named(NamedExpression::Elem(Elem {
                 val: Box::new(Expression::String(Cow::Owned(ip_str.clone()))),
-                timeout: Some(timeout as u32),
+                // Saturate instead of wrapping: `timeout as u32` on a value
+                // above u32::MAX would truncate to a small (or zero) timeout,
+                // silently expiring a "permanent"/long ban early. (Audit §4.)
+                timeout: Some(u32::try_from(timeout).unwrap_or(u32::MAX)),
                 expires: None,
                 comment: None,
                 counter: None,
